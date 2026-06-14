@@ -1,0 +1,21 @@
+{
+  "auth": {
+    "users": {
+      "admin": { "password": "admin12345" }
+    }
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8010,
+    "ssl_enabled": false,
+    "ssl_certfile": "../certs/server.crt",
+    "ssl_keyfile": "../certs/server.key"
+  },
+  "kafka": {
+    "bootstrap_servers": "127.0.0.1:9092",
+    "live_trading_updates_topic": "live-trading-updates",
+    "group_id": "admin-strategy-monitor",
+    "auto_offset_reset": "latest",
+    "poll_timeout_sec": 1.0
+  }
+}

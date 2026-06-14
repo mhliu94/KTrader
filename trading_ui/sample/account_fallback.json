@@ -1,0 +1,83 @@
+{
+  "asof": "2026-02-10T00:00:00Z",
+  "accounts": [
+    {
+      "account_id": "ACC-FUTU",
+      "ts": "2026-02-10T00:00:00Z",
+      "cash": 50000.0,
+      "positions": [
+        {
+          "symbol": "AAPL",
+          "qty": 1000,
+          "avg_price": 0.0
+        },
+        {
+          "symbol": "MSFT",
+          "qty": 500,
+          "avg_price": 0.0
+        },
+        {
+          "symbol": "GOOG",
+          "qty": 500,
+          "avg_price": 0.0
+        }
+      ],
+      "cash_by_currency": {
+        "USD": 50000.0,
+        "HKD": 0.0
+      }
+    },
+    {
+      "account_id": "ACC-TIGER",
+      "ts": "2026-02-10T00:00:00Z",
+      "cash": 100000.0,
+      "positions": [
+        {
+          "symbol": "AAPL",
+          "qty": 1000,
+          "avg_price": 0.0
+        },
+        {
+          "symbol": "MSFT",
+          "qty": 500,
+          "avg_price": 0.0
+        },
+        {
+          "symbol": "GOOG",
+          "qty": 500,
+          "avg_price": 0.0
+        }
+      ],
+      "cash_by_currency": {
+        "USD": 100000.0,
+        "HKD": 0.0
+      }
+    },
+    {
+      "account_id": "ACC-USMART",
+      "ts": "2026-02-10T00:00:00Z",
+      "cash": 250000.0,
+      "positions": [
+        {
+          "symbol": "AAPL",
+          "qty": 1000,
+          "avg_price": 0.0
+        },
+        {
+          "symbol": "MSFT",
+          "qty": 500,
+          "avg_price": 0.0
+        },
+        {
+          "symbol": "GOOG",
+          "qty": 500,
+          "avg_price": 0.0
+        }
+      ],
+      "cash_by_currency": {
+        "USD": 250000.0,
+        "HKD": 0.0
+      }
+    }
+  ]
+}

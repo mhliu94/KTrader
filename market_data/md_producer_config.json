@@ -1,0 +1,15 @@
+{
+  "kafka_server_ip": "45.32.121.19",
+  "kafka_port": 9092,
+  "kafka_topic": "price-books",
+  "symbols": [
+    "AEHL",
+    "BIYA",
+    "BABA",
+    "MSFT",
+    "AAPL",
+    "GOOG",
+    "NVDA",
+    "TSLA"
+  ]
+}

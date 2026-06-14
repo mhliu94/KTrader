@@ -1,0 +1,45 @@
+{
+  "accounts": [
+    { "id": "ACC-FUTU", "num_id": 1, "broker_id": "FT-998877", "broker": "FUTU" },
+    { "id": "ACC-TIGER-JINYUAN", "num_id": 2, "broker_id": "TG-JINYUAN", "broker": "Tiger" },
+    { "id": "ACC-TIGER-VICTORIA", "num_id": 3, "broker_id": "TG-VICTORIA", "broker": "Tiger" },
+    { "id": "ACC-USMART", "num_id": 4, "broker_id": "USM-13579", "broker": "uSMART" }
+  ],
+  "symbols": ["AAPL", "MSFT", "GOOG", "TSLA", "NVDA", "AEHL", "BIYA"],
+  "auth": {
+    "users": {
+      "admin": { "password": "admin12345" },
+      "trader": { "password": "trader12345" },
+      "lmh": { "password": "lmh9876" }
+    }
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "ssl_enabled": false,
+    "ssl_certfile": "./certs/server.crt",
+    "ssl_keyfile": "./certs/server.key"
+  },
+  "kafka": {
+    "bootstrap_servers": "127.0.0.1:9092",
+    "market_data_bootstrap_servers": "45.32.121.19:9092",
+    "account_details_topic": "account-details",
+    "trading_commands_topic": "trading-commands",
+    "market_data_topic": "price-books",
+    "group_id": "account-dashboard",
+    "auto_offset_reset": "latest",
+    "poll_timeout_sec": 1.0,
+    "producer": {
+      "acks": "all",
+      "enable_idempotence": true,
+      "linger_ms": 5
+    }
+  },
+  "market_data": {
+    "historical_prices_csv": "../../market_data/historical_prices.csv",
+    "market_insights_max_levels": 20
+  },
+  "fallback": {
+    "file": "/home/ubuntu/test-binaries/trading_ui/sample/account_fallback.json"
+  }
+}

@@ -1,0 +1,59 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments and local tooling
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+.python-version
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Logs and runtime output
+*.log
+nohup.out
+*.pid
+*.sock
+
+# Local application state and generated data
+*_state.json
+market_data/historical_prices.csv
+
+# Local configuration
+**/config.local.json
+*.local.json
+
+# Secrets, certificates, and private keys
+certs/
+*.pem
+*.pem.*
+*.key
+*.crt
+*.p12
+*.pfx
+*.bak
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

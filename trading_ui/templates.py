@@ -1486,8 +1486,6 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
       <div class="acct">{html_escape(t(lang,'mi_title'))}</div>
       <div class="ts" id="mi-asof">{html_escape(t(lang,'mi_asof'))}: —</div>
     </div>
-    <div class="sub" style="margin-bottom: 16px;">{html_escape(t(lang,'mi_note_live'))}</div>
-
     <div class="toolbar">
       <div class="toolbar-field">
         <label for="mi-symbol">{html_escape(t(lang,'mi_symbol'))}</label>
@@ -1555,6 +1553,8 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
     const bidCountEl = document.getElementById("mi-bid-count");
     const askCountEl = document.getElementById("mi-ask-count");
     const asofLabel = {t(lang, "mi_asof")!r};
+    let lastBookKey = "";
+    let pollInFlight = false;
 
     function fmtNum(x, digits) {{
       if (x === null || x === undefined) return "—";
@@ -1598,16 +1598,22 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
     }}
 
     async function poll() {{
+      if (pollInFlight) return;
       const symbol = symbolEl ? symbolEl.value : "";
       const depth = depthEl ? depthEl.value : {default_depth!r};
       if (!symbol) return;
 
+      pollInFlight = true;
       try {{
         const r = await fetch("/api/market-insights?symbol=" + encodeURIComponent(symbol) + "&depth=" + encodeURIComponent(depth), {{ cache: "no-store" }});
         if (!r.ok) return;
         const book = await r.json();
         const bids = Array.isArray(book.bids) ? book.bids : [];
         const asks = Array.isArray(book.asks) ? book.asks : [];
+        const bookKey = JSON.stringify([symbol, depth, book.asof_epoch || null, book.error || null, bids, asks]);
+        if (bookKey === lastBookKey) return;
+        lastBookKey = bookKey;
+
         const empty = !!book.error || (!bids.length && !asks.length);
 
         renderSide(bidsBody, bids);
@@ -1618,13 +1624,15 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
         if (emptyEl) emptyEl.style.display = empty ? "block" : "none";
       }} catch (e) {{
         // ignore transient errors
+      }} finally {{
+        pollInFlight = false;
       }}
     }}
 
     if (symbolEl) symbolEl.addEventListener("change", poll);
     if (depthEl) depthEl.addEventListener("change", poll);
     poll();
-    setInterval(poll, 5000);
+    setInterval(poll, 500);
   }})();
   </script>
 """

@@ -27,6 +27,19 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOGGER = logging.getLogger("tiger-trading-server")
 TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS = 60
+TRADING_MEDIA = {"EMULATOR", "WINDOWS", "WEB", "API"}
+
+
+@dataclass(frozen=True)
+class TradingAccountConfig:
+    string_id: str
+    numeric_id: int
+    broker: str
+    trading_medium: str
+    broker_id: str = ""
+    ip_address: Optional[str] = None
+    machine_alias: Optional[str] = None
+    tiger_account: str = ""
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -39,6 +52,22 @@ def env_bool(name: str, default: bool = False) -> bool:
 def env_csv(name: str, default: str = "") -> List[str]:
     raw = os.getenv(name, default)
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def env_int(name: str, default: int, minimum: Optional[int] = None) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            LOGGER.warning("Invalid integer env %s=%r; using default %s", name, raw, default)
+            value = default
+    if minimum is not None and value < minimum:
+        LOGGER.warning("Env %s=%s is below minimum %s; using %s", name, value, minimum, minimum)
+        value = minimum
+    return value
 
 
 def normalize_tiger_segment(value: str) -> str:
@@ -98,6 +127,188 @@ def parse_account_num_map(raw: str) -> Dict[str, int]:
             LOGGER.warning("Ignoring invalid Tiger UI account numeric ID mapping: %s", item)
     return mapping
 
+
+def load_json_file(path: str) -> Any:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _resolve_config_path(path: str, base_dir: Optional[str] = None) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return raw
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    return os.path.normpath(os.path.join(base_dir or os.getcwd(), raw))
+
+
+def _repo_root() -> str:
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
+
+def _default_ui_config_path() -> str:
+    for relative_path in (
+        os.path.join("trading_ui", "sample", "config.local.json"),
+        os.path.join("trading_ui", "sample", "config.json"),
+    ):
+        candidate = os.path.join(_repo_root(), relative_path)
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _account_field(account: Dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in account:
+            return account.get(name)
+    return None
+
+
+def _required_account_string(account: Dict[str, Any], names: Tuple[str, ...], label: str) -> str:
+    value = _account_field(account, *names)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Account entry missing required string field '%s'." % label)
+    return value.strip()
+
+
+def _optional_account_string(account: Dict[str, Any], names: Tuple[str, ...], label: str) -> Optional[str]:
+    value = _account_field(account, *names)
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Account field '%s' must be a string when provided." % label)
+    value = value.strip()
+    return value or None
+
+
+def _parse_trading_account_entries(
+    accounts: Any,
+    *,
+    source: str,
+    require_static_fields: bool,
+) -> List[TradingAccountConfig]:
+    if not isinstance(accounts, list) or not accounts:
+        raise ValueError("Trading accounts config must contain a non-empty accounts list: %s" % source)
+
+    parsed: List[TradingAccountConfig] = []
+    seen_num_ids: set[int] = set()
+    seen_string_ids: set[str] = set()
+    for idx, account in enumerate(accounts, start=1):
+        if not isinstance(account, dict):
+            raise ValueError("Account entry #%d must be an object in %s." % (idx, source))
+
+        raw_string_id = _account_field(account, "string_id", "id", "account_id")
+        if not isinstance(raw_string_id, str) or not raw_string_id.strip():
+            raise ValueError("Account entry #%d missing required string_id in %s." % (idx, source))
+        string_id = raw_string_id.strip()
+        if string_id in seen_string_ids:
+            raise ValueError("Duplicate string_id in accounts config: %s" % string_id)
+        seen_string_ids.add(string_id)
+
+        raw_num_id = _account_field(account, "numeric_id", "num_id", "account_num_id")
+        try:
+            numeric_id = int(raw_num_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid numeric_id for account '%s': %r" % (string_id, raw_num_id))
+        if numeric_id < 1:
+            raise ValueError("numeric_id must be positive for account '%s': %s" % (string_id, numeric_id))
+        if numeric_id in seen_num_ids:
+            raise ValueError("Duplicate numeric_id in accounts config: %s" % numeric_id)
+        seen_num_ids.add(numeric_id)
+
+        broker = _required_account_string(account, ("broker",), "broker")
+        raw_medium = _account_field(account, "trading_medium", "medium")
+        if raw_medium in (None, "") and not require_static_fields:
+            raw_medium = "API"
+        if not isinstance(raw_medium, str) or not raw_medium.strip():
+            raise ValueError("Account '%s' missing required trading_medium." % string_id)
+        trading_medium = raw_medium.strip().upper()
+        if trading_medium not in TRADING_MEDIA:
+            allowed = ", ".join(sorted(TRADING_MEDIA))
+            raise ValueError(
+                "Invalid trading_medium for account '%s': %r. Allowed: %s"
+                % (string_id, raw_medium, allowed)
+            )
+
+        parsed.append(
+            TradingAccountConfig(
+                string_id=string_id,
+                numeric_id=numeric_id,
+                broker=broker,
+                trading_medium=trading_medium,
+                broker_id=str(account.get("broker_id", "") or "").strip(),
+                ip_address=_optional_account_string(account, ("ip_address", "ip"), "ip_address"),
+                machine_alias=_optional_account_string(account, ("machine_alias",), "machine_alias"),
+                tiger_account=_optional_account_string(
+                    account,
+                    ("tiger_account", "tiger_account_id", "real_account"),
+                    "tiger_account",
+                )
+                or "",
+            )
+        )
+    return parsed
+
+
+def _load_trading_accounts_file(path: str, *, require_static_fields: bool = True) -> List[TradingAccountConfig]:
+    data = load_json_file(path)
+    accounts = data.get("accounts") if isinstance(data, dict) else data
+    return _parse_trading_account_entries(
+        accounts,
+        source=path,
+        require_static_fields=require_static_fields,
+    )
+
+
+def _load_trading_accounts_from_ui_config(config_path: str, *, explicit: bool) -> List[TradingAccountConfig]:
+    try:
+        cfg = load_json_file(config_path)
+    except FileNotFoundError:
+        if explicit:
+            raise
+        return []
+    if not isinstance(cfg, dict):
+        raise ValueError("UI config must be a JSON object: %s" % config_path)
+
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    accounts_file = str(cfg.get("accounts_file") or cfg.get("trading_accounts_file") or "").strip()
+    if accounts_file:
+        return _load_trading_accounts_file(
+            _resolve_config_path(accounts_file, config_dir),
+            require_static_fields=True,
+        )
+
+    accounts = cfg.get("accounts")
+    if isinstance(accounts, list) and accounts:
+        return _parse_trading_account_entries(
+            accounts,
+            source=config_path,
+            require_static_fields=False,
+        )
+    return []
+
+
+def load_trading_account_configs() -> List[TradingAccountConfig]:
+    direct_path = (
+        os.getenv("TIGER_TRADING_ACCOUNTS_CONFIG", "").strip()
+        or os.getenv("TRADING_ACCOUNTS_CONFIG", "").strip()
+    )
+    if direct_path:
+        return _load_trading_accounts_file(_resolve_config_path(direct_path), require_static_fields=True)
+
+    ui_config_path = (
+        os.getenv("ACCOUNT_DASHBOARD_CONFIG", "").strip()
+        or os.getenv("TRADING_UI_CONFIG", "").strip()
+    )
+    if ui_config_path:
+        return _load_trading_accounts_from_ui_config(_resolve_config_path(ui_config_path), explicit=True)
+
+    default_config = _default_ui_config_path()
+    if default_config:
+        return _load_trading_accounts_from_ui_config(default_config, explicit=False)
+    return []
+
+
 def parse_iso_datetime(value: str) -> datetime:
     raw = (value or "").strip()
     if not raw:
@@ -155,6 +366,60 @@ def pick_first_attr(obj: Any, names: Tuple[str, ...], default: Any = None) -> An
     return default
 
 
+def normalize_symbol_for_compare(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    if "/" in raw:
+        raw = raw.split("/", 1)[0]
+    for prefix in ("US.", "HK.", "CN.", "SH.", "SZ.", "SG.", "AU."):
+        if raw.startswith(prefix):
+            return raw[len(prefix):]
+    return raw
+
+
+def extract_order_symbol(order: Any) -> str:
+    symbol = pick_first_attr(order, ("symbol", "stock_symbol", "ticker", "code", "sec_symbol"), None)
+    if symbol is None:
+        contract = pick_first_attr(order, ("contract",), None)
+        if contract is not None:
+            symbol = pick_first_attr(
+                contract,
+                ("symbol", "identifier", "origin_symbol", "local_symbol", "stock_symbol", "ticker", "code", "sec_symbol"),
+                None,
+            )
+    if symbol is None:
+        legs = pick_first_attr(order, ("contract_legs", "legs"), None) or []
+        first_leg = first_item(legs)
+        if first_leg is not None:
+            symbol = pick_first_attr(first_leg, ("symbol", "stock_symbol", "ticker", "code", "sec_symbol"), None)
+    return normalize_symbol_for_compare(symbol)
+
+
+def order_symbol_matches(order_symbol: str, target_symbol: str) -> bool:
+    return normalize_symbol_for_compare(order_symbol) == normalize_symbol_for_compare(target_symbol)
+
+
+def positive_int_or_none(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def extract_order_cancel_ref(order: Any) -> Tuple[Optional[str], Optional[int]]:
+    global_id = positive_int_or_none(pick_first_attr(order, ("id",), None))
+    if global_id is not None:
+        return "id", global_id
+    order_id = positive_int_or_none(pick_first_attr(order, ("order_id",), None))
+    if order_id is not None:
+        return "order_id", order_id
+    return None, None
+
+
 def as_float(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -180,12 +445,37 @@ class TigerBroker:
         self.dry_run = env_bool("TIGER_DRY_RUN", True)
         self.currency = os.getenv("TIGER_CURRENCY", "USD")
         self.cash_currencies = env_csv("TIGER_CASH_CURRENCIES", "USD,HKD")
+        self.cancel_order_fetch_limit = env_int("TIGER_CANCEL_ORDER_FETCH_LIMIT", 100, minimum=1)
         self.forex_segment = normalize_tiger_segment(os.getenv("TIGER_FOREX_SEG_TYPE", "SEC"))
         self.default_account = os.getenv("TIGER_ACCOUNT", "").strip()
-        self.account_map = parse_account_map(os.getenv("TIGER_ACCOUNT_MAP", ""))
+        self.trading_account_configs = load_trading_account_configs()
+        self.trading_accounts_by_id = {account.string_id: account for account in self.trading_account_configs}
+        tiger_api_account_configs = [
+            account
+            for account in self.trading_account_configs
+            if account.broker.strip().lower() == "tiger" and account.trading_medium == "API"
+        ]
+        self.tiger_api_account_ids = {account.string_id for account in tiger_api_account_configs}
+        config_ui_accounts = [account.string_id for account in tiger_api_account_configs]
+        config_account_map = {
+            account.string_id: account.tiger_account
+            for account in tiger_api_account_configs
+            if account.tiger_account
+        }
+        env_account_map = parse_account_map(os.getenv("TIGER_ACCOUNT_MAP", ""))
+        self.account_map = {**config_account_map, **env_account_map}
         configured_ui_accounts = env_csv("TIGER_UI_ACCOUNT_IDS", "")
-        self.ui_account_ids = configured_ui_accounts or sorted(self.account_map) or ["ACC-TIGER"]
-        self.account_num_map = parse_account_num_map(os.getenv("TIGER_UI_ACCOUNT_NUM_ID_MAP", ""))
+        self.ui_account_ids = configured_ui_accounts or config_ui_accounts or sorted(self.account_map) or ["ACC-TIGER"]
+        config_account_num_map = {account.string_id: account.numeric_id for account in self.trading_account_configs}
+        env_account_num_map = parse_account_num_map(os.getenv("TIGER_UI_ACCOUNT_NUM_ID_MAP", ""))
+        self.account_num_map = {**config_account_num_map, **env_account_num_map}
+        self._warn_for_static_account_mismatch(configured_ui_accounts)
+        if self.trading_account_configs:
+            LOGGER.info(
+                "Loaded %d trading account config(s); Tiger API account IDs: %s",
+                len(self.trading_account_configs),
+                ", ".join(config_ui_accounts) or "<none>",
+            )
         self._trading_enabled_default = env_bool("TIGER_TRADING_ENABLED_DEFAULT", not self.dry_run)
         self._trading_state_file = os.getenv(
             "TIGER_TRADING_STATE_FILE",
@@ -219,6 +509,28 @@ class TigerBroker:
 
         self._init_tiger_client()
 
+    def _warn_for_static_account_mismatch(self, configured_ui_accounts: List[str]) -> None:
+        if not self.trading_account_configs or not configured_ui_accounts:
+            return
+
+        unknown = [account_id for account_id in configured_ui_accounts if account_id not in self.trading_accounts_by_id]
+        if unknown:
+            LOGGER.warning(
+                "Tiger listener account ID(s) are not in the trading account config: %s",
+                ", ".join(unknown),
+            )
+
+        non_tiger = [
+            account_id
+            for account_id in configured_ui_accounts
+            if account_id in self.trading_accounts_by_id and account_id not in self.tiger_api_account_ids
+        ]
+        if non_tiger:
+            LOGGER.warning(
+                "Tiger listener account ID(s) are configured but are not Tiger/API accounts: %s",
+                ", ".join(non_tiger),
+            )
+
     def _validate_account_routing_config(self) -> None:
         if len(self.ui_account_ids) <= 1:
             return
@@ -226,8 +538,10 @@ class TigerBroker:
         missing = [account_id for account_id in self.ui_account_ids if account_id not in self.account_map]
         if missing:
             raise RuntimeError(
-                "TIGER_ACCOUNT_MAP must map every TIGER_UI_ACCOUNT_IDS entry when one Tiger listener "
-                "handles multiple UI accounts. Missing mappings: %s" % ", ".join(missing)
+                "TIGER_ACCOUNT_MAP or static tiger_account entries must map every TIGER_UI_ACCOUNT_IDS "
+                "entry when one Tiger listener handles multiple UI accounts. For one-account listeners, "
+                "set TIGER_UI_ACCOUNT_IDS to that listener's static account ID. Missing mappings: %s"
+                % ", ".join(missing)
             )
 
     def _init_tiger_client(self) -> None:
@@ -308,14 +622,16 @@ class TigerBroker:
         if ui_account:
             if self.account_map:
                 raise ValueError(
-                    "No Tiger account mapping configured for command account_id=%r; update TIGER_ACCOUNT_MAP"
+                    "No Tiger account mapping configured for command account_id=%r; update TIGER_ACCOUNT_MAP "
+                    "or add a tiger_account entry to the trading account config"
                     % ui_account
                 )
             if self.ui_account_ids and ui_account not in self.ui_account_ids:
                 raise ValueError("Tiger listener is not configured for command account_id=%r" % ui_account)
             if len(self.ui_account_ids) > 1:
                 raise ValueError(
-                    "Cannot resolve command account_id=%r because this multi-account listener has no TIGER_ACCOUNT_MAP"
+                    "Cannot resolve command account_id=%r because this multi-account listener has no "
+                    "TIGER_ACCOUNT_MAP or static tiger_account routing"
                     % ui_account
                 )
             if self.default_account:
@@ -706,38 +1022,118 @@ class TigerBroker:
         )
         LOGGER.info("Placed Tiger currency conversion command_id=%s result=%s", command_id(command), result)
 
+    def _get_open_orders_for_cancel(self, account: str, target_symbol: str) -> List[Any]:
+        assert self._trade_client is not None
+        assert self._open_order_statuses is not None
+
+        all_orders: List[Any] = []
+        page_token: Optional[str] = ""
+        seen_tokens: set[str] = set()
+        while True:
+            result = self._trade_client.get_orders(
+                account=account,
+                states=self._open_order_statuses,
+                symbol=target_symbol or None,
+                limit=self.cancel_order_fetch_limit,
+                is_brief=not bool(target_symbol),
+                page_token=page_token,
+            )
+            if hasattr(result, "result"):
+                current_orders = list(getattr(result, "result", None) or [])
+                next_page_token = str(getattr(result, "next_page_token", "") or "")
+            else:
+                current_orders = list(result or [])
+                next_page_token = ""
+
+            all_orders.extend(current_orders)
+            if not next_page_token:
+                break
+            if next_page_token in seen_tokens:
+                LOGGER.warning(
+                    "Stopping Tiger open-order pagination because next_page_token repeated account=%s symbol=%s token=%s",
+                    account,
+                    target_symbol or "<all>",
+                    next_page_token,
+                )
+                break
+            seen_tokens.add(next_page_token)
+            page_token = next_page_token
+
+        return all_orders
+
     def cancel_open_orders(self, command: Dict[str, Any]) -> None:
         account = self.resolve_account(command)
+        target_symbol = normalize_symbol_for_compare(command.get("symbol"))
         if self.dry_run:
             LOGGER.info(
-                "DRY RUN Tiger cancel open orders command_id=%s account=%s",
+                "DRY RUN Tiger cancel open orders command_id=%s account=%s symbol=%s",
                 command_id(command),
                 account,
+                target_symbol or "<all>",
             )
             return
 
         assert self._trade_client is not None
         assert self._open_order_statuses is not None
 
-        orders = self._trade_client.get_orders(account=account, states=self._open_order_statuses, is_brief=True) or []
+        orders = self._get_open_orders_for_cancel(account=account, target_symbol=target_symbol)
         cancelled = 0
+        failed = 0
+        skipped_symbol = 0
+        skipped_unknown_symbol = 0
+        skipped_missing_id = 0
         for order in orders:
-            order_id = pick_first_attr(order, ("order_id",), None)
-            internal_id = pick_first_attr(order, ("id",), None)
-            if order_id is not None:
-                self._trade_client.cancel_order(account=account, order_id=int(order_id))
-            elif internal_id is not None:
-                self._trade_client.cancel_order(account=account, id=int(internal_id))
-            else:
-                LOGGER.warning("Skipping open order without id: %s", order)
+            if target_symbol:
+                order_symbol = extract_order_symbol(order)
+                if not order_symbol:
+                    skipped_unknown_symbol += 1
+                    LOGGER.warning(
+                        "Skipping Tiger open order with unknown symbol during symbol-scoped cancel command_id=%s account=%s target_symbol=%s order=%s",
+                        command_id(command),
+                        account,
+                        target_symbol,
+                        order,
+                    )
+                    continue
+                if not order_symbol_matches(order_symbol, target_symbol):
+                    skipped_symbol += 1
+                    continue
+
+            cancel_field, cancel_value = extract_order_cancel_ref(order)
+            if cancel_field is None or cancel_value is None:
+                skipped_missing_id += 1
+                LOGGER.warning("Skipping Tiger open order without usable cancel id: %s", order)
                 continue
-            cancelled += 1
+
+            try:
+                if cancel_field == "id":
+                    self._trade_client.cancel_order(account=account, id=cancel_value)
+                else:
+                    self._trade_client.cancel_order(account=account, order_id=cancel_value)
+                cancelled += 1
+            except Exception:
+                failed += 1
+                LOGGER.exception(
+                    "Failed cancelling Tiger open order command_id=%s account=%s symbol=%s %s=%s order=%s",
+                    command_id(command),
+                    account,
+                    target_symbol or "<all>",
+                    cancel_field,
+                    cancel_value,
+                    order,
+                )
 
         LOGGER.info(
-            "Cancelled Tiger open orders command_id=%s account=%s count=%d",
+            "Cancelled Tiger open orders command_id=%s account=%s symbol=%s fetched=%d cancelled=%d failed=%d skipped_symbol=%d skipped_unknown_symbol=%d skipped_missing_id=%d",
             command_id(command),
             account,
+            target_symbol or "<all>",
+            len(orders),
             cancelled,
+            failed,
+            skipped_symbol,
+            skipped_unknown_symbol,
+            skipped_missing_id,
         )
 
 
@@ -816,7 +1212,8 @@ class AccountReporter:
         self._stop_event = stop_event
         self._topic = os.getenv("KAFKA_ACCOUNT_DETAILS_TOPIC", "account-details")
         self._interval_seconds = TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS
-        self._ui_account_ids = env_csv("TIGER_UI_ACCOUNT_IDS", "ACC-TIGER")
+        configured_ui_accounts = env_csv("TIGER_UI_ACCOUNT_IDS", "")
+        self._ui_account_ids = configured_ui_accounts or broker.ui_account_ids
         self._targets = broker.account_reporting_targets(self._ui_account_ids)
         self._producer: Optional[Producer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1096,7 +1493,7 @@ def install_signal_handlers(stop_event: threading.Event) -> None:
 
 
 def run_precheck(broker: TigerBroker) -> int:
-    targets = broker.account_reporting_targets(env_csv("TIGER_UI_ACCOUNT_IDS", "ACC-TIGER"))
+    targets = broker.account_reporting_targets(env_csv("TIGER_UI_ACCOUNT_IDS", "") or broker.ui_account_ids)
     if not targets:
         raise RuntimeError("No Tiger account target is configured")
 

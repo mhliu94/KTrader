@@ -6,8 +6,11 @@ from typing import Dict, List, Optional, Any
 class AccountMeta:
     id: str
     num_id: int
-    broker_id: str
     broker: str
+    trading_medium: str = "API"
+    broker_id: str = ""
+    ip_address: Optional[str] = None
+    machine_alias: Optional[str] = None
 
 
 @dataclass

@@ -4,6 +4,8 @@ from typing import Any, Dict, List
 
 from .models import AccountMeta
 
+TRADING_MEDIA = {"EMULATOR", "WINDOWS", "WEB", "API"}
+
 
 def load_json_file(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
@@ -21,8 +23,15 @@ def load_config(config_path: str) -> Dict[str, Any]:
             return p
         return os.path.normpath(os.path.join(config_dir, p))
 
-    if "accounts" not in cfg or not isinstance(cfg["accounts"], list) or not cfg["accounts"]:
-        raise ValueError("Config missing non-empty 'accounts' list.")
+    accounts_file = str(
+        cfg.get("accounts_file")
+        or cfg.get("trading_accounts_file")
+        or os.getenv("TRADING_ACCOUNTS_CONFIG", "")
+    ).strip()
+    if accounts_file:
+        cfg["accounts_file"] = _resolve_path(accounts_file)
+    elif "accounts" not in cfg or not isinstance(cfg["accounts"], list) or not cfg["accounts"]:
+        raise ValueError("Config missing accounts_file or non-empty 'accounts' list.")
     if "symbols" not in cfg or not isinstance(cfg["symbols"], list) or not cfg["symbols"]:
         raise ValueError("Config missing non-empty 'symbols' list.")
 
@@ -111,30 +120,90 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return cfg
 
 
+def _account_field(account: Dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in account:
+            return account.get(name)
+    return None
+
+
+def _required_account_string(account: Dict[str, Any], names: tuple[str, ...], label: str) -> str:
+    value = _account_field(account, *names)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Account entry missing required string field '{label}'.")
+    return value.strip()
+
+
+def _optional_account_string(account: Dict[str, Any], names: tuple[str, ...], label: str) -> str | None:
+    value = _account_field(account, *names)
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Account field '{label}' must be a string when provided.")
+    value = value.strip()
+    return value or None
+
+
+def _load_account_entries(cfg: Dict[str, Any]) -> tuple[List[Dict[str, Any]], bool]:
+    accounts_file = str(cfg.get("accounts_file") or "").strip()
+    if not accounts_file:
+        return cfg["accounts"], False
+
+    data = load_json_file(accounts_file)
+    accounts = data.get("accounts") if isinstance(data, dict) else data
+    if not isinstance(accounts, list) or not accounts:
+        raise ValueError(f"Trading accounts file must contain a non-empty accounts list: {accounts_file}")
+    return accounts, True
+
+
 def load_account_metas(cfg: Dict[str, Any]) -> Dict[str, AccountMeta]:
     metas: Dict[str, AccountMeta] = {}
-    accounts = cfg["accounts"]
-    if len(accounts) > 10:
-        raise ValueError("Config supports at most 10 accounts.")
+    accounts, require_static_fields = _load_account_entries(cfg)
 
     seen_num_ids: set[int] = set()
+    seen_string_ids: set[str] = set()
     for idx, a in enumerate(accounts, start=1):
-        raw_num_id = a.get("num_id", idx)
+        if not isinstance(a, dict):
+            raise ValueError(f"Account entry #{idx} must be an object.")
+
+        raw_string_id = _account_field(a, "string_id", "id", "account_id")
+        if not isinstance(raw_string_id, str) or not raw_string_id.strip():
+            raise ValueError(f"Account entry #{idx} missing required string_id.")
+        string_id = raw_string_id.strip()
+        if string_id in seen_string_ids:
+            raise ValueError(f"Duplicate string_id in accounts config: {string_id}")
+        seen_string_ids.add(string_id)
+
+        raw_num_id = _account_field(a, "numeric_id", "num_id", "account_num_id")
         try:
             num_id = int(raw_num_id)
         except (TypeError, ValueError):
-            raise ValueError(f"Invalid num_id for account '{a.get('id', '')}': {raw_num_id!r}")
-        if num_id < 1 or num_id > 10:
-            raise ValueError(f"num_id out of range [1,10] for account '{a.get('id', '')}': {num_id}")
+            raise ValueError(f"Invalid numeric_id for account '{string_id}': {raw_num_id!r}")
+        if num_id < 1:
+            raise ValueError(f"numeric_id must be positive for account '{string_id}': {num_id}")
         if num_id in seen_num_ids:
-            raise ValueError(f"Duplicate num_id in accounts config: {num_id}")
+            raise ValueError(f"Duplicate numeric_id in accounts config: {num_id}")
         seen_num_ids.add(num_id)
 
+        broker = _required_account_string(a, ("broker",), "broker")
+        raw_medium = _account_field(a, "trading_medium", "medium")
+        if raw_medium in (None, "") and not require_static_fields:
+            raw_medium = "API"
+        if not isinstance(raw_medium, str) or not raw_medium.strip():
+            raise ValueError(f"Account '{string_id}' missing required trading_medium.")
+        trading_medium = raw_medium.strip().upper()
+        if trading_medium not in TRADING_MEDIA:
+            allowed = ", ".join(sorted(TRADING_MEDIA))
+            raise ValueError(f"Invalid trading_medium for account '{string_id}': {raw_medium!r}. Allowed: {allowed}")
+
         meta = AccountMeta(
-            id=str(a["id"]),
+            id=string_id,
             num_id=num_id,
-            broker_id=str(a.get("broker_id", "")),
-            broker=str(a.get("broker", "")),
+            broker=broker,
+            trading_medium=trading_medium,
+            broker_id=str(a.get("broker_id", "") or "").strip(),
+            ip_address=_optional_account_string(a, ("ip_address", "ip"), "ip_address"),
+            machine_alias=_optional_account_string(a, ("machine_alias",), "machine_alias"),
         )
         metas[meta.id] = meta
     return metas

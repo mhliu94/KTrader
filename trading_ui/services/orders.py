@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -186,7 +187,11 @@ def validate_limit_order_inputs(
     return build_limit_order_command(account_id, symbol, side, shares, round(limit_price, 4), account_metas), None
 
 
-def build_cancel_open_orders_command(account_id: str, account_metas: Dict[str, AccountMeta]) -> Dict:
+def build_cancel_open_orders_command(
+    account_id: str,
+    account_metas: Dict[str, AccountMeta],
+    symbol: Optional[str] = None,
+) -> Dict:
     cmd_id = f"cancel_open_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
     cmd: Dict = {
         "type": "CANCEL_OPEN_ORDERS",
@@ -194,17 +199,29 @@ def build_cancel_open_orders_command(account_id: str, account_metas: Dict[str, A
         "ts": iso_utc_now(),
         "account_id": account_id,
     }
+    clean_symbol = str(symbol or "").strip().upper()
+    if clean_symbol:
+        cmd["symbol"] = clean_symbol
     return _add_broker_metadata(cmd, account_id, account_metas)
 
 
 def validate_cancel_open_orders_inputs(
     account_id: str,
+    symbol: Optional[str],
     account_metas: Dict[str, AccountMeta],
+    symbols: List[str],
     invalid_account: str,
+    invalid_symbol: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if account_id not in account_metas:
         return None, invalid_account
-    return build_cancel_open_orders_command(account_id, account_metas), None
+
+    clean_symbol = str(symbol or "").strip().upper()
+    known_symbols = {str(s).strip().upper() for s in symbols}
+    if clean_symbol and clean_symbol not in known_symbols:
+        return None, invalid_symbol
+
+    return build_cancel_open_orders_command(account_id, account_metas, clean_symbol or None), None
 
 
 def build_currency_conversion_command(
@@ -307,7 +324,8 @@ def validate_trading_status_inputs(
 # Algo trading (new)
 # ---------------------------
 
-_ALLOWED_MODES = ("A", "B", "C", "D")
+_ALLOWED_MODES = ("A", "B", "C", "D", "E", "F")
+_FAST_MODES = ("E", "F")
 _US_EASTERN = ZoneInfo("America/New_York")
 
 
@@ -459,9 +477,10 @@ def build_algo_start_command(
     price_target: float,
     single_order_notional_limit: float,
     order_rate_limit_per_minute: float,
+    fast_trading_groups: Optional[List[Dict]] = None,
 ) -> Dict:
     cmd_id = f"algo_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
-    return {
+    cmd: Dict = {
         "type": "START_ALGO_TRADING",
         "command_id": cmd_id,
         "ts": iso_utc_now(),
@@ -475,6 +494,95 @@ def build_algo_start_command(
         "single_order_notional_limit": single_order_notional_limit,
         "order_rate_limit_per_minute": order_rate_limit_per_minute,
     }
+    if fast_trading_groups is not None:
+        cmd["fast_trading_groups"] = fast_trading_groups
+    return cmd
+
+
+def parse_fast_trading_groups(
+    fast_trading_config_raw: object,
+    account_metas: Dict[str, AccountMeta],
+    invalid_account: str,
+    fast_config_required: str,
+    fast_group_required: str,
+    fast_price_limit_positive: str,
+    fast_group_accounts_required: str,
+    fast_account_duplicate: str,
+    fast_allocation_positive: str,
+    fast_allocation_total: str,
+) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    if fast_trading_config_raw is None:
+        return None, fast_config_required
+
+    if isinstance(fast_trading_config_raw, str):
+        raw = fast_trading_config_raw.strip()
+        if not raw:
+            return None, fast_config_required
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, fast_config_required
+    else:
+        payload = fast_trading_config_raw
+
+    groups = payload.get("groups") if isinstance(payload, dict) else None
+    if not isinstance(groups, list) or not groups:
+        return None, fast_group_required
+
+    normalized_groups: List[Dict] = []
+    used_accounts: set[str] = set()
+
+    for idx, group in enumerate(groups, start=1):
+        if not isinstance(group, dict):
+            return None, fast_group_required
+
+        price_limit = safe_float(group.get("price_limit"))
+        if price_limit is None or price_limit <= 0:
+            return None, fast_price_limit_positive.format(group=idx)
+
+        accounts = group.get("accounts")
+        if not isinstance(accounts, list) or not accounts:
+            return None, fast_group_accounts_required.format(group=idx)
+
+        total_allocation = 0.0
+        normalized_accounts: List[Dict] = []
+        seen_in_group: set[str] = set()
+        for account in accounts:
+            if not isinstance(account, dict):
+                return None, fast_group_accounts_required.format(group=idx)
+
+            account_id = str(account.get("account_id") or "").strip()
+            if account_id not in account_metas:
+                return None, invalid_account
+            if account_id in used_accounts or account_id in seen_in_group:
+                return None, fast_account_duplicate.format(account=account_id)
+
+            allocation_pct = safe_float(account.get("allocation_pct"))
+            if allocation_pct is None or allocation_pct <= 0:
+                return None, fast_allocation_positive.format(group=idx)
+
+            seen_in_group.add(account_id)
+            total_allocation += allocation_pct
+            normalized_accounts.append(
+                {
+                    "account_id": account_id,
+                    "allocation_pct": round(float(allocation_pct), 6),
+                }
+            )
+
+        if total_allocation > 100.0 + 1e-9:
+            return None, fast_allocation_total.format(group=idx)
+
+        used_accounts.update(seen_in_group)
+        normalized_groups.append(
+            {
+                "group_id": idx,
+                "price_limit": float(price_limit),
+                "accounts": normalized_accounts,
+            }
+        )
+
+    return normalized_groups, None
 
 
 def validate_algo_start_inputs(
@@ -487,12 +595,22 @@ def validate_algo_start_inputs(
     price_target_raw: Optional[str],
     single_order_notional_limit_raw: Optional[str],
     order_rate_limit_per_minute_raw: Optional[str],
+    fast_trading_config_raw: object,
     symbols: List[str],
+    account_metas: Dict[str, AccountMeta],
     # localized strings injected
     invalid_mode: str,
     invalid_symbol: str,
+    invalid_account: str,
     number_required: str,
     end_time_required: str,
+    fast_config_required: str,
+    fast_group_required: str,
+    fast_price_limit_positive: str,
+    fast_group_accounts_required: str,
+    fast_account_duplicate: str,
+    fast_allocation_positive: str,
+    fast_allocation_total: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if trading_mode not in _ALLOWED_MODES:
         return None, invalid_mode
@@ -520,6 +638,23 @@ def validate_algo_start_inputs(
     if end_iso is None:
         return None, end_time_required
 
+    fast_trading_groups = None
+    if trading_mode in _FAST_MODES:
+        fast_trading_groups, err = parse_fast_trading_groups(
+            fast_trading_config_raw=fast_trading_config_raw,
+            account_metas=account_metas,
+            invalid_account=invalid_account,
+            fast_config_required=fast_config_required,
+            fast_group_required=fast_group_required,
+            fast_price_limit_positive=fast_price_limit_positive,
+            fast_group_accounts_required=fast_group_accounts_required,
+            fast_account_duplicate=fast_account_duplicate,
+            fast_allocation_positive=fast_allocation_positive,
+            fast_allocation_total=fast_allocation_total,
+        )
+        if err:
+            return None, err
+
     cmd = build_algo_start_command(
         trading_mode=trading_mode,
         symbol=symbol,
@@ -530,6 +665,7 @@ def validate_algo_start_inputs(
         price_target=price_target,
         single_order_notional_limit=single_order_notional_limit,
         order_rate_limit_per_minute=order_rate_limit_per_minute,
+        fast_trading_groups=fast_trading_groups,
     )
     return cmd, None
 

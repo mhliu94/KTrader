@@ -19,7 +19,9 @@ def load_json_file(path: str) -> Any:
 
 def parse_snapshot_obj(obj: Dict[str, Any]) -> Optional[AccountSnapshot]:
     try:
-        account_id = str(obj["account_id"])
+        account_id = str(obj["account_id"]).strip()
+        if not account_id:
+            return None
         account_num_id = obj.get("account_num_id")
         account_num_id = int(account_num_id) if account_num_id not in (None, "") else None
         cash = float(obj.get("cash", 0.0))

@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from urllib.parse import quote
 from .services.market_data import MarketDataStore, HistoricalCloseStore, QuoteRow
 from .templates import render_market_data_page, render_market_insights_page
+from .models import AccountSnapshot
 
 from .config import load_config, load_account_metas, load_symbols
 from .i18n import resolve_lang, SUPPORTED_LANGS, t
@@ -54,12 +55,16 @@ MD_STORE = MarketDataStore()
 HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
 
 
+def _filter_configured_snapshots(accounts: Dict[str, AccountSnapshot]) -> Dict[str, AccountSnapshot]:
+    return {account_id: snap for account_id, snap in accounts.items() if account_id in ACCOUNT_METAS}
+
+
 def get_served_snapshots() -> Tuple[Dict, str]:
     if store.kafka_seen_any():
-        return store.get_all(), "kafka"
+        return _filter_configured_snapshots(store.get_all()), "kafka"
     fallback_path = APP_CONFIG["fallback"]["file"]
     snaps = load_fallback_snapshots(fallback_path)
-    return snaps, f"fallback_file:{fallback_path}"
+    return _filter_configured_snapshots(snaps), f"fallback_file:{fallback_path}"
 
 
 def _build_next_path(request: Request) -> str:
@@ -122,7 +127,7 @@ def on_startup() -> None:
     HIST_CLOSE_STORE = HistoricalCloseStore(APP_CONFIG["market_data"]["historical_prices_csv"])
     print(f"[market-data] historical_prices_csv='{APP_CONFIG['market_data']['historical_prices_csv']}'")
 
-    ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store)
+    ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store, ACCOUNT_METAS)
     ACCOUNT_CONSUMER.start()
 
     MARKET_DATA_CONSUMER = PriceBookConsumer(APP_CONFIG["kafka"], MD_STORE)
@@ -431,7 +436,19 @@ async def submit_cancel_open_orders(request: Request):
         return gate
     lang = resolve_lang(request)
     form = await request.form()
-    account_ids = [str(x) for x in form.getlist("account_ids")]
+    raw_account_ids = [str(x).strip() for x in form.getlist("account_ids")]
+    symbol = str(form.get("symbol", "") or "").strip().upper()
+
+    if "__ALL__" in raw_account_ids:
+        account_ids = sorted(ACCOUNT_METAS.keys(), key=lambda aid: ACCOUNT_METAS[aid].num_id)
+    else:
+        account_ids = []
+        seen = set()
+        for account_id in raw_account_ids:
+            if not account_id or account_id in seen:
+                continue
+            seen.add(account_id)
+            account_ids.append(account_id)
 
     if not account_ids:
         return RedirectResponse(url=f"/control-panel?err={quote(t(lang, 'quick_pick_account'))}", status_code=303)
@@ -441,8 +458,11 @@ async def submit_cancel_open_orders(request: Request):
     for account_id in account_ids:
         cmd, err = validate_cancel_open_orders_inputs(
             account_id=account_id,
+            symbol=symbol or None,
             account_metas=ACCOUNT_METAS,
+            symbols=SYMBOLS,
             invalid_account=t(lang, "invalid_account"),
+            invalid_symbol=t(lang, "invalid_symbol"),
         )
         if err:
             return RedirectResponse(url=f"/control-panel?err={quote(err)}", status_code=303)
@@ -605,6 +625,7 @@ def submit_algo(
     price_target: str | None = Form(...),
     single_order_notional_limit: str | None = Form("-1"),
     order_rate_limit_per_minute: str | None = Form("-1"),
+    fast_trading_config: str | None = Form(None),
 ):
     user, gate = _require_auth_page(request)
     if gate is not None:
@@ -621,11 +642,21 @@ def submit_algo(
         price_target_raw=price_target,
         single_order_notional_limit_raw=single_order_notional_limit,
         order_rate_limit_per_minute_raw=order_rate_limit_per_minute,
+        fast_trading_config_raw=fast_trading_config,
         symbols=SYMBOLS,
+        account_metas=ACCOUNT_METAS,
         invalid_mode=t(lang, "invalid_mode"),
         invalid_symbol=t(lang, "invalid_symbol"),
+        invalid_account=t(lang, "invalid_account"),
         number_required=t(lang, "number_required"),
         end_time_required=t(lang, "end_time_required"),
+        fast_config_required=t(lang, "fast_config_required"),
+        fast_group_required=t(lang, "fast_group_required"),
+        fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
+        fast_group_accounts_required=t(lang, "fast_group_accounts_required"),
+        fast_account_duplicate=t(lang, "fast_account_duplicate"),
+        fast_allocation_positive=t(lang, "fast_allocation_positive"),
+        fast_allocation_total=t(lang, "fast_allocation_total"),
     )
 
     if err:
@@ -792,6 +823,9 @@ async def api_submit_algo(request: Request) -> JSONResponse:
     price_target_raw = None if body.get("price_target") is None else str(body.get("price_target"))
     single_order_notional_limit_raw = None if body.get("single_order_notional_limit") is None else str(body.get("single_order_notional_limit"))
     order_rate_limit_per_minute_raw = None if body.get("order_rate_limit_per_minute") is None else str(body.get("order_rate_limit_per_minute"))
+    fast_trading_config_raw = body.get("fast_trading_config")
+    if fast_trading_config_raw is None:
+        fast_trading_config_raw = body.get("fast_trading_groups")
 
     cmd, err = validate_algo_start_inputs(
         trading_mode=trading_mode,
@@ -803,11 +837,21 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         price_target_raw=price_target_raw,
         single_order_notional_limit_raw=single_order_notional_limit_raw,
         order_rate_limit_per_minute_raw=order_rate_limit_per_minute_raw,
+        fast_trading_config_raw=fast_trading_config_raw,
         symbols=SYMBOLS,
+        account_metas=ACCOUNT_METAS,
         invalid_mode=t(lang, "invalid_mode"),
         invalid_symbol=t(lang, "invalid_symbol"),
+        invalid_account=t(lang, "invalid_account"),
         number_required=t(lang, "number_required"),
         end_time_required=t(lang, "end_time_required"),
+        fast_config_required=t(lang, "fast_config_required"),
+        fast_group_required=t(lang, "fast_group_required"),
+        fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
+        fast_group_accounts_required=t(lang, "fast_group_accounts_required"),
+        fast_account_duplicate=t(lang, "fast_account_duplicate"),
+        fast_allocation_positive=t(lang, "fast_allocation_positive"),
+        fast_allocation_total=t(lang, "fast_allocation_total"),
     )
 
     if err:
@@ -1026,4 +1070,3 @@ if __name__ == "__main__":
         print("[https] disabled (HTTP)")
 
     uvicorn.run("trading_ui.webserver:app", **uvicorn_kwargs)
-

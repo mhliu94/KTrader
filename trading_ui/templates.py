@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Dict, List
 
@@ -132,6 +133,7 @@ def render_layout(
     .status-pill {{ display:inline-block; padding: 3px 8px; border-radius: 999px; font-weight: 700; font-size: 12px; }}
     .status-on {{ color:#166534; background:#dcfce7; border:1px solid #86efac; }}
     .status-off {{ color:#991b1b; background:#fee2e2; border:1px solid #fecaca; }}
+    .status-unknown {{ color:#475569; background:#f1f5f9; border:1px solid #cbd5e1; }}
     table.pos {{ width: 100%; border-collapse: collapse; }}
     table.pos th, table.pos td {{ border-top: 1px solid #eee; padding: 8px; font-size: 13px; }}
     table.pos thead th {{ border-top: none; color: #444; }}
@@ -202,6 +204,36 @@ def render_layout(
     .status-item:first-child {{ border-top:none; }}
     .status-title {{ font-weight:700; }}
     .status-meta {{ color:#666; font-size:12px; margin-top:3px; }}
+    body.modal-open {{ overflow:hidden; }}
+    .modal-backdrop {{
+      position:fixed; inset:0; z-index:1000; padding:20px;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(15,23,42,0.48);
+    }}
+    .modal-backdrop[hidden] {{ display:none; }}
+    .modal-panel {{
+      width:min(920px, calc(100vw - 32px)); max-height:calc(100vh - 40px); overflow:auto;
+      background:#fff; border-radius:12px; border:1px solid #e5e5e5;
+      box-shadow:0 24px 80px rgba(15,23,42,0.24); padding:16px;
+    }}
+    .modal-header {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
+    .modal-close {{ border:1px solid #ddd; background:#fff; color:#222; border-radius:10px; width:36px; height:36px; cursor:pointer; font-size:20px; line-height:1; }}
+    .modal-actions {{ display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; margin-top:14px; }}
+    .fast-groups {{ display:flex; flex-direction:column; gap:12px; }}
+    .fast-group {{ border:1px solid #e5e5e5; border-radius:10px; padding:12px; background:#fff; }}
+    .fast-group-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; }}
+    .fast-group-title {{ margin:0; font-size:15px; }}
+    .fast-account-list {{ display:flex; flex-direction:column; gap:8px; margin-top:8px; }}
+    .fast-account-row {{ display:grid; grid-template-columns:auto minmax(0, 1fr) 126px; gap:8px; align-items:center; }}
+    .fast-account-row.disabled {{ opacity:0.48; }}
+    .fast-account-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:600; color:#333; }}
+    .fast-account-row input[type=number] {{ width:100%; min-width:0; }}
+    @media (max-width: 640px) {{
+      .fast-account-row {{ grid-template-columns:auto minmax(0, 1fr); }}
+      .fast-account-row input[type=number] {{ grid-column:2; }}
+      .modal-actions {{ justify-content:stretch; }}
+      .modal-actions .btn {{ width:100%; }}
+    }}
     @media (max-width: 960px) {{
       .control-panel-grid {{ grid-template-columns: 1fr; max-width: 920px; }}
     }}
@@ -252,45 +284,45 @@ def render_account_details_page(
     account_metas: Dict[str, AccountMeta],
     account_details_topic: str,
 ) -> str:
-    def account_num(acct: AccountSnapshot) -> int:
-        meta = account_metas.get(acct.account_id)
-        if meta:
-            return meta.num_id
-        if acct.account_num_id is not None:
-            return acct.account_num_id
-        return 999
-
-    items = sorted(
-        accounts.values(),
-        key=lambda a: (account_num(a), a.account_id),
-    )
+    items = sorted(account_metas.values(), key=lambda meta: (meta.num_id, meta.id))
 
     cards: List[str] = []
-    for display_idx, acct in enumerate(items, start=1):
-        meta = account_metas.get(acct.account_id)
-        display_num = account_num(acct)
-        if display_num == 999:
-            display_num = display_idx
-        acct_title = f"#{display_num} - {html_escape(acct.account_id)}"
-        meta_line = ""
-        if meta:
-            meta_line = (
-                f"{html_escape(t(lang,'broker'))}: {html_escape(meta.broker)} · "
-                f"{html_escape(t(lang,'broker_id'))}={html_escape(meta.broker_id)}"
-            )
+    for meta in items:
+        acct = accounts.get(meta.id)
+        acct_title = f"#{meta.num_id} - {html_escape(meta.id)}"
+        meta_parts = [
+            f"{html_escape(t(lang,'broker'))}: {html_escape(meta.broker)}",
+            f"{html_escape(t(lang,'trading_medium'))}: {html_escape(meta.trading_medium)}",
+        ]
+        if meta.machine_alias:
+            meta_parts.append(f"{html_escape(t(lang,'machine_alias'))}: {html_escape(meta.machine_alias)}")
+        if meta.ip_address:
+            meta_parts.append(f"{html_escape(t(lang,'ip_address'))}: {html_escape(meta.ip_address)}")
+        if meta.broker_id:
+            meta_parts.append(f"{html_escape(t(lang,'broker_id'))}={html_escape(meta.broker_id)}")
+        meta_line = " · ".join(meta_parts)
 
         pos_rows = []
-        for p in sorted(acct.positions, key=lambda x: x.symbol):
-            pos_rows.append(
-                "<tr>"
-                f"<td>{html_escape(p.symbol)}</td>"
-                f"<td style='text-align:right'>{p.qty:,.2f}</td>"
-                f"<td style='text-align:right'>{'' if p.avg_price is None else f'{p.avg_price:,.4f}'}</td>"
-                "</tr>"
-            )
+        if acct is not None:
+            for p in sorted(acct.positions, key=lambda x: x.symbol):
+                pos_rows.append(
+                    "<tr>"
+                    f"<td>{html_escape(p.symbol)}</td>"
+                    f"<td style='text-align:right'>{p.qty:,.2f}</td>"
+                    f"<td style='text-align:right'>{'' if p.avg_price is None else f'{p.avg_price:,.4f}'}</td>"
+                    "</tr>"
+                )
 
-        trading_cls = "status-on" if acct.trading_enabled else "status-off"
-        trading_text = t(lang, "trading_on" if acct.trading_enabled else "trading_off")
+        if acct is None:
+            trading_cls = "status-unknown"
+            trading_text = t(lang, "trading_unknown")
+            cash_text = "—"
+            ts_text = t(lang, "no_snapshot")
+        else:
+            trading_cls = "status-on" if acct.trading_enabled else "status-off"
+            trading_text = t(lang, "trading_on" if acct.trading_enabled else "trading_off")
+            cash_text = f"${acct.cash:,.2f}"
+            ts_text = acct.ts or ""
 
         pos_table = (
             "<table class='pos'>"
@@ -304,11 +336,11 @@ def render_account_details_page(
         cards.append(
             "<div class='card'>"
             f"<div class='hdr'><div class='acct'>{acct_title}</div>"
-            f"<div class='ts'>{html_escape(acct.ts or '')}</div></div>"
+            f"<div class='ts'>{html_escape(ts_text)}</div></div>"
             f"<div class='meta'>{meta_line}</div>"
             f"<div class='status-row'>{html_escape(t(lang,'trading'))}: "
             f"<span class='status-pill {trading_cls}'>{html_escape(trading_text)}</span></div>"
-            f"<div class='cash'>{html_escape(t(lang,'cash'))} (USD): <b>${acct.cash:,.2f}</b></div>"
+            f"<div class='cash'>{html_escape(t(lang,'cash'))} (USD): <b>{html_escape(cash_text)}</b></div>"
             f"{pos_table}"
             "</div>"
         )
@@ -514,15 +546,23 @@ def render_trading_status_page(
         has_snapshot = snapshot is not None
         enabled = bool(snapshot.trading_enabled) if snapshot is not None else False
         status_key = "trading_on" if enabled else ("trading_off" if has_snapshot else "trading_unknown")
-        status_cls = "status-on" if enabled else "status-off"
+        status_cls = "status-on" if enabled else ("status-off" if has_snapshot else "status-unknown")
         on_disabled = " disabled" if enabled else ""
         off_disabled = " disabled" if has_snapshot and not enabled else ""
+        meta_parts = [meta.broker, meta.trading_medium]
+        if meta.machine_alias:
+            meta_parts.append(meta.machine_alias)
+        if meta.ip_address:
+            meta_parts.append(meta.ip_address)
+        if meta.broker_id:
+            meta_parts.append(meta.broker_id)
+        meta_line = " · ".join(part for part in meta_parts if part)
         rows.append(
             f"""
         <div class="status-item trading-status-row" data-account-id="{html_escape(account_id)}">
           <div>
             <div class="status-title">#{meta.num_id} {html_escape(account_id)}</div>
-            <div class="status-meta">{html_escape(meta.broker)} · {html_escape(meta.broker_id)}</div>
+            <div class="status-meta">{html_escape(meta_line)}</div>
             <div class="status-row">
               {html_escape(t(lang,'trading'))}:
               <span class="status-pill {status_cls}" data-role="status-pill">{html_escape(t(lang,status_key))}</span>
@@ -644,12 +684,17 @@ def render_control_panel_page(
         )
         for idx, aid in enumerate(sorted_account_ids, start=1)
     )
-    cancel_account_buttons = "\n".join(
-        (
-            f"<input class='choice-input' type='checkbox' id='cancel-acct-{idx}' name='account_ids' value='{html_escape(aid)}'>"
-            f"<label class='choice-btn' for='cancel-acct-{idx}'>#{account_metas[aid].num_id}</label>"
+    cancel_account_buttons = (
+        f"<input class='choice-input' type='radio' id='cancel-acct-all' name='account_ids' value='__ALL__' checked>"
+        f"<label class='choice-btn' for='cancel-acct-all'>{html_escape(t(lang,'all_accounts'))}</label>"
+        + "\n"
+        + "\n".join(
+            (
+                f"<input class='choice-input' type='radio' id='cancel-acct-{idx}' name='account_ids' value='{html_escape(aid)}'>"
+                f"<label class='choice-btn' for='cancel-acct-{idx}'>#{account_metas[aid].num_id}</label>"
+            )
+            for idx, aid in enumerate(sorted_account_ids, start=1)
         )
-        for idx, aid in enumerate(sorted_account_ids, start=1)
     )
     sorted_symbols = sorted(symbols)
     quick_symbol_buttons = "\n".join(
@@ -720,6 +765,319 @@ def render_control_panel_page(
         )
         for idx, aid in enumerate(sorted_account_ids, start=1)
     )
+
+    fast_account_rows = [
+        {
+            "id": aid,
+            "label": f"#{account_metas[aid].num_id} {aid} ({account_metas[aid].broker})",
+        }
+        for aid in sorted_account_ids
+    ]
+    fast_accounts_json = json.dumps(fast_account_rows).replace("<", "\\u003c")
+    fast_labels = {
+        "modeE": t(lang, "mode_e"),
+        "modeF": t(lang, "mode_f"),
+        "fastSelectedMode": t(lang, "fast_selected_mode"),
+        "fastGroupTitle": t(lang, "fast_group_title"),
+        "fastPriceLimit": t(lang, "fast_price_limit"),
+        "fastAccountsAllocations": t(lang, "fast_accounts_allocations"),
+        "fastAllocationPct": t(lang, "fast_allocation_pct"),
+        "fastAddGroup": t(lang, "fast_add_group"),
+        "fastRemoveGroup": t(lang, "fast_remove_group"),
+        "fastConfigRequired": t(lang, "fast_config_required"),
+        "fastGroupRequired": t(lang, "fast_group_required"),
+        "fastPriceLimitPositive": t(lang, "fast_price_limit_positive"),
+        "fastGroupAccountsRequired": t(lang, "fast_group_accounts_required"),
+        "fastAccountDuplicate": t(lang, "fast_account_duplicate"),
+        "fastAllocationPositive": t(lang, "fast_allocation_positive"),
+        "fastAllocationTotal": t(lang, "fast_allocation_total"),
+    }
+    fast_labels_json = json.dumps(fast_labels).replace("<", "\\u003c")
+    fast_trading_modal = f"""
+    <div class="modal-backdrop" id="fast-trading-modal" hidden>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="fast-trading-title">
+        <div class="modal-header">
+          <div>
+            <div class="acct" id="fast-trading-title">{html_escape(t(lang,'fast_config_title'))}</div>
+            <div class="help" id="fast-trading-mode-label"></div>
+          </div>
+          <button class="modal-close" id="fast-trading-close" type="button" aria-label="{html_escape(t(lang,'fast_config_cancel'))}">&times;</button>
+        </div>
+        <div class="fast-groups" id="fast-trading-groups"></div>
+        <div class="inline-actions" style="margin-top:12px;">
+          <button class="btn btn-blue" id="fast-add-group" type="button">{html_escape(t(lang,'fast_add_group'))}</button>
+        </div>
+        <div class="warn" id="fast-trading-error" style="margin-top:10px;"></div>
+        <div class="modal-actions">
+          <button class="btn" id="fast-cancel" type="button" style="background:#64748b;">{html_escape(t(lang,'fast_config_cancel'))}</button>
+          <button class="btn btn-green" id="fast-submit-config" type="button">{html_escape(t(lang,'fast_config_submit'))}</button>
+        </div>
+      </div>
+    </div>
+    """
+    fast_trading_script = """
+    <script>
+      (function(){
+        const form = document.getElementById("algo-form");
+        const configEl = document.getElementById("fast_trading_config");
+        const modal = document.getElementById("fast-trading-modal");
+        const groupsEl = document.getElementById("fast-trading-groups");
+        const modeLabelEl = document.getElementById("fast-trading-mode-label");
+        const errorEl = document.getElementById("fast-trading-error");
+        const addGroupBtn = document.getElementById("fast-add-group");
+        const cancelBtn = document.getElementById("fast-cancel");
+        const closeBtn = document.getElementById("fast-trading-close");
+        const submitBtn = document.getElementById("fast-submit-config");
+        const accounts = __FAST_ACCOUNTS__;
+        const labels = __FAST_LABELS__;
+
+        if (!form || !configEl || !modal || !groupsEl) return;
+
+        let confirmed = false;
+        let lastFocused = null;
+        let nextGroupId = 1;
+        let groups = [];
+
+        function esc(value) {
+          return String(value).replace(/[&<>"']/g, function(ch) {
+            if (ch === "&") return "&amp;";
+            if (ch === "<") return "&lt;";
+            if (ch === ">") return "&gt;";
+            if (ch === '"') return "&quot;";
+            return "&#39;";
+          });
+        }
+
+        function fmt(template, values) {
+          let out = String(template || "");
+          Object.keys(values || {}).forEach(function(key) {
+            out = out.replaceAll("{" + key + "}", String(values[key]));
+          });
+          return out;
+        }
+
+        function selectedMode() {
+          const selected = form.querySelector("input[name='trading_mode']:checked");
+          return selected ? selected.value : "";
+        }
+
+        function modeName(mode) {
+          if (mode === "E") return labels.modeE || "E";
+          if (mode === "F") return labels.modeF || "F";
+          return mode;
+        }
+
+        function groupById(groupId) {
+          return groups.find(function(group) { return group.id === Number(groupId); }) || null;
+        }
+
+        function usedAccountsExcept(groupId) {
+          const used = new Set();
+          groups.forEach(function(group) {
+            if (group.id === groupId) return;
+            Object.keys(group.accounts).forEach(function(accountId) { used.add(accountId); });
+          });
+          return used;
+        }
+
+        function addGroup() {
+          groups.push({ id: nextGroupId++, priceLimit: "", accounts: {} });
+          renderGroups();
+        }
+
+        function removeGroup(groupId) {
+          groups = groups.filter(function(group) { return group.id !== groupId; });
+          if (!groups.length) addGroup();
+          renderGroups();
+        }
+
+        function renderGroups() {
+          groupsEl.innerHTML = groups.map(function(group, index) {
+            const usedByOther = usedAccountsExcept(group.id);
+            const accountRows = accounts.map(function(account) {
+              const selected = Object.prototype.hasOwnProperty.call(group.accounts, account.id);
+              const disabled = !selected && usedByOther.has(account.id);
+              const allocation = selected ? group.accounts[account.id] : "";
+              return `
+                <label class="fast-account-row${disabled ? " disabled" : ""}">
+                  <input type="checkbox" data-action="toggle-account" data-group-id="${group.id}" data-account-id="${esc(account.id)}" ${selected ? "checked" : ""} ${disabled ? "disabled" : ""}>
+                  <span class="fast-account-label">${esc(account.label)}</span>
+                  <input type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="${esc(labels.fastAllocationPct)}" data-action="allocation" data-group-id="${group.id}" data-account-id="${esc(account.id)}" value="${esc(allocation)}" ${selected ? "" : "disabled"}>
+                </label>`;
+            }).join("");
+
+            return `
+              <section class="fast-group" data-group-id="${group.id}">
+                <div class="fast-group-header">
+                  <h3 class="fast-group-title">${esc(fmt(labels.fastGroupTitle, { group: index + 1 }))}</h3>
+                  <button class="btn btn-red" type="button" data-action="remove-group" data-group-id="${group.id}">${esc(labels.fastRemoveGroup)}</button>
+                </div>
+                <div class="row">
+                  <div>
+                    <label>${esc(labels.fastPriceLimit)}</label>
+                    <input type="number" min="0.01" step="0.01" inputmode="decimal" data-action="price-limit" data-group-id="${group.id}" value="${esc(group.priceLimit)}">
+                  </div>
+                  <div>
+                    <label>${esc(labels.fastAccountsAllocations)}</label>
+                    <div class="fast-account-list">${accountRows}</div>
+                  </div>
+                </div>
+              </section>`;
+          }).join("");
+        }
+
+        function setError(message) {
+          if (errorEl) errorEl.textContent = message || "";
+        }
+
+        function validateConfig() {
+          if (!groups.length) return { ok: false, error: labels.fastGroupRequired };
+
+          const used = new Set();
+          const payloadGroups = [];
+          for (let i = 0; i < groups.length; i += 1) {
+            const group = groups[i];
+            const priceLimit = Number(group.priceLimit);
+            if (!isFinite(priceLimit) || priceLimit <= 0) {
+              return { ok: false, error: fmt(labels.fastPriceLimitPositive, { group: i + 1 }) };
+            }
+
+            const selectedAccounts = Object.keys(group.accounts);
+            if (!selectedAccounts.length) {
+              return { ok: false, error: fmt(labels.fastGroupAccountsRequired, { group: i + 1 }) };
+            }
+
+            let total = 0;
+            const payloadAccounts = [];
+            for (let j = 0; j < selectedAccounts.length; j += 1) {
+              const accountId = selectedAccounts[j];
+              if (used.has(accountId)) {
+                return { ok: false, error: fmt(labels.fastAccountDuplicate, { account: accountId }) };
+              }
+              const allocation = Number(group.accounts[accountId]);
+              if (!isFinite(allocation) || allocation <= 0) {
+                return { ok: false, error: fmt(labels.fastAllocationPositive, { group: i + 1 }) };
+              }
+              used.add(accountId);
+              total += allocation;
+              payloadAccounts.push({ account_id: accountId, allocation_pct: allocation });
+            }
+
+            if (total > 100 + Number.EPSILON) {
+              return { ok: false, error: fmt(labels.fastAllocationTotal, { group: i + 1 }) };
+            }
+
+            payloadGroups.push({
+              group_id: i + 1,
+              price_limit: priceLimit,
+              accounts: payloadAccounts
+            });
+          }
+
+          return { ok: true, payload: { groups: payloadGroups } };
+        }
+
+        function openModal(mode) {
+          lastFocused = document.activeElement;
+          if (!groups.length) addGroup();
+          if (modeLabelEl) modeLabelEl.textContent = (labels.fastSelectedMode || "Mode") + ": " + modeName(mode);
+          setError("");
+          renderGroups();
+          modal.hidden = false;
+          document.body.classList.add("modal-open");
+          const firstInput = modal.querySelector("input:not(:disabled), button:not(:disabled)");
+          if (firstInput) firstInput.focus();
+        }
+
+        function closeModal() {
+          modal.hidden = true;
+          document.body.classList.remove("modal-open");
+          setError("");
+          if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
+        }
+
+        form.addEventListener("submit", function(event) {
+          const mode = selectedMode();
+          if (mode !== "E" && mode !== "F") {
+            configEl.value = "";
+            return;
+          }
+          if (confirmed) {
+            confirmed = false;
+            return;
+          }
+          event.preventDefault();
+          openModal(mode);
+        });
+
+        groupsEl.addEventListener("input", function(event) {
+          const target = event.target;
+          if (!(target instanceof HTMLInputElement)) return;
+          const action = target.getAttribute("data-action");
+          const group = groupById(target.getAttribute("data-group-id"));
+          if (!group) return;
+          if (action === "price-limit") {
+            group.priceLimit = target.value;
+          } else if (action === "allocation") {
+            const accountId = target.getAttribute("data-account-id") || "";
+            if (accountId && Object.prototype.hasOwnProperty.call(group.accounts, accountId)) {
+              group.accounts[accountId] = target.value;
+            }
+          }
+        });
+
+        groupsEl.addEventListener("change", function(event) {
+          const target = event.target;
+          if (!(target instanceof HTMLInputElement)) return;
+          if (target.getAttribute("data-action") !== "toggle-account") return;
+          const group = groupById(target.getAttribute("data-group-id"));
+          const accountId = target.getAttribute("data-account-id") || "";
+          if (!group || !accountId) return;
+          if (target.checked) {
+            group.accounts[accountId] = group.accounts[accountId] || "";
+          } else {
+            delete group.accounts[accountId];
+          }
+          renderGroups();
+        });
+
+        groupsEl.addEventListener("click", function(event) {
+          const target = event.target;
+          if (!(target instanceof HTMLElement)) return;
+          const button = target.closest("[data-action='remove-group']");
+          if (!button) return;
+          removeGroup(Number(button.getAttribute("data-group-id")));
+        });
+
+        if (addGroupBtn) addGroupBtn.addEventListener("click", addGroup);
+        if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+        if (closeBtn) closeBtn.addEventListener("click", closeModal);
+        modal.addEventListener("click", function(event) {
+          if (event.target === modal) closeModal();
+        });
+        document.addEventListener("keydown", function(event) {
+          if (event.key === "Escape" && !modal.hidden) closeModal();
+        });
+        if (submitBtn) submitBtn.addEventListener("click", function() {
+          const result = validateConfig();
+          if (!result.ok) {
+            setError(result.error || labels.fastConfigRequired);
+            return;
+          }
+          configEl.value = JSON.stringify(result.payload);
+          confirmed = true;
+          closeModal();
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
+        });
+
+        addGroup();
+      })();
+    </script>
+    """.replace("__FAST_ACCOUNTS__", fast_accounts_json).replace("__FAST_LABELS__", fast_labels_json)
 
     msg = ""
     if error:
@@ -960,7 +1318,8 @@ def render_control_panel_page(
       <div class="ts">—</div>
     </div>
 
-    <form method="post" action="/submit-algo">
+    <form method="post" action="/submit-algo" id="algo-form">
+      <input type="hidden" id="fast_trading_config" name="fast_trading_config" value="">
       <div class="row">
         <div>
           <label>{html_escape(t(lang,'trading_mode'))}</label>
@@ -973,6 +1332,10 @@ def render_control_panel_page(
             <label class="choice-btn" for="algo-mode-c">{html_escape(t(lang,'mode_c'))}</label>
             <input class="choice-input" type="radio" id="algo-mode-d" name="trading_mode" value="D">
             <label class="choice-btn" for="algo-mode-d">{html_escape(t(lang,'mode_d'))}</label>
+            <input class="choice-input" type="radio" id="algo-mode-e" name="trading_mode" value="E">
+            <label class="choice-btn" for="algo-mode-e">{html_escape(t(lang,'mode_e'))}</label>
+            <input class="choice-input" type="radio" id="algo-mode-f" name="trading_mode" value="F">
+            <label class="choice-btn" for="algo-mode-f">{html_escape(t(lang,'mode_f'))}</label>
           </div>
         </div>
         <div>
@@ -1030,6 +1393,8 @@ def render_control_panel_page(
     </form>
       </section>
 
+      {fast_trading_modal}
+
       <section class="card control-panel-section">
     <div class="hdr">
       <div class="acct">{html_escape(t(lang,'algo_stop_title'))}</div>
@@ -1049,6 +1414,10 @@ def render_control_panel_page(
             <label class="choice-btn" for="stop-mode-c">C</label>
             <input class="choice-input" type="radio" id="stop-mode-d" name="trading_mode" value="D">
             <label class="choice-btn" for="stop-mode-d">D</label>
+            <input class="choice-input" type="radio" id="stop-mode-e" name="trading_mode" value="E">
+            <label class="choice-btn" for="stop-mode-e">E</label>
+            <input class="choice-input" type="radio" id="stop-mode-f" name="trading_mode" value="F">
+            <label class="choice-btn" for="stop-mode-f">F</label>
           </div>
         </div>
         <div>
@@ -1075,11 +1444,17 @@ def render_control_panel_page(
       <div class="ts">-</div>
     </div>
 
-    <form method="post" action="/submit-cancel-open-orders">
-      <div>
-        <label>{html_escape(t(lang,'cancel_accounts'))}</label>
-        <div class="choice-grid">
-          {cancel_account_buttons}
+    <form method="post" action="/submit-cancel-open-orders" id="cancel-open-orders-form">
+      <div class="row">
+        <div>
+          <label>{html_escape(t(lang,'cancel_accounts'))}</label>
+          <div class="choice-grid">
+            {cancel_account_buttons}
+          </div>
+        </div>
+        <div>
+          <label for="cancel_symbol">{html_escape(t(lang,'cancel_symbol'))}</label>
+          <input id="cancel_symbol" name="symbol" list="symbol-suggestions" placeholder="{html_escape(t(lang,'cancel_symbol_placeholder'))}" />
         </div>
       </div>
       <div class="help">{html_escape(t(lang,'cancel_orders_help'))}</div>
@@ -1287,6 +1662,8 @@ def render_control_panel_page(
         setInterval(refreshLimitSummary, 5000);
       }})();
     </script>
+
+    {fast_trading_script}
 
     <script>
       (function(){{

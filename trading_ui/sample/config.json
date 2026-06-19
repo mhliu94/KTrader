@@ -1,10 +1,5 @@
 {
-  "accounts": [
-    { "id": "ACC-FUTU", "num_id": 1, "broker_id": "FT-998877", "broker": "FUTU" },
-    { "id": "ACC-TIGER-JINYUAN", "num_id": 2, "broker_id": "TG-JINYUAN", "broker": "Tiger" },
-    { "id": "ACC-TIGER-VICTORIA", "num_id": 3, "broker_id": "TG-VICTORIA", "broker": "Tiger" },
-    { "id": "ACC-USMART", "num_id": 4, "broker_id": "USM-13579", "broker": "uSMART" }
-  ],
+  "accounts_file": "./trading_accounts.json",
   "symbols": ["AAPL", "MSFT", "GOOG", "TSLA", "NVDA", "AEHL", "BIYA"],
   "auth": {
     "users": {

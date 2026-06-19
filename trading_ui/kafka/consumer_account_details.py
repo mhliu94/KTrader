@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import threading
 from typing import Any, Dict, Optional
@@ -6,8 +7,10 @@ from typing import Any, Dict, Optional
 from confluent_kafka import Consumer, KafkaError
 
 from ..store import AccountStore
-from ..models import AccountSnapshot
+from ..models import AccountMeta, AccountSnapshot
 from ..services.fallback import parse_snapshot_obj
+
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_account_message(raw: bytes) -> Optional[AccountSnapshot]:
@@ -19,9 +22,11 @@ def parse_account_message(raw: bytes) -> Optional[AccountSnapshot]:
 
 
 class AccountDetailsConsumer:
-    def __init__(self, kafka_cfg: Dict[str, Any], store: AccountStore) -> None:
+    def __init__(self, kafka_cfg: Dict[str, Any], store: AccountStore, account_metas: Dict[str, AccountMeta]) -> None:
         self._kafka_cfg = kafka_cfg
         self._store = store
+        self._account_metas = dict(account_metas)
+        self._account_ids_by_num = {meta.num_id: meta.id for meta in account_metas.values()}
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._consumer: Optional[Consumer] = None
@@ -72,5 +77,60 @@ class AccountDetailsConsumer:
                 continue
 
             snap = parse_account_message(val)
-            if snap is not None:
+            if snap is None:
+                LOGGER.warning(
+                    "Ignoring malformed account-details Kafka message topic=%s partition=%s offset=%s",
+                    msg.topic(),
+                    msg.partition(),
+                    msg.offset(),
+                )
+                continue
+
+            if self._validate_snapshot(snap, msg):
                 self._store.upsert(snap)
+
+    def _validate_snapshot(self, snap: AccountSnapshot, msg) -> bool:
+        account_id = str(snap.account_id or "").strip()
+        meta = self._account_metas.get(account_id)
+        if meta is None:
+            LOGGER.warning(
+                "Ignoring account snapshot with unknown account_id=%s account_num_id=%s topic=%s partition=%s offset=%s",
+                account_id,
+                snap.account_num_id,
+                msg.topic(),
+                msg.partition(),
+                msg.offset(),
+            )
+            return False
+
+        snap.account_id = account_id
+        if snap.account_num_id is None:
+            snap.account_num_id = meta.num_id
+            return True
+
+        expected_account_id = self._account_ids_by_num.get(snap.account_num_id)
+        if expected_account_id is None:
+            LOGGER.warning(
+                "Ignoring account snapshot with unknown account_num_id=%s account_id=%s topic=%s partition=%s offset=%s",
+                snap.account_num_id,
+                account_id,
+                msg.topic(),
+                msg.partition(),
+                msg.offset(),
+            )
+            return False
+
+        if expected_account_id != account_id or snap.account_num_id != meta.num_id:
+            LOGGER.warning(
+                "Ignoring account snapshot with mismatched account identifiers account_id=%s account_num_id=%s expected_account_id=%s expected_num_id=%s topic=%s partition=%s offset=%s",
+                account_id,
+                snap.account_num_id,
+                expected_account_id,
+                meta.num_id,
+                msg.topic(),
+                msg.partition(),
+                msg.offset(),
+            )
+            return False
+
+        return True

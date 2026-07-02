@@ -938,8 +938,18 @@ class TigerBroker:
         else:
             order = self._market_order_by_amount(account=account, contract=contract, action=side, amount=order_size)
 
-        self._trade_client.place_order(order)
-        LOGGER.info("Placed Tiger market order command_id=%s order=%s", command_id(command), order)
+        tiger_order_id = self._trade_client.place_order(order)
+        if tiger_order_id is None:
+            raise RuntimeError(
+                "Tiger market order command_id=%s returned no order id; order may not have been accepted: %s"
+                % (command_id(command), order)
+            )
+        LOGGER.info(
+            "Placed Tiger market order command_id=%s tiger_order_id=%s order=%s",
+            command_id(command),
+            tiger_order_id,
+            order,
+        )
 
     def place_limit_order(self, command: Dict[str, Any]) -> None:
         symbol = str(command.get("symbol") or "").strip().upper()
@@ -983,8 +993,18 @@ class TigerBroker:
 
         contract = self._stock_contract(symbol=symbol, currency=self.currency)
         order = self._limit_order(account=account, contract=contract, action=side, quantity=quantity, limit_price=limit_price)
-        self._trade_client.place_order(order)
-        LOGGER.info("Placed Tiger limit order command_id=%s order=%s", command_id(command), order)
+        tiger_order_id = self._trade_client.place_order(order)
+        if tiger_order_id is None:
+            raise RuntimeError(
+                "Tiger limit order command_id=%s returned no order id; order may not have been accepted: %s"
+                % (command_id(command), order)
+            )
+        LOGGER.info(
+            "Placed Tiger limit order command_id=%s tiger_order_id=%s order=%s",
+            command_id(command),
+            tiger_order_id,
+            order,
+        )
 
     def convert_currency(self, command: Dict[str, Any]) -> None:
         source_currency = str(command.get("source_currency") or "").strip().upper()
@@ -1441,7 +1461,16 @@ class TradingCommandConsumer:
     def _is_tiger_order(self, command: Dict[str, Any]) -> bool:
         account_id = str(command.get("account_id") or "").strip()
         if self._tiger_account_ids:
-            return bool(account_id) and account_id in self._tiger_account_ids
+            if account_id and account_id in self._tiger_account_ids:
+                return True
+            log_method = LOGGER.info if self._looks_like_tiger_command(command) else LOGGER.debug
+            log_method(
+                "Ignoring command for account_id=%s; Tiger listener account_ids=%s payload=%s",
+                account_id or "<missing>",
+                ",".join(sorted(self._tiger_account_ids)),
+                command_summary(command),
+            )
+            return False
 
         if not self._allow_broker_fallback:
             LOGGER.warning("Ignoring Tiger command without explicit UI account routing: %s", command_summary(command))
@@ -1453,6 +1482,18 @@ class TradingCommandConsumer:
 
         broker_id = str(command.get("broker_id") or "").strip().upper()
         return broker_id.startswith("TG-")
+
+    def _looks_like_tiger_command(self, command: Dict[str, Any]) -> bool:
+        broker = str(command.get("broker") or "").strip().lower()
+        if broker:
+            return broker == "tiger"
+
+        broker_id = str(command.get("broker_id") or "").strip().upper()
+        if broker_id.startswith("TG-"):
+            return True
+
+        account_id = str(command.get("account_id") or "").strip().upper()
+        return account_id.startswith("TIGER")
 
     def _resolve_execute_at(self, command: Dict[str, Any]) -> datetime:
         execute_at = command.get("execute_at")

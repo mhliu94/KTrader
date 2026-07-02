@@ -180,12 +180,12 @@ export KAFKA_AUTO_OFFSET_RESET="${KAFKA_AUTO_OFFSET_RESET:-latest}"
 export KAFKA_POLL_TIMEOUT_SEC="${KAFKA_POLL_TIMEOUT_SEC:-1.0}"
 
 # Used as the stable identifier when this listener publishes server status updates.
-export SERVER_ID="${SERVER_ID:-tiger-listener-peakrise}"
+export SERVER_ID="${SERVER_ID:-tiger-listener-jinyuan}"
 
-export TIGER_KAFKA_GROUP_ID="${TIGER_KAFKA_GROUP_ID:-tiger-trading-server-peakrise}"
+export TIGER_KAFKA_GROUP_ID="${TIGER_KAFKA_GROUP_ID:-tiger-trading-server-jinyuan}"
 export TRADING_ACCOUNTS_CONFIG="${TRADING_ACCOUNTS_CONFIG:-$SCRIPT_DIR/trading_ui/sample/trading_accounts.json}"
-export TIGER_UI_ACCOUNT_IDS="${TIGER_UI_ACCOUNT_IDS:-TIGER_PEAKRISE}"
-export TIGER_UI_ACCOUNT_NUM_ID_MAP="${TIGER_UI_ACCOUNT_NUM_ID_MAP:-TIGER_PEAKRISE:2}"
+export TIGER_UI_ACCOUNT_IDS="${TIGER_UI_ACCOUNT_IDS:-TIGER_JINYUAN}"
+export TIGER_UI_ACCOUNT_NUM_ID_MAP="${TIGER_UI_ACCOUNT_NUM_ID_MAP:-TIGER_JINYUAN:2}"
 export TIGER_ACCOUNT_MAP="${TIGER_ACCOUNT_MAP:-}"
 export TIGER_MAX_COMMAND_AGE_SECONDS="${TIGER_MAX_COMMAND_AGE_SECONDS:-300}"
 export TIGER_PRECHECK_ONLY="${TIGER_PRECHECK_ONLY:-false}"
@@ -201,8 +201,8 @@ if [[ -n "${TIGEROPEN_PROPS_PATH:-}" ]]; then
   export TIGER_SECRET_KEY="${TIGER_SECRET_KEY:-${TIGEROPEN_SECRET_KEY:-}}"
 else
   # Fill these in here, or set them in the environment/properties file.
-  export TIGER_ID="${TIGER_ID:-${TIGEROPEN_TIGER_ID:-}}"
-  export TIGER_ACCOUNT="${TIGER_ACCOUNT:-${TIGEROPEN_ACCOUNT:-}}"
+  export TIGER_ID="${TIGER_ID:-${TIGEROPEN_TIGER_ID:-20159464}}"
+  export TIGER_ACCOUNT="${TIGER_ACCOUNT:-${TIGEROPEN_ACCOUNT:-6871313}}"
   export TIGER_SECRET_KEY="${TIGER_SECRET_KEY:-${TIGEROPEN_SECRET_KEY:-9f1db971-2623-3783-ae77-41aaa03a351e}}"
 fi
 export TIGEROPEN_TIGER_ID="${TIGEROPEN_TIGER_ID:-$TIGER_ID}"

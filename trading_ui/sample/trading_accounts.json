@@ -1,7 +1,7 @@
 {
   "accounts": [
     {
-      "ip_address": "172.232.237.84",
+      "ip_address": "172.232.237.184",
       "machine_alias": "Vultr-Jakarta1",
       "numeric_id": 1,
       "string_id": "TIGER_VICTORIA",
@@ -12,7 +12,7 @@
       "ip_address": "172.235.244.20",
       "machine_alias": "Linode-Jakarta2",
       "numeric_id": 2,
-      "string_id": "TIGER_JINYUAN",
+      "string_id": "TIGER_PEAKRISE",
       "broker": "Tiger",
       "trading_medium": "API"
     },

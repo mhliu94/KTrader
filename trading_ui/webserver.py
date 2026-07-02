@@ -386,9 +386,9 @@ async def submit_limit_order(request: Request):
 
     market_last = None
     if not limit_price_raw:
-        quote = MD_STORE.get_for_symbols([symbol]).get(symbol)
-        if quote is not None and quote.error is None:
-            market_last = quote.last
+        quote_row = MD_STORE.get_for_symbols([symbol]).get(symbol)
+        if quote_row is not None and quote_row.error is None:
+            market_last = quote_row.last
 
     if not account_ids:
         return RedirectResponse(url=f"/control-panel?err={quote(t(lang, 'quick_pick_account'))}", status_code=303)

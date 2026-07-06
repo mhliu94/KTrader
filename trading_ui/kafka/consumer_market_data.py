@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -6,6 +7,8 @@ from typing import Any, Dict, Optional
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING
 
 from ..services.market_data import MarketDataStore, order_book_from_price_book, quote_row_from_price_book
+
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_market_data_message(raw: bytes):
@@ -38,7 +41,7 @@ class PriceBookConsumer:
         topic = self._kafka_cfg["market_data_topic"]
         self._consumer = Consumer(conf)
         self._consumer.subscribe([topic], on_assign=self._on_assign)
-        print(f"[market-data] consuming topic='{topic}' bootstrap='{bootstrap_servers}'")
+        LOGGER.info("market-data consuming topic=%s bootstrap=%s", topic, bootstrap_servers)
 
         self._thread = threading.Thread(target=self._run, name="price-book-consumer", daemon=True)
         self._thread.start()
@@ -64,7 +67,7 @@ class PriceBookConsumer:
 
             if msg.error():
                 if msg.error().code() != KafkaError._PARTITION_EOF:
-                    print(f"[market-data] consume error: {msg.error()}")
+                    LOGGER.warning("market-data consume error: %s", msg.error())
                     time.sleep(0.2)
                 continue
 
@@ -91,5 +94,5 @@ class PriceBookConsumer:
         for partition in partitions:
             partition.offset = OFFSET_BEGINNING
         assigned = ", ".join(f"{p.topic}[{p.partition}]@{p.offset}" for p in partitions)
-        print(f"[market-data] assigned: {assigned}")
+        LOGGER.info("market-data assigned: %s", assigned)
         consumer.assign(partitions)

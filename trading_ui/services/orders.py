@@ -536,6 +536,7 @@ def build_algo_start_command(
     single_order_notional_limit: float,
     order_rate_limit_per_minute: float,
     fast_trading_groups: Optional[List[Dict]] = None,
+    fast_trading_test_mode: Optional[bool] = None,
 ) -> Dict:
     cmd_id = f"algo_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
     cmd: Dict = {
@@ -554,7 +555,38 @@ def build_algo_start_command(
     }
     if fast_trading_groups is not None:
         cmd["fast_trading_groups"] = fast_trading_groups
+    if fast_trading_test_mode is not None:
+        cmd["fast_trading_test_mode"] = bool(fast_trading_test_mode)
     return cmd
+
+
+def _truthy_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def parse_fast_trading_config_payload(
+    fast_trading_config_raw: object,
+    fast_config_required: str,
+) -> Tuple[Optional[object], Optional[str]]:
+    if fast_trading_config_raw is None:
+        return None, fast_config_required
+
+    if isinstance(fast_trading_config_raw, str):
+        raw = fast_trading_config_raw.strip()
+        if not raw:
+            return None, fast_config_required
+        try:
+            return json.loads(raw), None
+        except json.JSONDecodeError:
+            return None, fast_config_required
+
+    return fast_trading_config_raw, None
 
 
 def parse_fast_trading_groups(
@@ -569,21 +601,16 @@ def parse_fast_trading_groups(
     fast_allocation_positive: str,
     fast_allocation_total: str,
 ) -> Tuple[Optional[List[Dict]], Optional[str]]:
-    if fast_trading_config_raw is None:
-        return None, fast_config_required
+    payload, err = parse_fast_trading_config_payload(fast_trading_config_raw, fast_config_required)
+    if err:
+        return None, err
 
-    if isinstance(fast_trading_config_raw, str):
-        raw = fast_trading_config_raw.strip()
-        if not raw:
-            return None, fast_config_required
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            return None, fast_config_required
+    if isinstance(payload, dict):
+        groups = payload.get("groups")
+    elif isinstance(payload, list):
+        groups = payload
     else:
-        payload = fast_trading_config_raw
-
-    groups = payload.get("groups") if isinstance(payload, dict) else None
+        groups = None
     if not isinstance(groups, list) or not groups:
         return None, fast_group_required
 
@@ -643,6 +670,18 @@ def parse_fast_trading_groups(
     return normalized_groups, None
 
 
+def parse_fast_trading_test_mode(
+    fast_trading_config_raw: object,
+    fast_config_required: str,
+) -> Tuple[bool, Optional[str]]:
+    payload, err = parse_fast_trading_config_payload(fast_trading_config_raw, fast_config_required)
+    if err:
+        return False, err
+    if not isinstance(payload, dict):
+        return False, None
+    return _truthy_bool(payload.get("test_mode")), None
+
+
 def validate_algo_start_inputs(
     trading_mode: str,
     symbol: str,
@@ -697,6 +736,7 @@ def validate_algo_start_inputs(
         return None, end_time_required
 
     fast_trading_groups = None
+    fast_trading_test_mode = None
     if trading_mode in _FAST_MODES:
         fast_trading_groups, err = parse_fast_trading_groups(
             fast_trading_config_raw=fast_trading_config_raw,
@@ -712,6 +752,12 @@ def validate_algo_start_inputs(
         )
         if err:
             return None, err
+        fast_trading_test_mode, err = parse_fast_trading_test_mode(
+            fast_trading_config_raw=fast_trading_config_raw,
+            fast_config_required=fast_config_required,
+        )
+        if err:
+            return None, err
 
     cmd = build_algo_start_command(
         trading_mode=trading_mode,
@@ -724,6 +770,7 @@ def validate_algo_start_inputs(
         single_order_notional_limit=single_order_notional_limit,
         order_rate_limit_per_minute=order_rate_limit_per_minute,
         fast_trading_groups=fast_trading_groups,
+        fast_trading_test_mode=fast_trading_test_mode,
     )
     return cmd, None
 

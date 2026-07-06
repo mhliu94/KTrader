@@ -1,10 +1,24 @@
 import json
+import logging
+import os
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict
 
 from kafka import KafkaConsumer, TopicPartition
+
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+LOGGER = logging.getLogger("market-data.price-book-update-counter")
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATE_FORMAT,
+    )
 
 
 def load_producer_config() -> Dict[str, object]:
@@ -16,12 +30,12 @@ def load_producer_config() -> Dict[str, object]:
 
 def print_counts(counts: Dict[str, int]) -> None:
     if not counts:
-        print("No updates received.")
+        LOGGER.info("No updates received.")
         return
 
-    print("Update counts by symbol:")
+    LOGGER.info("Update counts by symbol:")
     for symbol in sorted(counts.keys()):
-        print(f"  {symbol}: {counts[symbol]}")
+        LOGGER.info("  %s: %s", symbol, counts[symbol])
 
 
 def seek_to_last_hour(consumer: KafkaConsumer, topic: str) -> None:
@@ -45,6 +59,7 @@ def seek_to_last_hour(consumer: KafkaConsumer, topic: str) -> None:
 
 
 def main() -> None:
+    configure_logging()
     cfg = load_producer_config()
     kafka_server_ip = str(cfg["kafka_server_ip"])
     kafka_port = int(cfg["kafka_port"])
@@ -59,8 +74,8 @@ def main() -> None:
 
     counts: Dict[str, int] = defaultdict(int)
 
-    print(f"Consuming topic '{kafka_topic}' from {kafka_server_ip}:{kafka_port}")
-    print("Starting from messages published in the last hour. Press Ctrl+C to stop.")
+    LOGGER.info("Consuming topic %s from %s:%s", kafka_topic, kafka_server_ip, kafka_port)
+    LOGGER.info("Starting from messages published in the last hour. Press Ctrl+C to stop.")
 
     try:
         seek_to_last_hour(consumer, kafka_topic)
@@ -72,22 +87,22 @@ def main() -> None:
                     try:
                         payload = json.loads(msg.value)
                     except json.JSONDecodeError as exc:
-                        print(f"Skipping invalid JSON message: {exc}")
+                        LOGGER.warning("Skipping invalid JSON message: %s", exc)
                         continue
 
                     symbol = payload.get("symbol")
                     volume = payload.get("volume")
                     if not symbol:
-                        print("Skipping message without 'symbol' field.")
+                        LOGGER.warning("Skipping message without 'symbol' field.")
                         continue
-                    print("Volume: " + str(volume))
+                    LOGGER.info("Volume: %s", volume)
 
                     counts[str(symbol)] += 1
 
     except KeyboardInterrupt:
-        print("\nStopping consumer...")
+        LOGGER.info("Stopping consumer...")
     finally:
-        print("\nFinal totals (last hour + live while running):")
+        LOGGER.info("Final totals (last hour + live while running):")
         print_counts(counts)
         consumer.close()
 

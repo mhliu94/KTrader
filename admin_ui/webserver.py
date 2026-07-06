@@ -1,3 +1,4 @@
+import logging
 import os
 import secrets
 from hmac import compare_digest
@@ -8,11 +9,16 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import uvicorn
 
+from trading_ui.app_logging import configure_logging
+
 from .config import load_config
 from .i18n import SUPPORTED_LANGS, resolve_lang, t
 from .kafka.consumer_live_updates import LiveTradingUpdatesConsumer
 from .store import StrategyStore
 from .templates import render_layout, render_login_page, render_strategy_page
+
+configure_logging()
+LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title="Admin UI")
 
@@ -170,6 +176,7 @@ def run() -> None:
     kwargs = {
         "host": server_cfg["host"],
         "port": int(server_cfg["port"]),
+        "log_config": None,
     }
     if server_cfg.get("ssl_enabled"):
         kwargs["ssl_certfile"] = server_cfg["ssl_certfile"]

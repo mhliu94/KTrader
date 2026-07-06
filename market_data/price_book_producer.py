@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import time
 import threading
 from dataclasses import dataclass
@@ -12,9 +14,20 @@ from pathlib import Path
 
 TS_API_BASE = "https://api.tradestation.com"
 TS_OAUTH_TOKEN_URL = "https://signin.tradestation.com/oauth/token"
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+LOGGER = logging.getLogger("market-data.price-book-producer")
 
 _day_volume_by_symbol: Dict[str, int] = {}
 _day_volume_lock = threading.Lock()
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATE_FORMAT,
+    )
 
 
 @dataclass
@@ -327,22 +340,23 @@ def print_depth_event(evt: Dict[str, Any]) -> None:
             value=json.dumps(payload)
         )
     except Exception as e:
-        print(f"[publish error] {type(e).__name__}: {e}")
+        LOGGER.warning("publish error %s: %s", type(e).__name__, e)
 
 
 def print_err(e: Exception) -> None:
-    print(f"[stream error] {type(e).__name__}: {e}")
+    LOGGER.warning("stream error %s: %s", type(e).__name__, e)
 
 
 def sanity_check_quote(ts_api_base: str, access_token: str):
     url = f"{ts_api_base}/v3/marketdata/quotes/AAPL"
     r = requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=15)
-    print("status:", r.status_code)
-    print("body:", r.text[:500])
+    LOGGER.info("status: %s", r.status_code)
+    LOGGER.info("body: %s", r.text[:500])
     r.raise_for_status()
 
 
 if __name__ == "__main__":
+    configure_logging()
     script_path = Path(__file__)
     script_dir = script_path.parent
     config_path = script_dir / 'md_producer_config.json'
@@ -380,7 +394,7 @@ if __name__ == "__main__":
     quote_poller = TSQuotePoller(token_manager=tm, symbols=trading_symbols, on_error=print_err)
     try:
         quote_poller.start()
-        print("Started quote poller for day volume")
+        LOGGER.info("Started quote poller for day volume")
 
         for symbol in trading_symbols:
             stream = TSHttpStream(token_manager=tm, on_message=print_depth_event, on_error=print_err)
@@ -393,12 +407,12 @@ if __name__ == "__main__":
             streams.append(stream)
             threads.append(thread)
             thread.start()
-            print(f"Started market depth stream for {symbol}")
+            LOGGER.info("Started market depth stream for %s", symbol)
 
         while True:
             time.sleep(1.0)
     except KeyboardInterrupt:
-        print("Stopping market depth streams...")
+        LOGGER.info("Stopping market depth streams...")
     finally:
         quote_poller.stop()
         for stream in streams:

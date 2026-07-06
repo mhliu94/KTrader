@@ -11,6 +11,14 @@ is_true() {
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
+}
+
+log_error() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2
+}
+
 ensure_self_signed_cert() {
   local tls_name="${UI_TLS_NAME:-$UI_HOST}"
   local san_prefix="DNS"
@@ -26,11 +34,11 @@ ensure_self_signed_cert() {
   fi
 
   if ! command -v openssl >/dev/null 2>&1; then
-    echo "openssl is required to generate the HTTPS certificate." >&2
+    log_error "openssl is required to generate the HTTPS certificate."
     exit 1
   fi
 
-  echo "Generating self-signed TLS certificate for $tls_name"
+  log "Generating self-signed TLS certificate for $tls_name"
   openssl req \
     -x509 \
     -nodes \
@@ -75,13 +83,13 @@ stop_old_trading_ui_sessions() {
     return
   fi
 
-  echo "Stopping previous trading UI process(es): ${pids[*]}"
+  log "Stopping previous trading UI process(es): ${pids[*]}"
   kill "${pids[@]}" 2>/dev/null || true
   sleep 1
 
   for pid in "${pids[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
-      echo "Force-stopping trading UI process $pid"
+      log "Force-stopping trading UI process $pid"
       kill -9 "$pid" 2>/dev/null || true
     fi
   done
@@ -127,20 +135,20 @@ export UI_REDIRECT_TARGET_PORT="${UI_REDIRECT_TARGET_PORT:-$UI_PORT}"
 
 stop_old_trading_ui_sessions
 
-echo "Starting trading UI with:"
-echo "  ACCOUNT_DASHBOARD_CONFIG=$ACCOUNT_DASHBOARD_CONFIG"
-echo "  UI_HOST=$UI_HOST"
-echo "  UI_PORT=$UI_PORT"
-echo "  UI_SSL_ENABLED=$UI_SSL_ENABLED"
-echo "  UI_SSL_CERTFILE=$UI_SSL_CERTFILE"
-echo "  UI_SSL_KEYFILE=$UI_SSL_KEYFILE"
-echo "  UI_REDIRECT_ENABLED=$UI_REDIRECT_ENABLED"
-echo "  UI_REDIRECT_HOST=$UI_REDIRECT_HOST"
-echo "  UI_REDIRECT_PORT=$UI_REDIRECT_PORT"
-echo "  KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOTSTRAP_SERVERS"
-echo "  KAFKA_MARKET_DATA_BOOTSTRAP_SERVERS=$KAFKA_MARKET_DATA_BOOTSTRAP_SERVERS"
-echo "  MARKET_DATA_HISTORICAL_PRICES_CSV=$MARKET_DATA_HISTORICAL_PRICES_CSV"
-echo "  MARKET_INSIGHTS_MAX_LEVELS=$MARKET_INSIGHTS_MAX_LEVELS"
+log "Starting trading UI with:"
+log "  ACCOUNT_DASHBOARD_CONFIG=$ACCOUNT_DASHBOARD_CONFIG"
+log "  UI_HOST=$UI_HOST"
+log "  UI_PORT=$UI_PORT"
+log "  UI_SSL_ENABLED=$UI_SSL_ENABLED"
+log "  UI_SSL_CERTFILE=$UI_SSL_CERTFILE"
+log "  UI_SSL_KEYFILE=$UI_SSL_KEYFILE"
+log "  UI_REDIRECT_ENABLED=$UI_REDIRECT_ENABLED"
+log "  UI_REDIRECT_HOST=$UI_REDIRECT_HOST"
+log "  UI_REDIRECT_PORT=$UI_REDIRECT_PORT"
+log "  KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOTSTRAP_SERVERS"
+log "  KAFKA_MARKET_DATA_BOOTSTRAP_SERVERS=$KAFKA_MARKET_DATA_BOOTSTRAP_SERVERS"
+log "  MARKET_DATA_HISTORICAL_PRICES_CSV=$MARKET_DATA_HISTORICAL_PRICES_CSV"
+log "  MARKET_INSIGHTS_MAX_LEVELS=$MARKET_INSIGHTS_MAX_LEVELS"
 
 UVICORN_ARGS=(
   trading_ui.webserver:app

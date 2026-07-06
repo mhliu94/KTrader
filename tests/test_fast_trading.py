@@ -1,8 +1,13 @@
 import unittest
+from datetime import datetime, timezone
 
 from trading_ui.models import AccountMeta
-from trading_ui.services.fast_trading import build_fast_trading_cycle_commands
-from trading_ui.services.market_data import BookLevel, OrderBookSnapshot
+from trading_ui.services.fast_trading import (
+    FastTradingStrategyManager,
+    build_fast_trading_cycle_commands,
+    normalize_fast_trading_end_time,
+)
+from trading_ui.services.market_data import BookLevel, MarketDataStore, OrderBookSnapshot
 
 
 def metas(*account_ids):
@@ -14,6 +19,18 @@ def metas(*account_ids):
             trading_medium="API",
         )
         for idx, account_id in enumerate(account_ids, start=1)
+    }
+
+
+def metas_by_medium(**medium_by_account_id):
+    return {
+        account_id: AccountMeta(
+            id=account_id,
+            num_id=idx,
+            broker="Tiger",
+            trading_medium=medium,
+        )
+        for idx, (account_id, medium) in enumerate(medium_by_account_id.items(), start=1)
     }
 
 
@@ -133,6 +150,138 @@ class FastTradingCycleTests(unittest.TestCase):
         )
 
         self.assertEqual(result.commands[0]["qty_shares"], 33)
+
+    def test_wait_uses_slowest_trading_medium_in_execution_group(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[BookLevel(price=105, quantity=1000)],
+            asks=[],
+        )
+        groups = [
+            {
+                "group_id": 1,
+                "price_limit": 100,
+                "accounts": [
+                    {"account_id": "API_ACCOUNT", "allocation_pct": 10},
+                    {"account_id": "WEB_ACCOUNT", "allocation_pct": 10},
+                    {"account_id": "WINDOWS_ACCOUNT", "allocation_pct": 10},
+                    {"account_id": "EMULATOR_ACCOUNT", "allocation_pct": 10},
+                ],
+            },
+        ]
+
+        result = build_fast_trading_cycle_commands(
+            trading_mode="F",
+            symbol="AAPL",
+            book=book,
+            fast_trading_groups=groups,
+            account_metas=metas_by_medium(
+                API_ACCOUNT="API",
+                WEB_ACCOUNT="WEB",
+                WINDOWS_ACCOUNT="WINDOWS",
+                EMULATOR_ACCOUNT="EMULATOR",
+            ),
+            cycle_id="cycle-5",
+        )
+
+        self.assertEqual(result.wait_seconds, 35.0)
+        self.assertTrue(all(cmd["fast_trading_wait_seconds"] == 35.0 for cmd in result.commands))
+
+    def test_wait_for_api_only_execution_group_is_five_seconds(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[BookLevel(price=105, quantity=1000)],
+            asks=[],
+        )
+        groups = [
+            {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
+        ]
+
+        result = build_fast_trading_cycle_commands(
+            trading_mode="F",
+            symbol="AAPL",
+            book=book,
+            fast_trading_groups=groups,
+            account_metas=metas("A"),
+            cycle_id="cycle-6",
+        )
+
+        self.assertEqual(result.wait_seconds, 5.0)
+
+    def test_past_stop_time_becomes_manual_termination_time(self):
+        normalized = normalize_fast_trading_end_time(
+            "2024-01-01T00:00:00Z",
+            now=datetime(2026, 7, 6, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(normalized, "2099-01-01T00:00:00Z")
+
+    def test_test_mode_logs_without_publishing(self):
+        store = MarketDataStore()
+        store.upsert_book(
+            OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[BookLevel(price=105, quantity=1000)],
+                asks=[],
+            )
+        )
+        published = []
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            publish_command=lambda cmd, key: published.append((key, cmd)),
+        )
+
+        command = {
+            "trading_mode": "F",
+            "symbol": "AAPL",
+            "fast_trading_test_mode": True,
+            "fast_trading_groups": [
+                {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
+            ],
+        }
+
+        with self.assertLogs("trading-ui.fast-trading", level="INFO") as logs:
+            result = manager.run_cycle(command)
+
+        self.assertEqual(len(result.commands), 1)
+        self.assertEqual(published, [])
+        self.assertTrue(result.commands[0]["fast_trading_test_mode"])
+        self.assertIn("TEST MODE", "\n".join(logs.output))
+        self.assertIn("without Kafka publish", "\n".join(logs.output))
+
+    def test_normal_mode_logs_and_publishes(self):
+        store = MarketDataStore()
+        store.upsert_book(
+            OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[BookLevel(price=105, quantity=1000)],
+                asks=[],
+            )
+        )
+        published = []
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            publish_command=lambda cmd, key: published.append((key, cmd)),
+        )
+
+        command = {
+            "trading_mode": "F",
+            "symbol": "AAPL",
+            "fast_trading_groups": [
+                {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
+            ],
+        }
+
+        with self.assertLogs("trading-ui.fast-trading", level="INFO") as logs:
+            result = manager.run_cycle(command)
+
+        self.assertEqual(len(result.commands), 1)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0][0], "A")
+        self.assertNotIn("fast_trading_test_mode", published[0][1])
+        self.assertIn("Publishing fast trading command", "\n".join(logs.output))
 
 
 if __name__ == "__main__":

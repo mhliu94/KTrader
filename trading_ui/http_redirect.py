@@ -1,5 +1,12 @@
+import logging
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .app_logging import configure_logging
+
+
+configure_logging()
+LOGGER = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -55,9 +62,12 @@ class RedirectHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((REDIRECT_BIND_HOST, REDIRECT_BIND_PORT), RedirectHandler)
-    print(
-        f"[redirect] listening on http://{REDIRECT_BIND_HOST}:{REDIRECT_BIND_PORT} "
-        f"-> https://{REDIRECT_TARGET_HOST}:{REDIRECT_TARGET_PORT}"
+    LOGGER.info(
+        "redirect listening on http://%s:%s -> https://%s:%s",
+        REDIRECT_BIND_HOST,
+        REDIRECT_BIND_PORT,
+        REDIRECT_TARGET_HOST,
+        REDIRECT_TARGET_PORT,
     )
     server.serve_forever()
 

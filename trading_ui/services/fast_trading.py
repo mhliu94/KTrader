@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -17,6 +18,13 @@ LOGGER = logging.getLogger("trading-ui.fast-trading")
 FAST_TRADING_MODES = {"E", "F"}
 FAST_COMBINE_TARGET_SHARES = 1000
 FAST_MIN_EXECUTABLE_SHARES = 100
+FAST_MANUAL_END_TIME = datetime(2099, 1, 1, tzinfo=timezone.utc)
+FAST_TRADING_WAIT_SECONDS_BY_MEDIUM = {
+    "API": 5.0,
+    "WEB": 20.0,
+    "WINDOWS": 25.0,
+    "EMULATOR": 35.0,
+}
 
 
 @dataclass
@@ -28,6 +36,7 @@ class FastTradingCycleResult:
     total_resting_qty: int = 0
     execution_group_id: Optional[int] = None
     limit_price: Optional[float] = None
+    wait_seconds: Optional[float] = None
     commands: List[Dict[str, Any]] = field(default_factory=list)
     reason: str = ""
 
@@ -67,6 +76,18 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalize_fast_trading_end_time(value: Any, now: Optional[datetime] = None) -> str:
+    end_time = _parse_iso_datetime(value)
+    current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if end_time <= current_time:
+        return _iso_z(FAST_MANUAL_END_TIME)
+    return str(value)
+
+
 def _as_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -74,6 +95,26 @@ def _as_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _truthy_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _command_json(command: Dict[str, Any]) -> str:
+    return json.dumps(command, sort_keys=True, separators=(",", ":"))
+
+
+def _wait_seconds_for_account(account_id: str, account_metas: Dict[str, AccountMeta]) -> float:
+    meta = account_metas.get(account_id)
+    medium = str(getattr(meta, "trading_medium", "") or "API").strip().upper()
+    return FAST_TRADING_WAIT_SECONDS_BY_MEDIUM.get(medium, FAST_TRADING_WAIT_SECONDS_BY_MEDIUM["API"])
 
 
 def _normalize_groups(fast_trading_groups: List[Dict[str, Any]]) -> List[_FastGroup]:
@@ -237,6 +278,13 @@ def build_fast_trading_cycle_commands(
 
     if not result.commands:
         result.reason = "allocations_floor_to_zero"
+    else:
+        result.wait_seconds = max(
+            _wait_seconds_for_account(str(cmd.get("account_id") or ""), account_metas)
+            for cmd in result.commands
+        )
+        for cmd in result.commands:
+            cmd["fast_trading_wait_seconds"] = result.wait_seconds
     return result
 
 
@@ -304,12 +352,15 @@ class FastTradingStrategyManager:
         if not symbol:
             raise ValueError("fast trading strategy requires a symbol")
 
+        strategy_command = dict(start_command)
+        strategy_command["end_time_et"] = normalize_fast_trading_end_time(strategy_command.get("end_time_et"))
+        test_mode = _truthy_bool(strategy_command.get("fast_trading_test_mode"))
         key = self._strategy_key(mode, symbol)
         self.stop_strategy(mode, symbol)
 
         strategy = _FastStrategy(
             key=key,
-            command=dict(start_command),
+            command=strategy_command,
             stop_event=threading.Event(),
             started_at=_utc_now_iso(),
         )
@@ -323,7 +374,7 @@ class FastTradingStrategyManager:
         with self._lock:
             self._strategies[key] = strategy
         thread.start()
-        LOGGER.info("Started fast trading strategy key=%s", key)
+        LOGGER.info("Started fast trading strategy key=%s test_mode=%s", key, test_mode)
         return key
 
     def stop_strategy(self, trading_mode: str, symbol: str) -> int:
@@ -375,13 +426,13 @@ class FastTradingStrategyManager:
 
                 cycle_start = time.monotonic()
                 result = self.run_cycle(strategy.command)
-                published_count = len(result.commands)
+                published_count = 0 if _truthy_bool(strategy.command.get("fast_trading_test_mode")) else len(result.commands)
                 with self._lock:
                     strategy.cycles += 1
                     strategy.published_commands += published_count
                     strategy.last_reason = result.reason
 
-                wait_seconds = self._wait_seconds_after_cycle(strategy.command, published_count)
+                wait_seconds = self._wait_seconds_after_cycle(result)
                 elapsed = time.monotonic() - cycle_start
                 if strategy.stop_event.wait(max(0.0, wait_seconds - elapsed)):
                     break
@@ -393,11 +444,10 @@ class FastTradingStrategyManager:
                 if existing is strategy:
                     self._strategies.pop(strategy.key, None)
 
-    def _wait_seconds_after_cycle(self, command: Dict[str, Any], published_count: int) -> float:
-        rate_limit = _as_float(command.get("order_rate_limit_per_minute"))
-        if published_count > 0 and rate_limit is not None and rate_limit > 0:
-            return max(0.1, 60.0 * published_count / rate_limit)
-        return self._cycle_seconds if published_count > 0 else self._idle_cycle_seconds
+    def _wait_seconds_after_cycle(self, result: FastTradingCycleResult) -> float:
+        if result.commands:
+            return result.wait_seconds or self._cycle_seconds
+        return self._idle_cycle_seconds
 
     def run_cycle(self, command: Dict[str, Any]) -> FastTradingCycleResult:
         mode = str(command.get("trading_mode") or "").strip().upper()
@@ -414,10 +464,22 @@ class FastTradingStrategyManager:
             fast_trading_groups=groups,
             account_metas=self._account_metas_provider(),
         )
+        test_mode = _truthy_bool(command.get("fast_trading_test_mode"))
         for cmd in result.commands:
-            self._publish_command(cmd, str(cmd.get("account_id") or "LIMIT_ORDER_FOK"))
+            key = str(cmd.get("account_id") or "LIMIT_ORDER_FOK")
+            if test_mode:
+                cmd["fast_trading_test_mode"] = True
+                LOGGER.info(
+                    "Fast trading TEST MODE logged command without Kafka publish key=%s command=%s",
+                    key,
+                    _command_json(cmd),
+                )
+                continue
+
+            LOGGER.info("Publishing fast trading command key=%s command=%s", key, _command_json(cmd))
+            self._publish_command(cmd, key)
         LOGGER.info(
-            "Fast trading cycle mode=%s symbol=%s resting_side=%s total_qty=%s group=%s price=%s commands=%d reason=%s",
+            "Fast trading cycle mode=%s symbol=%s resting_side=%s total_qty=%s group=%s price=%s commands=%d wait_seconds=%s test_mode=%s reason=%s",
             result.trading_mode,
             result.symbol,
             result.resting_side,
@@ -425,6 +487,8 @@ class FastTradingStrategyManager:
             result.execution_group_id,
             result.limit_price,
             len(result.commands),
+            result.wait_seconds,
+            test_mode,
             result.reason,
         )
         return result

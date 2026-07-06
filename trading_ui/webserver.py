@@ -1,4 +1,5 @@
 import os
+import logging
 import secrets
 from hmac import compare_digest
 from typing import Dict, Tuple
@@ -7,6 +8,7 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from urllib.parse import quote
+from .app_logging import configure_logging
 from .services.market_data import MarketDataStore, HistoricalCloseStore, QuoteRow
 from .templates import render_market_data_page, render_market_insights_page
 from .models import AccountSnapshot
@@ -38,6 +40,9 @@ from .services.fast_trading import FAST_TRADING_MODES, FastTradingStrategyManage
 from .kafka.consumer_account_details import AccountDetailsConsumer
 from .kafka.consumer_market_data import PriceBookConsumer
 from .kafka.producer_trading_commands import TradingCommandsProducer
+
+configure_logging()
+LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title="Trading UI")
 
@@ -133,7 +138,7 @@ def on_startup() -> None:
     SYMBOLS = load_symbols(APP_CONFIG)
     AUTH_USERS = APP_CONFIG["auth"]["users"]
     HIST_CLOSE_STORE = HistoricalCloseStore(APP_CONFIG["market_data"]["historical_prices_csv"])
-    print(f"[market-data] historical_prices_csv='{APP_CONFIG['market_data']['historical_prices_csv']}'")
+    LOGGER.info("market-data historical_prices_csv=%s", APP_CONFIG["market_data"]["historical_prices_csv"])
 
     ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store, ACCOUNT_METAS)
     ACCOUNT_CONSUMER.start()
@@ -850,6 +855,12 @@ async def api_submit_algo(request: Request) -> JSONResponse:
     fast_trading_config_raw = body.get("fast_trading_config")
     if fast_trading_config_raw is None:
         fast_trading_config_raw = body.get("fast_trading_groups")
+        if fast_trading_config_raw is not None and not isinstance(fast_trading_config_raw, dict):
+            fast_trading_config_raw = {"groups": fast_trading_config_raw}
+        if isinstance(fast_trading_config_raw, dict):
+            raw_test_mode = body.get("fast_trading_test_mode", body.get("test_mode"))
+            if raw_test_mode is not None:
+                fast_trading_config_raw = {**fast_trading_config_raw, "test_mode": raw_test_mode}
 
     cmd, err = validate_algo_start_inputs(
         trading_mode=trading_mode,
@@ -926,8 +937,8 @@ async def submit_algo_stop(
         if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES and FAST_TRADING_MANAGER:
             stopped_count = FAST_TRADING_MANAGER.stop_matching(
                 trading_mode=str(cmd.get("trading_mode") or ""),
-                account_ids=cmd.get("account_ids") or [],
             )
+            cmd.pop("account_ids", None)
         COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("trading_mode", "ALGO_STOP"))
         stopped_suffix = f" stopped={stopped_count}" if stopped_count else ""
         ok = f"{t(lang,'published_cmd')}={cmd['command_id']}{stopped_suffix}"
@@ -1097,12 +1108,13 @@ if __name__ == "__main__":
     uvicorn_kwargs: Dict = {
         "host": str(server_cfg.get("host", "0.0.0.0")),
         "port": int(server_cfg.get("port", 8000)),
+        "log_config": None,
     }
     if bool(server_cfg.get("ssl_enabled", False)):
         uvicorn_kwargs["ssl_certfile"] = str(server_cfg.get("ssl_certfile", ""))
         uvicorn_kwargs["ssl_keyfile"] = str(server_cfg.get("ssl_keyfile", ""))
-        print(f"[https] enabled cert='{uvicorn_kwargs['ssl_certfile']}'")
+        LOGGER.info("https enabled cert=%s", uvicorn_kwargs["ssl_certfile"])
     else:
-        print("[https] disabled (HTTP)")
+        LOGGER.info("https disabled (HTTP)")
 
     uvicorn.run("trading_ui.webserver:app", **uvicorn_kwargs)

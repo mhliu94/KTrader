@@ -25,6 +25,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 LOGGER = logging.getLogger("tiger-trading-server")
 TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS = 60
 TRADING_MEDIA = {"EMULATOR", "WINDOWS", "WEB", "API"}
@@ -1650,7 +1651,11 @@ def run_precheck(broker: TigerBroker) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format=LOG_FORMAT)
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATE_FORMAT,
+    )
 
     stop_event = threading.Event()
     install_signal_handlers(stop_event)

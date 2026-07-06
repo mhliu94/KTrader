@@ -31,6 +31,14 @@ is_true() {
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
+}
+
+log_error() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2
+}
+
 trim() {
   local value="${1:-}"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -117,7 +125,7 @@ TIGER_PROPERTIES_PATH="${TIGEROPEN_PROPS_PATH:-${TIGER_PROPERTIES_FILE:-${TIGER_
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tiger-props|--properties|--props|--config)
-      [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+      [[ $# -ge 2 ]] || { log_error "Missing value for $1"; exit 2; }
       TIGER_PROPERTIES_PATH="$2"
       shift 2
       ;;
@@ -126,7 +134,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     --*)
-      echo "Unknown option: $1" >&2
+      log_error "Unknown option: $1"
       usage >&2
       exit 2
       ;;
@@ -134,7 +142,7 @@ while [[ $# -gt 0 ]]; do
       if [[ -z "$TIGER_PROPERTIES_PATH" ]]; then
         TIGER_PROPERTIES_PATH="$1"
       else
-        echo "Unexpected argument: $1" >&2
+        log_error "Unexpected argument: $1"
         usage >&2
         exit 2
       fi
@@ -155,7 +163,7 @@ if [[ -n "$TIGER_PROPERTIES_PATH" ]]; then
   fi
 
   if [[ ! -f "$TIGER_PROPERTIES_FILE_RESOLVED" ]]; then
-    echo "Tiger properties file not found: $TIGER_PROPERTIES_FILE_RESOLVED" >&2
+    log_error "Tiger properties file not found: $TIGER_PROPERTIES_FILE_RESOLVED"
     exit 2
   fi
 
@@ -226,37 +234,67 @@ export TIGER_PRIVATE_KEY="${TIGER_PRIVATE_KEY:-${TIGEROPEN_PRIVATE_KEY:-}}"
 export TIGEROPEN_PRIVATE_KEY="${TIGEROPEN_PRIVATE_KEY:-$TIGER_PRIVATE_KEY}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-echo "Starting Tiger trading listener with:"
-echo "  KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOTSTRAP_SERVERS"
-echo "  KAFKA_TRADING_COMMANDS_TOPIC=$KAFKA_TRADING_COMMANDS_TOPIC"
-echo "  KAFKA_ACCOUNT_DETAILS_TOPIC=$KAFKA_ACCOUNT_DETAILS_TOPIC"
-echo "  KAFKA_AUTO_OFFSET_RESET=$KAFKA_AUTO_OFFSET_RESET"
-echo "  SERVER_ID=$SERVER_ID"
-echo "  TIGER_KAFKA_GROUP_ID=$TIGER_KAFKA_GROUP_ID"
-echo "  TRADING_ACCOUNTS_CONFIG=$TRADING_ACCOUNTS_CONFIG"
-echo "  TIGER_UI_ACCOUNT_IDS=$TIGER_UI_ACCOUNT_IDS"
-echo "  TIGER_UI_ACCOUNT_NUM_ID_MAP=$TIGER_UI_ACCOUNT_NUM_ID_MAP"
-echo "  TIGER_MAX_COMMAND_AGE_SECONDS=$TIGER_MAX_COMMAND_AGE_SECONDS"
-echo "  TIGER_PRECHECK_ONLY=$TIGER_PRECHECK_ONLY"
-echo "  TIGER_DRY_RUN=$TIGER_DRY_RUN"
-echo "  TIGER_SANDBOX_DEBUG=$TIGER_SANDBOX_DEBUG"
-echo "  TIGER_CURRENCY=$TIGER_CURRENCY"
-echo "  TIGER_CASH_CURRENCIES=$TIGER_CASH_CURRENCIES"
-echo "  TIGER_FOREX_SEG_TYPE=$TIGER_FOREX_SEG_TYPE"
-echo "  TIGEROPEN_PROPS_PATH_SET=$([[ -n "${TIGEROPEN_PROPS_PATH:-}" ]] && echo yes || echo no)"
-echo "  TIGER_ID_SET=$([[ -n "$TIGER_ID" ]] && echo yes || echo no)"
-echo "  TIGER_ACCOUNT_SET=$([[ -n "$TIGER_ACCOUNT" ]] && echo yes || echo no)"
-echo "  TIGER_SECRET_KEY_SET=$([[ -n "$TIGER_SECRET_KEY" || -n "$TIGEROPEN_SECRET_KEY" ]] && echo yes || echo no)"
-echo "  TIGER_LICENSE_SET=$([[ -n "${TIGER_LICENSE:-}" || -n "${TIGEROPEN_LICENSE:-}" ]] && echo yes || echo no)"
-echo "  TIGER_ACCOUNT_MAP_SET=$([[ -n "$TIGER_ACCOUNT_MAP" ]] && echo yes || echo no)"
-echo "  TIGER_PRIVATE_KEY_PATH_SET=$([[ -n "$TIGER_PRIVATE_KEY_PATH" ]] && echo yes || echo no)"
-echo "  TIGER_PRIVATE_KEY_SET=$([[ -n "$TIGER_PRIVATE_KEY" ]] && echo yes || echo no)"
-echo "  LOG_LEVEL=$LOG_LEVEL"
+TRADING_SCRIPT="$SCRIPT_DIR/trading_server/tiger.py"
+
+stop_existing_listener() {
+  local attempt
+  local pids=()
+  local remaining=()
+
+  mapfile -t pids < <(pgrep -f "$TRADING_SCRIPT" || true)
+  if ((${#pids[@]} == 0)); then
+    return 0
+  fi
+
+  log "Stopping existing Tiger trading listener process(es): ${pids[*]}"
+  kill "${pids[@]}" 2>/dev/null || true
+
+  for attempt in {1..10}; do
+    sleep 1
+    mapfile -t remaining < <(pgrep -f "$TRADING_SCRIPT" || true)
+    if ((${#remaining[@]} == 0)); then
+      log "Existing Tiger trading listener stopped."
+      return 0
+    fi
+  done
+
+  log "Existing Tiger trading listener did not stop after 10 seconds; forcing shutdown: ${remaining[*]}"
+  kill -9 "${remaining[@]}" 2>/dev/null || true
+}
+
+stop_existing_listener
+
+log "Starting Tiger trading listener with:"
+log "  KAFKA_BOOTSTRAP_SERVERS=$KAFKA_BOOTSTRAP_SERVERS"
+log "  KAFKA_TRADING_COMMANDS_TOPIC=$KAFKA_TRADING_COMMANDS_TOPIC"
+log "  KAFKA_ACCOUNT_DETAILS_TOPIC=$KAFKA_ACCOUNT_DETAILS_TOPIC"
+log "  KAFKA_AUTO_OFFSET_RESET=$KAFKA_AUTO_OFFSET_RESET"
+log "  SERVER_ID=$SERVER_ID"
+log "  TIGER_KAFKA_GROUP_ID=$TIGER_KAFKA_GROUP_ID"
+log "  TRADING_ACCOUNTS_CONFIG=$TRADING_ACCOUNTS_CONFIG"
+log "  TIGER_UI_ACCOUNT_IDS=$TIGER_UI_ACCOUNT_IDS"
+log "  TIGER_UI_ACCOUNT_NUM_ID_MAP=$TIGER_UI_ACCOUNT_NUM_ID_MAP"
+log "  TIGER_MAX_COMMAND_AGE_SECONDS=$TIGER_MAX_COMMAND_AGE_SECONDS"
+log "  TIGER_PRECHECK_ONLY=$TIGER_PRECHECK_ONLY"
+log "  TIGER_DRY_RUN=$TIGER_DRY_RUN"
+log "  TIGER_SANDBOX_DEBUG=$TIGER_SANDBOX_DEBUG"
+log "  TIGER_CURRENCY=$TIGER_CURRENCY"
+log "  TIGER_CASH_CURRENCIES=$TIGER_CASH_CURRENCIES"
+log "  TIGER_FOREX_SEG_TYPE=$TIGER_FOREX_SEG_TYPE"
+log "  TIGEROPEN_PROPS_PATH_SET=$([[ -n "${TIGEROPEN_PROPS_PATH:-}" ]] && echo yes || echo no)"
+log "  TIGER_ID_SET=$([[ -n "$TIGER_ID" ]] && echo yes || echo no)"
+log "  TIGER_ACCOUNT_SET=$([[ -n "$TIGER_ACCOUNT" ]] && echo yes || echo no)"
+log "  TIGER_SECRET_KEY_SET=$([[ -n "$TIGER_SECRET_KEY" || -n "$TIGEROPEN_SECRET_KEY" ]] && echo yes || echo no)"
+log "  TIGER_LICENSE_SET=$([[ -n "${TIGER_LICENSE:-}" || -n "${TIGEROPEN_LICENSE:-}" ]] && echo yes || echo no)"
+log "  TIGER_ACCOUNT_MAP_SET=$([[ -n "$TIGER_ACCOUNT_MAP" ]] && echo yes || echo no)"
+log "  TIGER_PRIVATE_KEY_PATH_SET=$([[ -n "$TIGER_PRIVATE_KEY_PATH" ]] && echo yes || echo no)"
+log "  TIGER_PRIVATE_KEY_SET=$([[ -n "$TIGER_PRIVATE_KEY" ]] && echo yes || echo no)"
+log "  LOG_LEVEL=$LOG_LEVEL"
 
 if is_true "$TIGER_PRECHECK_ONLY"; then
-  echo "TIGER_PRECHECK_ONLY is true. The listener will run read-only account checks and exit before consuming Kafka commands."
+  log "TIGER_PRECHECK_ONLY is true. The listener will run read-only account checks and exit before consuming Kafka commands."
 elif ! is_true "$TIGER_DRY_RUN"; then
-  echo "WARNING: TIGER_DRY_RUN is false. Matching Tiger orders will be sent to Tiger OpenAPI."
+  log "WARNING: TIGER_DRY_RUN is false. Matching Tiger orders will be sent to Tiger OpenAPI."
 fi
 
-exec python3 "$SCRIPT_DIR/trading_server/tiger.py"
+exec python3 "$TRADING_SCRIPT"

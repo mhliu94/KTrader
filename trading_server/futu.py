@@ -1,20 +1,41 @@
 from futu import *
+import logging
+import os
 import sys
 
 
 HOST = "127.0.0.1"
 PORT = 11111   # default OpenD port
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+LOGGER = logging.getLogger("futu-account-query")
+
+
+def configure_logging():
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATE_FORMAT,
+    )
+
+
+def log_text(value):
+    text = str(value)
+    if not text:
+        return
+    for line in text.splitlines():
+        LOGGER.info("%s", line)
 
 
 def print_account_list(trd_ctx):
     ret, data = trd_ctx.get_acc_list()
     if ret != RET_OK:
-        print("Failed to get account list:", data)
+        LOGGER.error("Failed to get account list:")
+        log_text(data)
         return None
 
-    print("=== Account List ===")
-    print(data)
-    print()
+    LOGGER.info("=== Account List ===")
+    log_text(data)
 
     return data
 
@@ -39,14 +60,14 @@ def choose_account(acc_df, trd_env=TrdEnv.REAL):
 
 
 def query_funds(trd_ctx, acc_id, trd_env):
-    print("=== Account Funds / Cash ===")
+    LOGGER.info("=== Account Funds / Cash ===")
     ret, data = trd_ctx.accinfo_query(trd_env=trd_env, acc_id=acc_id)
     if ret != RET_OK:
-        print("Failed to query account funds:", data)
+        LOGGER.error("Failed to query account funds:")
+        log_text(data)
         return
 
-    print(data)
-    print()
+    log_text(data)
 
     # Print a few common fields if present
     if len(data) > 0:
@@ -61,26 +82,25 @@ def query_funds(trd_ctx, acc_id, trd_env):
             "net_cash_power",
         ]:
             if field in row.index:
-                print(f"{field}: {row[field]}")
-        print()
+                LOGGER.info("%s: %s", field, row[field])
 
 
 def query_positions(trd_ctx, acc_id, trd_env):
-    print("=== Positions ===")
+    LOGGER.info("=== Positions ===")
     ret, data = trd_ctx.position_list_query(
         trd_env=trd_env,
         acc_id=acc_id
     )
     if ret != RET_OK:
-        print("Failed to query positions:", data)
+        LOGGER.error("Failed to query positions:")
+        log_text(data)
         return
 
     if len(data) == 0:
-        print("No positions found.")
+        LOGGER.info("No positions found.")
         return
 
-    print(data)
-    print()
+    log_text(data)
 
     # Optional: print selected fields if present
     preferred_cols = [
@@ -96,12 +116,12 @@ def query_positions(trd_ctx, acc_id, trd_env):
     ]
     cols = [c for c in preferred_cols if c in data.columns]
     if cols:
-        print("=== Position Summary ===")
-        print(data[cols].to_string(index=False))
-        print()
+        LOGGER.info("=== Position Summary ===")
+        log_text(data[cols].to_string(index=False))
 
 
 def main():
+    configure_logging()
     trd_ctx = OpenSecTradeContext(host=HOST, port=PORT)
 
     try:
@@ -109,18 +129,17 @@ def main():
         acct = choose_account(acc_df, trd_env=TrdEnv.REAL)
 
         if acct is None:
-            print("No REAL trading account found. Trying SIMULATE...")
+            LOGGER.info("No REAL trading account found. Trying SIMULATE...")
             acct = choose_account(acc_df, trd_env=TrdEnv.SIMULATE)
 
         if acct is None:
-            print("No usable account found.")
+            LOGGER.error("No usable account found.")
             sys.exit(1)
 
         acc_id = acct["acc_id"]
         trd_env = acct["trd_env"]
 
-        print(f"Using account acc_id={acc_id}, trd_env={trd_env}")
-        print()
+        LOGGER.info("Using account acc_id=%s, trd_env=%s", acc_id, trd_env)
 
         query_funds(trd_ctx, acc_id, trd_env)
         query_positions(trd_ctx, acc_id, trd_env)
@@ -131,4 +150,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

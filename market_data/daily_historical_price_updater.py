@@ -2,6 +2,8 @@ import argparse
 import csv
 import datetime as dt
 import json
+import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -13,6 +15,17 @@ import requests
 
 YF_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 CSV_HEADERS = ["trade_date", "symbol", "open", "close", "volume"]
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+LOGGER = logging.getLogger("market-data.daily-historical-price-updater")
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format=LOG_FORMAT,
+        datefmt=LOG_DATE_FORMAT,
+    )
 
 
 @dataclass(frozen=True)
@@ -242,6 +255,7 @@ def append_rows(csv_path: Path, rows: Iterable[DailyPriceRow]) -> int:
 
 
 def main() -> None:
+    configure_logging()
     args = parse_args()
     csv_path = Path(args.csv_path).resolve()
     config_path = Path(args.config_path).resolve()
@@ -260,7 +274,7 @@ def main() -> None:
         time.sleep(0.25)
 
     target_trade_date = pick_latest_common_trade_date(rows_by_symbol)
-    print(f"Target trade date: {target_trade_date}")
+    LOGGER.info("Target trade date: %s", target_trade_date)
 
     fetched_rows: List[DailyPriceRow] = []
     for symbol, rows in rows_by_symbol:
@@ -270,10 +284,13 @@ def main() -> None:
                 f"{symbol} has no daily bar for target trade date {target_trade_date}."
             )
         fetched_rows.append(row)
-        print(
-            f"Fetched {symbol}: trade_date={row.trade_date}, "
-            f"open={row.open_price:.6f}, adjusted_close={row.adjusted_close:.6f}, "
-            f"volume={row.volume if row.volume is not None else 'NA'}"
+        LOGGER.info(
+            "Fetched %s: trade_date=%s, open=%.6f, adjusted_close=%.6f, volume=%s",
+            symbol,
+            row.trade_date,
+            row.open_price,
+            row.adjusted_close,
+            row.volume if row.volume is not None else "NA",
         )
 
     # Common daily run behavior: if all target rows already exist, do nothing.
@@ -281,20 +298,14 @@ def main() -> None:
     target_keys = {(r.trade_date, r.symbol) for r in fetched_rows}
     if target_keys.issubset(existing_keys):
         target_dates = sorted({r.trade_date for r in fetched_rows})
-        print(
-            "Data already exists for target date(s): "
-            + ", ".join(target_dates)
-            + ". No rows appended."
-        )
+        LOGGER.info("Data already exists for target date(s): %s. No rows appended.", ", ".join(target_dates))
         return
 
     ensure_csv(csv_path)
     missing_rows = [r for r in fetched_rows if (r.trade_date, r.symbol) not in existing_keys]
     appended = append_rows(csv_path, missing_rows)
     appended_dates = sorted({r.trade_date for r in missing_rows})
-    print(
-        f"Appended {appended} row(s) to {csv_path} for date(s): " + ", ".join(appended_dates)
-    )
+    LOGGER.info("Appended %s row(s) to %s for date(s): %s", appended, csv_path, ", ".join(appended_dates))
 
 
 if __name__ == "__main__":

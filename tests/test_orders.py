@@ -1,7 +1,7 @@
 import unittest
 
 from trading_ui.models import AccountMeta
-from trading_ui.services.orders import validate_quick_order_inputs
+from trading_ui.services.orders import parse_fast_trading_test_mode, validate_quick_order_inputs
 
 
 def metas(*account_ids):
@@ -59,6 +59,24 @@ class QuickOrderValidationTests(unittest.TestCase):
 
         self.assertIsNone(cmd)
         self.assertEqual(err, "too low")
+
+    def test_parses_fast_trading_test_mode_from_config_payload(self):
+        enabled, err = parse_fast_trading_test_mode(
+            {"groups": [], "test_mode": "true"},
+            fast_config_required="required",
+        )
+
+        self.assertIsNone(err)
+        self.assertTrue(enabled)
+
+    def test_missing_fast_trading_test_mode_defaults_false(self):
+        enabled, err = parse_fast_trading_test_mode(
+            {"groups": []},
+            fast_config_required="required",
+        )
+
+        self.assertIsNone(err)
+        self.assertFalse(enabled)
 
 
 if __name__ == "__main__":

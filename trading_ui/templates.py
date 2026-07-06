@@ -807,6 +807,10 @@ def render_control_panel_page(
         <div class="inline-actions" style="margin-top:12px;">
           <button class="btn btn-blue" id="fast-add-group" type="button">{html_escape(t(lang,'fast_add_group'))}</button>
         </div>
+        <label class="fast-account-row" style="margin-top:12px;">
+          <input type="checkbox" id="fast-test-mode">
+          <span class="fast-account-label">{html_escape(t(lang,'fast_test_mode'))}</span>
+        </label>
         <div class="warn" id="fast-trading-error" style="margin-top:10px;"></div>
         <div class="modal-actions">
           <button class="btn" id="fast-cancel" type="button" style="background:#64748b;">{html_escape(t(lang,'fast_config_cancel'))}</button>
@@ -828,6 +832,7 @@ def render_control_panel_page(
         const cancelBtn = document.getElementById("fast-cancel");
         const closeBtn = document.getElementById("fast-trading-close");
         const submitBtn = document.getElementById("fast-submit-config");
+        const testModeEl = document.getElementById("fast-test-mode");
         const accounts = __FAST_ACCOUNTS__;
         const labels = __FAST_LABELS__;
 
@@ -974,7 +979,13 @@ def render_control_panel_page(
             });
           }
 
-          return { ok: true, payload: { groups: payloadGroups } };
+          return {
+            ok: true,
+            payload: {
+              groups: payloadGroups,
+              test_mode: Boolean(testModeEl && testModeEl.checked)
+            }
+          };
         }
 
         function openModal(mode) {

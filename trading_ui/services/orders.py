@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -114,6 +115,41 @@ def validate_order_inputs(
     return cmd, None
 
 
+def validate_quick_order_inputs(
+    account_id: str,
+    symbol: str,
+    side: str,
+    dollars_raw: Optional[str],
+    market_last: Optional[float],
+    account_metas: Dict[str, AccountMeta],
+    symbols: List[str],
+    invalid_account: str,
+    invalid_symbol: str,
+    invalid_side: str,
+    dollars_positive: str,
+    no_last_price: str,
+    dollars_too_low: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    if account_id not in account_metas:
+        return None, invalid_account
+    if symbol not in symbols:
+        return None, invalid_symbol
+    if side not in ("BUY", "SELL"):
+        return None, invalid_side
+
+    dollars = safe_float(dollars_raw)
+    if dollars is None or dollars <= 0:
+        return None, dollars_positive
+    if market_last is None or market_last <= 0:
+        return None, no_last_price
+
+    shares = int(math.floor(dollars / market_last))
+    if shares <= 0:
+        return None, dollars_too_low
+
+    return build_market_order_command(account_id, symbol, side, shares, None, account_metas), None
+
+
 def build_limit_order_command(
     account_id: str,
     symbol: str,
@@ -134,6 +170,28 @@ def build_limit_order_command(
         "limit_price": float(limit_price),
     }
     return _add_broker_metadata(cmd, account_id, account_metas)
+
+
+def build_limit_order_fok_command(
+    account_id: str,
+    symbol: str,
+    side: str,
+    shares: int,
+    limit_price: float,
+    account_metas: Dict[str, AccountMeta],
+) -> Dict:
+    cmd = build_limit_order_command(
+        account_id=account_id,
+        symbol=symbol,
+        side=side,
+        shares=shares,
+        limit_price=limit_price,
+        account_metas=account_metas,
+    )
+    cmd["type"] = "LIMIT_ORDER_FOK"
+    cmd["time_in_force"] = "FOK"
+    cmd["cancel_unfilled"] = True
+    return cmd
 
 
 def validate_limit_order_inputs(

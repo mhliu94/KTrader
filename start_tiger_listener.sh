@@ -180,12 +180,12 @@ export KAFKA_AUTO_OFFSET_RESET="${KAFKA_AUTO_OFFSET_RESET:-latest}"
 export KAFKA_POLL_TIMEOUT_SEC="${KAFKA_POLL_TIMEOUT_SEC:-1.0}"
 
 # Used as the stable identifier when this listener publishes server status updates.
-export SERVER_ID="${SERVER_ID:-tiger-listener-jinyuan}"
+export SERVER_ID="${SERVER_ID:-tiger-listener-jinyuan}" # change this when switching
 
-export TIGER_KAFKA_GROUP_ID="${TIGER_KAFKA_GROUP_ID:-tiger-trading-server-jinyuan}"
+export TIGER_KAFKA_GROUP_ID="${TIGER_KAFKA_GROUP_ID:-tiger-trading-server-jinyuan}" # change this when switching
 export TRADING_ACCOUNTS_CONFIG="${TRADING_ACCOUNTS_CONFIG:-$SCRIPT_DIR/trading_ui/sample/trading_accounts.json}"
-export TIGER_UI_ACCOUNT_IDS="${TIGER_UI_ACCOUNT_IDS:-TIGER_JINYUAN}"
-export TIGER_UI_ACCOUNT_NUM_ID_MAP="${TIGER_UI_ACCOUNT_NUM_ID_MAP:-TIGER_JINYUAN:2}"
+export TIGER_UI_ACCOUNT_IDS="${TIGER_UI_ACCOUNT_IDS:-TIGER_JINYUAN}" # change this when switching
+export TIGER_UI_ACCOUNT_NUM_ID_MAP="${TIGER_UI_ACCOUNT_NUM_ID_MAP:-TIGER_JINYUAN:2}" # change this when switching (numeric ID as well!)
 export TIGER_ACCOUNT_MAP="${TIGER_ACCOUNT_MAP:-}"
 export TIGER_MAX_COMMAND_AGE_SECONDS="${TIGER_MAX_COMMAND_AGE_SECONDS:-300}"
 export TIGER_PRECHECK_ONLY="${TIGER_PRECHECK_ONLY:-false}"

@@ -338,9 +338,14 @@ def command_summary(command: Dict[str, Any]) -> str:
             "side",
             "qty_shares",
             "notional_usd",
+            "limit_price",
+            "time_in_force",
             "execute_at",
             "delay_seconds",
             "trading_mode",
+            "algo_cycle_id",
+            "fast_trading_group_id",
+            "fast_trading_total_resting_qty",
             "source_currency",
             "target_currency",
             "source_amount",
@@ -418,6 +423,17 @@ def extract_order_cancel_ref(order: Any) -> Tuple[Optional[str], Optional[int]]:
     if order_id is not None:
         return "order_id", order_id
     return None, None
+
+
+def order_matches_placed_order(order: Any, placed_order_id: Any) -> bool:
+    target = str(placed_order_id or "").strip()
+    if not target:
+        return False
+    for field_name in ("id", "order_id"):
+        value = pick_first_attr(order, (field_name,), None)
+        if value is not None and str(value).strip() == target:
+            return True
+    return False
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -951,7 +967,7 @@ class TigerBroker:
             order,
         )
 
-    def place_limit_order(self, command: Dict[str, Any]) -> None:
+    def place_limit_order(self, command: Dict[str, Any]) -> Optional[Any]:
         symbol = str(command.get("symbol") or "").strip().upper()
         side = str(command.get("side") or "").strip().upper()
         if not symbol:
@@ -985,7 +1001,7 @@ class TigerBroker:
                 quantity,
                 limit_price,
             )
-            return
+            return None
 
         assert self._trade_client is not None
         assert self._stock_contract is not None
@@ -1004,6 +1020,81 @@ class TigerBroker:
             command_id(command),
             tiger_order_id,
             order,
+        )
+        return tiger_order_id
+
+    def _cancel_open_orders_for_placed_order(
+        self,
+        account: str,
+        target_symbol: str,
+        placed_order_id: Any,
+        command: Dict[str, Any],
+    ) -> None:
+        orders = self._get_open_orders_for_cancel(account=account, target_symbol=target_symbol)
+        matched_orders = [order for order in orders if order_matches_placed_order(order, placed_order_id)]
+        cancelled = 0
+        failed = 0
+        skipped_missing_id = 0
+
+        for order in matched_orders:
+            cancel_field, cancel_value = extract_order_cancel_ref(order)
+            if cancel_field is None or cancel_value is None:
+                skipped_missing_id += 1
+                LOGGER.warning("Skipping Tiger FOK open order without usable cancel id: %s", order)
+                continue
+
+            try:
+                if cancel_field == "id":
+                    self._trade_client.cancel_order(account=account, id=cancel_value)
+                else:
+                    self._trade_client.cancel_order(account=account, order_id=cancel_value)
+                cancelled += 1
+            except Exception:
+                failed += 1
+                LOGGER.exception(
+                    "Failed cancelling Tiger FOK remainder command_id=%s account=%s symbol=%s %s=%s order=%s",
+                    command_id(command),
+                    account,
+                    target_symbol or "<all>",
+                    cancel_field,
+                    cancel_value,
+                    order,
+                )
+
+        LOGGER.info(
+            "Tiger FOK cancel check command_id=%s account=%s symbol=%s placed_order_id=%s fetched=%d matched=%d cancelled=%d failed=%d skipped_missing_id=%d",
+            command_id(command),
+            account,
+            target_symbol or "<all>",
+            placed_order_id,
+            len(orders),
+            len(matched_orders),
+            cancelled,
+            failed,
+            skipped_missing_id,
+        )
+
+    def place_limit_order_fok(self, command: Dict[str, Any]) -> None:
+        account = self.resolve_account(command)
+        target_symbol = normalize_symbol_for_compare(command.get("symbol"))
+        tiger_order_id = self.place_limit_order(command)
+
+        if self.dry_run:
+            LOGGER.info(
+                "DRY RUN Tiger FOK cancel check command_id=%s account=%s symbol=%s",
+                command_id(command),
+                account,
+                target_symbol or "<all>",
+            )
+            return
+
+        if tiger_order_id is None:
+            raise RuntimeError("Tiger FOK limit order command_id=%s returned no order id" % command_id(command))
+        self._cancel_open_orders_for_placed_order(
+            account=account,
+            target_symbol=target_symbol,
+            placed_order_id=tiger_order_id,
+            command=command,
         )
 
     def convert_currency(self, command: Dict[str, Any]) -> None:
@@ -1390,6 +1481,7 @@ class TradingCommandConsumer:
             "MARKET_ORDER",
             "DELAYED_MARKET_ORDER",
             "LIMIT_ORDER",
+            "LIMIT_ORDER_FOK",
             "CANCEL_OPEN_ORDERS",
             "CURRENCY_CONVERSION",
             "SET_TRADING_ENABLED",
@@ -1421,6 +1513,12 @@ class TradingCommandConsumer:
         if cmd_type == "LIMIT_ORDER":
             LOGGER.info("Executing Tiger limit order: %s", command_summary(command))
             self._broker.place_limit_order(command)
+            self._publish_snapshot_after_command(command)
+            return
+
+        if cmd_type == "LIMIT_ORDER_FOK":
+            LOGGER.info("Executing Tiger FOK limit order: %s", command_summary(command))
+            self._broker.place_limit_order_fok(command)
             self._publish_snapshot_after_command(command)
             return
 

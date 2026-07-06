@@ -25,6 +25,7 @@ from .templates import (
 from .services.fallback import load_fallback_snapshots
 from .services.orders import (
     validate_order_inputs,
+    validate_quick_order_inputs,
     validate_delayed_order_inputs,
     validate_limit_order_inputs,
     validate_cancel_open_orders_inputs,
@@ -33,6 +34,7 @@ from .services.orders import (
     validate_currency_conversion_inputs,
     validate_trading_status_inputs,
 )
+from .services.fast_trading import FAST_TRADING_MODES, FastTradingStrategyManager
 from .kafka.consumer_account_details import AccountDetailsConsumer
 from .kafka.consumer_market_data import PriceBookConsumer
 from .kafka.producer_trading_commands import TradingCommandsProducer
@@ -50,6 +52,7 @@ SESSIONS: Dict[str, str] = {}
 ACCOUNT_CONSUMER = None
 MARKET_DATA_CONSUMER = None
 COMMANDS_PRODUCER = None
+FAST_TRADING_MANAGER = None
 
 MD_STORE = MarketDataStore()
 HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
@@ -100,6 +103,11 @@ def _can_manage_trading(user: str | None) -> bool:
     return _has_lmh_feature_access(user)
 
 
+def _publish_fast_trading_command(command: Dict, key: str) -> None:
+    assert COMMANDS_PRODUCER is not None
+    COMMANDS_PRODUCER.publish_order(command, key=key)
+
+
 def _require_auth_page(request: Request):
     user = _current_user(request)
     if user:
@@ -117,7 +125,7 @@ def _require_auth_api(request: Request):
 
 @app.on_event("startup")
 def on_startup() -> None:
-    global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, HIST_CLOSE_STORE
+    global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, HIST_CLOSE_STORE
 
     config_path = os.getenv("ACCOUNT_DASHBOARD_CONFIG", "./trading_ui/sample/config.json")
     APP_CONFIG = load_config(config_path)
@@ -134,10 +142,17 @@ def on_startup() -> None:
     MARKET_DATA_CONSUMER.start()
 
     COMMANDS_PRODUCER = TradingCommandsProducer(APP_CONFIG["kafka"])
+    FAST_TRADING_MANAGER = FastTradingStrategyManager(
+        market_data_store=MD_STORE,
+        account_metas_provider=lambda: ACCOUNT_METAS,
+        publish_command=_publish_fast_trading_command,
+    )
 
 
 @app.on_event("shutdown")
 def on_shutdown() -> None:
+    if FAST_TRADING_MANAGER:
+        FAST_TRADING_MANAGER.stop_all()
     if ACCOUNT_CONSUMER:
         ACCOUNT_CONSUMER.stop()
     if MARKET_DATA_CONSUMER:
@@ -331,27 +346,31 @@ async def submit_quick_order(request: Request):
     if not dollars_raw:
         dollars_raw = "10000"
 
+    market_last = None
+    quote_row = MD_STORE.get_for_symbols([symbol]).get(symbol)
+    if quote_row is not None and quote_row.error is None:
+        market_last = quote_row.last
+
     if not account_ids:
         return RedirectResponse(url=f"/control-panel?err={quote(t(lang, 'quick_pick_account'))}", status_code=303)
 
     published_count = 0
     first_cmd_id = None
     for account_id in account_ids:
-        cmd, err = validate_order_inputs(
+        cmd, err = validate_quick_order_inputs(
             account_id=account_id,
             symbol=symbol,
             side=side,
-            shares_raw=None,
             dollars_raw=dollars_raw,
+            market_last=market_last,
             account_metas=ACCOUNT_METAS,
             symbols=SYMBOLS,
             invalid_account=t(lang, "invalid_account"),
             invalid_symbol=t(lang, "invalid_symbol"),
             invalid_side=t(lang, "invalid_side"),
-            both_shares_and_dollars=t(lang, "both_shares_and_dollars"),
-            neither_shares_nor_dollars=t(lang, "neither_shares_nor_dollars"),
-            shares_positive=t(lang, "shares_positive"),
             dollars_positive=t(lang, "dollars_positive"),
+            no_last_price=t(lang, "quick_no_last_price"),
+            dollars_too_low=t(lang, "quick_dollars_too_low"),
         )
         if err:
             return RedirectResponse(url=f"/control-panel?err={quote(err)}", status_code=303)
@@ -664,8 +683,13 @@ def submit_algo(
 
     try:
         assert COMMANDS_PRODUCER is not None and cmd is not None
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("symbol", "ALGO"))
-        ok = f"{t(lang,'published_cmd')}={cmd['command_id']}"
+        if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES:
+            assert FAST_TRADING_MANAGER is not None
+            strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
+            ok = f"{t(lang,'algo_submitted')} {strategy_key}. {t(lang,'published_cmd')}={cmd['command_id']}"
+        else:
+            COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("symbol", "ALGO"))
+            ok = f"{t(lang,'published_cmd')}={cmd['command_id']}"
         return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
@@ -860,6 +884,11 @@ async def api_submit_algo(request: Request) -> JSONResponse:
     try:
         assert COMMANDS_PRODUCER is not None
         assert cmd is not None
+        if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES:
+            assert FAST_TRADING_MANAGER is not None
+            strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
+            return JSONResponse({"ok": True, "command": cmd, "strategy_key": strategy_key})
+
         COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("symbol", "ALGO"))
         return JSONResponse({"ok": True, "command": cmd})
     except Exception as e:
@@ -893,8 +922,15 @@ async def submit_algo_stop(
 
     try:
         assert COMMANDS_PRODUCER is not None and cmd is not None
+        stopped_count = 0
+        if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES and FAST_TRADING_MANAGER:
+            stopped_count = FAST_TRADING_MANAGER.stop_matching(
+                trading_mode=str(cmd.get("trading_mode") or ""),
+                account_ids=cmd.get("account_ids") or [],
+            )
         COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("trading_mode", "ALGO_STOP"))
-        ok = f"{t(lang,'published_cmd')}={cmd['command_id']}"
+        stopped_suffix = f" stopped={stopped_count}" if stopped_count else ""
+        ok = f"{t(lang,'published_cmd')}={cmd['command_id']}{stopped_suffix}"
         return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)

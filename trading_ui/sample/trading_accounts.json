@@ -2,9 +2,9 @@
   "accounts": [
     {
       "ip_address": "172.232.237.184",
-      "machine_alias": "Vultr-Jakarta1",
+      "machine_alias": "Linode-Jakarta1",
       "numeric_id": 1,
-      "string_id": "TIGER_VICTORIA",
+      "string_id": "TIGER_PENGYUAN",
       "broker": "Tiger",
       "trading_medium": "API"
     },
@@ -23,6 +23,14 @@
       "string_id": "FUYUAN_1",
       "broker": "Tiger",
       "trading_medium": "EMULATOR"
+    },
+    {
+      "ip_address": "172.105.216.196",
+      "machine_alias": "Vultr-Tokyo1",
+      "numeric_id": 4,
+      "string_id": "TIGER_YONGRUI",
+      "broker": "Tiger",
+      "trading_medium": "API"
     }
   ]
 }

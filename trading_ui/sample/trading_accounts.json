@@ -5,6 +5,7 @@
       "machine_alias": "Linode-Jakarta1",
       "numeric_id": 1,
       "string_id": "TIGER_PENGYUAN",
+      "owner_type": "institution",
       "broker": "Tiger",
       "trading_medium": "API"
     },
@@ -13,6 +14,7 @@
       "machine_alias": "Linode-Jakarta2",
       "numeric_id": 2,
       "string_id": "TIGER_PEAKRISE",
+      "owner_type": "institution",
       "broker": "Tiger",
       "trading_medium": "API"
     },
@@ -21,7 +23,8 @@
       "machine_alias": "Vultr-BareMetal-SG1",
       "numeric_id": 3,
       "string_id": "FUYUAN_1",
-      "broker": "Tiger",
+      "owner_type": "institution",
+      "broker": "MetaSecurities",
       "trading_medium": "EMULATOR"
     },
     {
@@ -29,8 +32,63 @@
       "machine_alias": "Vultr-Tokyo1",
       "numeric_id": 4,
       "string_id": "TIGER_YONGRUI",
+      "owner_type": "institution",
       "broker": "Tiger",
       "trading_medium": "API"
+    },
+    {
+      "ip_address": "139.162.101.228",
+      "machine_alias": "Vultr-Tokyo2",
+      "numeric_id": 5,
+      "string_id": "TIGER_RONGHUANG",
+      "owner_type": "institution",
+      "broker": "Tiger",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "43.163.104.109",
+      "machine_alias": "Tencent-SG",
+      "numeric_id": 6,
+      "string_id": "TIGER_JINGXU",
+      "owner_type": "institution",
+      "broker": "Tiger",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "43.154.70.72",
+      "machine_alias": "Tencent-HK",
+      "numeric_id": 7,
+      "string_id": "TIGER_LONGXIANG",
+      "owner_type": "institution",
+      "broker": "Tiger",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "101.34.159.235",
+      "machine_alias": "Tencent-Shanghai1",
+      "numeric_id": 8,
+      "string_id": "TIGER_YONGSHENG",
+      "owner_type": "institution",
+      "broker": "Tiger",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "49.234.22.212",
+      "machine_alias": "Tencent-Shanghai2",
+      "numeric_id": 9,
+      "string_id": "TIGER_DENGLEI",
+      "owner_type": "individual",
+      "broker": "Tiger",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "209.250.240.250",
+      "machine_alias": "Vultr-BareMetal-NL2",
+      "numeric_id": 10,
+      "string_id": "ZR-WJY",
+      "owner_type": "individual",
+      "broker": "Zhuorui",
+      "trading_medium": "EMULATOR"
     }
   ]
 }

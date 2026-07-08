@@ -25,7 +25,6 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
-LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 LOGGER = logging.getLogger("tiger-trading-server")
 TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS = 60
 TRADING_MEDIA = {"EMULATOR", "WINDOWS", "WEB", "API"}
@@ -435,6 +434,14 @@ def order_matches_placed_order(order: Any, placed_order_id: Any) -> bool:
         if value is not None and str(value).strip() == target:
             return True
     return False
+
+
+def order_dedupe_key(order: Any) -> Tuple[str, str]:
+    for field_name in ("id", "order_id"):
+        value = pick_first_attr(order, (field_name,), None)
+        if value is not None:
+            return field_name, str(value).strip()
+    return "repr", repr(order)
 
 
 def as_float(value: Any, default: float = 0.0) -> float:
@@ -1134,7 +1141,23 @@ class TigerBroker:
         )
         LOGGER.info("Placed Tiger currency conversion command_id=%s result=%s", command_id(command), result)
 
-    def _get_open_orders_for_cancel(self, account: str, target_symbol: str) -> List[Any]:
+    def _get_active_open_orders_for_cancel(self, account: str, target_symbol: str) -> List[Any]:
+        assert self._trade_client is not None
+
+        get_open_orders = getattr(self._trade_client, "get_open_orders", None)
+        if get_open_orders is None:
+            return []
+
+        result = get_open_orders(
+            account=account,
+            symbol=target_symbol or None,
+            limit=self.cancel_order_fetch_limit,
+        )
+        if hasattr(result, "result"):
+            return list(getattr(result, "result", None) or [])
+        return list(result or [])
+
+    def _get_state_filtered_orders_for_cancel(self, account: str, target_symbol: str) -> List[Any]:
         assert self._trade_client is not None
         assert self._open_order_statuses is not None
 
@@ -1172,6 +1195,37 @@ class TigerBroker:
             page_token = next_page_token
 
         return all_orders
+
+    def _get_open_orders_for_cancel(self, account: str, target_symbol: str) -> List[Any]:
+        active_orders: List[Any] = []
+        try:
+            active_orders = self._get_active_open_orders_for_cancel(account=account, target_symbol=target_symbol)
+        except Exception:
+            LOGGER.exception(
+                "Failed fetching Tiger active open orders account=%s symbol=%s; falling back to state-filtered order query",
+                account,
+                target_symbol or "<all>",
+            )
+
+        history_orders = self._get_state_filtered_orders_for_cancel(account=account, target_symbol=target_symbol)
+        deduped: List[Any] = []
+        seen: set[Tuple[str, str]] = set()
+        for order in [*active_orders, *history_orders]:
+            key = order_dedupe_key(order)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(order)
+
+        LOGGER.info(
+            "Fetched Tiger open orders for cancel account=%s symbol=%s active=%d state_filtered=%d deduped=%d",
+            account,
+            target_symbol or "<all>",
+            len(active_orders),
+            len(history_orders),
+            len(deduped),
+        )
+        return deduped
 
     def cancel_open_orders(self, command: Dict[str, Any]) -> None:
         account = self.resolve_account(command)
@@ -1651,11 +1705,7 @@ def run_precheck(broker: TigerBroker) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format=LOG_FORMAT,
-        datefmt=LOG_DATE_FORMAT,
-    )
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format=LOG_FORMAT)
 
     stop_event = threading.Event()
     install_signal_handlers(stop_event)

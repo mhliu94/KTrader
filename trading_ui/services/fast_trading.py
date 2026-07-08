@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from ..models import AccountMeta
+from ..models import AccountMeta, AccountSnapshot
 from .market_data import BookLevel, MarketDataStore, OrderBookSnapshot
+from .operations_log import OperationsLog
 from .orders import build_limit_order_fok_command
 
 
@@ -25,6 +26,8 @@ FAST_TRADING_WAIT_SECONDS_BY_MEDIUM = {
     "WINDOWS": 25.0,
     "EMULATOR": 35.0,
 }
+STOP_REASON_MANUAL = "Manual stop"
+STOP_REASON_END_TIME = "Hit end time"
 
 
 @dataclass
@@ -37,6 +40,7 @@ class FastTradingCycleResult:
     execution_group_id: Optional[int] = None
     limit_price: Optional[float] = None
     wait_seconds: Optional[float] = None
+    remaining_carryover_qty: int = 0
     commands: List[Dict[str, Any]] = field(default_factory=list)
     reason: str = ""
 
@@ -117,6 +121,31 @@ def _wait_seconds_for_account(account_id: str, account_metas: Dict[str, AccountM
     return FAST_TRADING_WAIT_SECONDS_BY_MEDIUM.get(medium, FAST_TRADING_WAIT_SECONDS_BY_MEDIUM["API"])
 
 
+def _normalize_symbol(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if "/" in raw:
+        raw = raw.split("/", 1)[0]
+    for prefix in ("US.", "HK.", "CN.", "SH.", "SZ."):
+        if raw.startswith(prefix):
+            return raw[len(prefix):]
+    return raw
+
+
+def _usd_cash(snapshot: AccountSnapshot) -> float:
+    if "USD" in snapshot.cash_by_currency:
+        return max(0.0, _as_float(snapshot.cash_by_currency.get("USD")) or 0.0)
+    return max(0.0, _as_float(snapshot.cash) or 0.0)
+
+
+def _symbol_position_qty(snapshot: AccountSnapshot, symbol: str) -> int:
+    target = _normalize_symbol(symbol)
+    qty = 0.0
+    for position in snapshot.positions:
+        if _normalize_symbol(getattr(position, "symbol", "")) == target:
+            qty += _as_float(getattr(position, "qty", 0.0)) or 0.0
+    return int(math.floor(max(0.0, qty)))
+
+
 def _normalize_groups(fast_trading_groups: List[Dict[str, Any]]) -> List[_FastGroup]:
     groups: List[_FastGroup] = []
     if not isinstance(fast_trading_groups, list) or not fast_trading_groups:
@@ -184,12 +213,166 @@ def _quantity_by_group(
     return {idx: int(math.floor(qty)) for idx, qty in totals.items()}
 
 
+def _scan_indices_for_mode(mode: str, group_count: int) -> List[int]:
+    if mode == "E":
+        return list(range(group_count))
+    return list(range(group_count - 1, -1, -1))
+
+
+def _group_account_percentages(group: _FastGroup) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for account in group.accounts:
+        if not isinstance(account, dict):
+            continue
+        account_id = str(account.get("account_id") or "").strip()
+        allocation_pct = _as_float(account.get("allocation_pct"))
+        if not account_id or allocation_pct is None or allocation_pct <= 0:
+            continue
+        out[account_id] = float(allocation_pct)
+    return out
+
+
+def _account_capacity(
+    account_id: str,
+    mode: str,
+    symbol: str,
+    limit_price: float,
+    account_snapshots: Optional[Dict[str, AccountSnapshot]],
+    used_cash_by_account: Dict[str, float],
+    used_shares_by_account: Dict[str, int],
+) -> int:
+    if account_snapshots is None:
+        return 10**12
+
+    snapshot = account_snapshots.get(account_id)
+    if snapshot is None:
+        return 0
+
+    if mode == "E":
+        available_cash = _usd_cash(snapshot) - used_cash_by_account.get(account_id, 0.0)
+        if available_cash <= 0 or limit_price <= 0:
+            return 0
+        return int(math.floor(available_cash / limit_price))
+
+    available_shares = _symbol_position_qty(snapshot, symbol) - used_shares_by_account.get(account_id, 0)
+    return max(0, int(math.floor(available_shares)))
+
+
+def _reserve_capacity(
+    account_id: str,
+    mode: str,
+    qty: int,
+    limit_price: float,
+    used_cash_by_account: Dict[str, float],
+    used_shares_by_account: Dict[str, int],
+) -> None:
+    if qty <= 0:
+        return
+    if mode == "E":
+        used_cash_by_account[account_id] = used_cash_by_account.get(account_id, 0.0) + qty * limit_price
+    else:
+        used_shares_by_account[account_id] = used_shares_by_account.get(account_id, 0) + qty
+
+
+def _allocate_group_quantity(
+    qty: int,
+    group: _FastGroup,
+    mode: str,
+    symbol: str,
+    account_snapshots: Optional[Dict[str, AccountSnapshot]],
+    used_cash_by_account: Dict[str, float],
+    used_shares_by_account: Dict[str, int],
+) -> tuple[Dict[str, int], int]:
+    percentages = _group_account_percentages(group)
+    if qty <= 0 or not percentages:
+        return {}, 0
+
+    targets = {
+        account_id: int(math.floor(qty * pct / 100.0))
+        for account_id, pct in percentages.items()
+    }
+    remaining = sum(targets.values())
+    allocations = {account_id: 0 for account_id in percentages}
+
+    def capacity(account_id: str) -> int:
+        return _account_capacity(
+            account_id=account_id,
+            mode=mode,
+            symbol=symbol,
+            limit_price=group.price_limit,
+            account_snapshots=account_snapshots,
+            used_cash_by_account=used_cash_by_account,
+            used_shares_by_account=used_shares_by_account,
+        )
+
+    for account_id, target_qty in targets.items():
+        if target_qty <= 0:
+            continue
+        actual_qty = min(target_qty, capacity(account_id))
+        if actual_qty <= 0:
+            continue
+        allocations[account_id] += actual_qty
+        _reserve_capacity(
+            account_id=account_id,
+            mode=mode,
+            qty=actual_qty,
+            limit_price=group.price_limit,
+            used_cash_by_account=used_cash_by_account,
+            used_shares_by_account=used_shares_by_account,
+        )
+        remaining -= actual_qty
+
+    while remaining > 0:
+        eligible = {
+            account_id: pct
+            for account_id, pct in percentages.items()
+            if capacity(account_id) > 0
+        }
+        if not eligible:
+            break
+        total_pct = sum(eligible.values())
+        if total_pct <= 0:
+            break
+
+        planned = {
+            account_id: int(math.floor(remaining * pct / total_pct))
+            for account_id, pct in eligible.items()
+        }
+        if sum(planned.values()) <= 0:
+            break
+
+        allocated_this_round = 0
+        for account_id, planned_qty in planned.items():
+            if planned_qty <= 0:
+                continue
+            actual_qty = min(planned_qty, capacity(account_id))
+            if actual_qty <= 0:
+                continue
+            allocations[account_id] += actual_qty
+            _reserve_capacity(
+                account_id=account_id,
+                mode=mode,
+                qty=actual_qty,
+                limit_price=group.price_limit,
+                used_cash_by_account=used_cash_by_account,
+                used_shares_by_account=used_shares_by_account,
+            )
+            allocated_this_round += actual_qty
+
+        if allocated_this_round <= 0:
+            break
+        remaining -= allocated_this_round
+
+    return {account_id: qty for account_id, qty in allocations.items() if qty > 0}, max(0, remaining)
+
+
 def build_fast_trading_cycle_commands(
     trading_mode: str,
     symbol: str,
     book: OrderBookSnapshot,
     fast_trading_groups: List[Dict[str, Any]],
     account_metas: Dict[str, AccountMeta],
+    account_snapshots: Optional[Dict[str, AccountSnapshot]] = None,
     cycle_id: Optional[str] = None,
 ) -> FastTradingCycleResult:
     mode = str(trading_mode or "").strip().upper()
@@ -219,7 +402,7 @@ def build_fast_trading_cycle_commands(
         return result
 
     quantities = _quantity_by_group(levels, mode, groups)
-    scan_indices = list(range(len(groups))) if mode == "E" else list(range(len(groups) - 1, -1, -1))
+    scan_indices = _scan_indices_for_mode(mode, len(groups))
 
     start_pos: Optional[int] = None
     for pos, group_index in enumerate(scan_indices):
@@ -232,53 +415,75 @@ def build_fast_trading_cycle_commands(
         return result
 
     total_qty = 0
-    execution_index = scan_indices[start_pos]
-    for group_index in scan_indices[start_pos:]:
+    selected_positions: set[int] = set()
+    selected_first_index = scan_indices[start_pos]
+    for pos in range(start_pos, len(scan_indices)):
+        group_index = scan_indices[pos]
+        selected_positions.add(pos)
         total_qty += quantities[group_index]
-        execution_index = group_index
         if total_qty >= FAST_COMBINE_TARGET_SHARES:
             break
 
     result.total_resting_qty = total_qty
-    execution_group = groups[execution_index]
-    result.execution_group_id = execution_group.group_id
-    result.limit_price = execution_group.price_limit
+    result.execution_group_id = groups[selected_first_index].group_id
+    result.limit_price = groups[selected_first_index].price_limit
 
     if total_qty < FAST_MIN_EXECUTABLE_SHARES:
         result.reason = "total_below_minimum"
         return result
 
     cycle_id = cycle_id or f"fast_{mode}_{clean_symbol}_{int(time.time() * 1_000_000)}"
-    for account in execution_group.accounts:
-        if not isinstance(account, dict):
-            continue
-        account_id = str(account.get("account_id") or "").strip()
-        allocation_pct = _as_float(account.get("allocation_pct"))
-        if not account_id or allocation_pct is None or allocation_pct <= 0:
+    carryover_qty = 0
+    used_cash_by_account: Dict[str, float] = {}
+    used_shares_by_account: Dict[str, int] = {}
+
+    for pos in range(start_pos, len(scan_indices)):
+        group_index = scan_indices[pos]
+        group = groups[group_index]
+        own_qty = quantities[group_index] if pos in selected_positions else 0
+
+        if 0 < carryover_qty < FAST_MIN_EXECUTABLE_SHARES:
+            carryover_qty = 0
+
+        assigned_qty = own_qty + carryover_qty
+        carryover_qty = 0
+        if assigned_qty <= 0:
+            if pos not in selected_positions:
+                break
             continue
 
-        qty = int(math.floor(total_qty * allocation_pct / 100.0))
-        if qty <= 0:
-            continue
-
-        cmd = build_limit_order_fok_command(
-            account_id=account_id,
+        allocations, shortfall_qty = _allocate_group_quantity(
+            qty=assigned_qty,
+            group=group,
+            mode=mode,
             symbol=clean_symbol,
-            side=order_side,
-            shares=qty,
-            limit_price=execution_group.price_limit,
-            account_metas=account_metas,
+            account_snapshots=account_snapshots,
+            used_cash_by_account=used_cash_by_account,
+            used_shares_by_account=used_shares_by_account,
         )
-        cmd["trading_mode"] = mode
-        cmd["algo_cycle_id"] = cycle_id
-        cmd["fast_trading_group_id"] = execution_group.group_id
-        cmd["fast_trading_resting_side"] = resting_side
-        cmd["fast_trading_total_resting_qty"] = total_qty
-        result.commands.append(cmd)
+
+        for account_id, qty in allocations.items():
+            cmd = build_limit_order_fok_command(
+                account_id=account_id,
+                symbol=clean_symbol,
+                side=order_side,
+                shares=qty,
+                limit_price=group.price_limit,
+                account_metas=account_metas,
+            )
+            cmd["trading_mode"] = mode
+            cmd["algo_cycle_id"] = cycle_id
+            cmd["fast_trading_group_id"] = group.group_id
+            cmd["fast_trading_resting_side"] = resting_side
+            cmd["fast_trading_total_resting_qty"] = total_qty
+            result.commands.append(cmd)
+
+        carryover_qty = shortfall_qty
 
     if not result.commands:
-        result.reason = "allocations_floor_to_zero"
+        result.reason = "no_account_capacity" if carryover_qty >= FAST_MIN_EXECUTABLE_SHARES else "allocations_floor_to_zero"
     else:
+        result.remaining_carryover_qty = carryover_qty if carryover_qty >= FAST_MIN_EXECUTABLE_SHARES else 0
         result.wait_seconds = max(
             _wait_seconds_for_account(str(cmd.get("account_id") or ""), account_metas)
             for cmd in result.commands
@@ -294,11 +499,15 @@ class FastTradingStrategyManager:
         market_data_store: MarketDataStore,
         account_metas_provider: Callable[[], Dict[str, AccountMeta]],
         publish_command: Callable[[Dict[str, Any], str], None],
+        account_snapshots_provider: Optional[Callable[[], Dict[str, AccountSnapshot]]] = None,
+        operations_log: Optional[OperationsLog] = None,
         cycle_seconds: Optional[float] = None,
         idle_cycle_seconds: Optional[float] = None,
     ) -> None:
         self._market_data_store = market_data_store
         self._account_metas_provider = account_metas_provider
+        self._account_snapshots_provider = account_snapshots_provider
+        self._operations_log = operations_log
         self._publish_command = publish_command
         self._cycle_seconds = self._positive_float(
             cycle_seconds,
@@ -373,13 +582,22 @@ class FastTradingStrategyManager:
         strategy.thread = thread
         with self._lock:
             self._strategies[key] = strategy
+        self._record_strategy_started(strategy)
         thread.start()
-        LOGGER.info("Started fast trading strategy key=%s test_mode=%s", key, test_mode)
+        LOGGER.info(
+            "Algo trading started successfully mode=%s symbol=%s key=%s command_id=%s end_time=%s test_mode=%s",
+            mode,
+            symbol,
+            key,
+            strategy_command.get("command_id"),
+            strategy_command.get("end_time_et"),
+            test_mode,
+        )
         return key
 
     def stop_strategy(self, trading_mode: str, symbol: str) -> int:
         key = self._strategy_key(trading_mode, symbol)
-        return self._stop_keys([key])
+        return self._stop_keys([key], reason=STOP_REASON_MANUAL)
 
     def stop_matching(self, trading_mode: str, account_ids: Optional[List[str]] = None) -> int:
         mode = str(trading_mode or "").strip().upper()
@@ -393,14 +611,14 @@ class FastTradingStrategyManager:
                 if account_filter and not (self._strategy_accounts(strategy.command) & account_filter):
                     continue
                 keys.append(key)
-        return self._stop_keys(keys)
+        return self._stop_keys(keys, reason=STOP_REASON_MANUAL)
 
     def stop_all(self) -> int:
         with self._lock:
             keys = list(self._strategies.keys())
-        return self._stop_keys(keys)
+        return self._stop_keys(keys, reason=STOP_REASON_MANUAL)
 
-    def _stop_keys(self, keys: List[str]) -> int:
+    def _stop_keys(self, keys: List[str], reason: str) -> int:
         strategies: List[_FastStrategy] = []
         with self._lock:
             for key in keys:
@@ -409,19 +627,69 @@ class FastTradingStrategyManager:
                     strategies.append(strategy)
 
         for strategy in strategies:
+            strategy.last_reason = reason
             strategy.stop_event.set()
         for strategy in strategies:
             if strategy.thread is not None and strategy.thread is not threading.current_thread():
                 strategy.thread.join(timeout=2.0)
-            LOGGER.info("Stopped fast trading strategy key=%s", strategy.key)
+            LOGGER.info(
+                "Algo trading stopped mode=%s symbol=%s key=%s command_id=%s reason=%s",
+                strategy.command.get("trading_mode"),
+                strategy.command.get("symbol"),
+                strategy.key,
+                strategy.command.get("command_id"),
+                reason,
+            )
         return len(strategies)
+
+    def _record_strategy_started(self, strategy: _FastStrategy) -> None:
+        if self._operations_log is None:
+            return
+        try:
+            self._operations_log.record_algo_started(
+                strategy.command,
+                strategy_key=strategy.key,
+                session_id=strategy.command.get("command_id"),
+            )
+        except Exception:
+            LOGGER.exception("Failed recording algo start operations event key=%s", strategy.key)
+
+    def _record_strategy_ended(
+        self,
+        strategy: _FastStrategy,
+        *,
+        reason: str,
+        cycles: int,
+        published_commands: int,
+    ) -> None:
+        if self._operations_log is None:
+            return
+        try:
+            self._operations_log.record_algo_ended(
+                strategy.command,
+                strategy_key=strategy.key,
+                session_id=strategy.command.get("command_id"),
+                reason=reason,
+                cycles=cycles,
+                published_commands=published_commands,
+            )
+        except Exception:
+            LOGGER.exception("Failed recording algo end operations event key=%s", strategy.key)
 
     def _run_strategy(self, strategy: _FastStrategy) -> None:
         try:
             end_time = _parse_iso_datetime(strategy.command.get("end_time_et"))
             while not strategy.stop_event.is_set():
                 if datetime.now(timezone.utc) >= end_time:
-                    strategy.last_reason = "end_time_reached"
+                    strategy.last_reason = STOP_REASON_END_TIME
+                    LOGGER.info(
+                        "Algo trading stopped mode=%s symbol=%s key=%s command_id=%s reason=%s",
+                        strategy.command.get("trading_mode"),
+                        strategy.command.get("symbol"),
+                        strategy.key,
+                        strategy.command.get("command_id"),
+                        STOP_REASON_END_TIME,
+                    )
                     break
 
                 cycle_start = time.monotonic()
@@ -437,12 +705,22 @@ class FastTradingStrategyManager:
                 if strategy.stop_event.wait(max(0.0, wait_seconds - elapsed)):
                     break
         except Exception:
+            strategy.last_reason = "Strategy error"
             LOGGER.exception("Fast trading strategy failed key=%s", strategy.key)
         finally:
             with self._lock:
                 existing = self._strategies.get(strategy.key)
                 if existing is strategy:
                     self._strategies.pop(strategy.key, None)
+                reason = strategy.last_reason or "Strategy stopped"
+                cycles = strategy.cycles
+                published_commands = strategy.published_commands
+            self._record_strategy_ended(
+                strategy,
+                reason=reason,
+                cycles=cycles,
+                published_commands=published_commands,
+            )
 
     def _wait_seconds_after_cycle(self, result: FastTradingCycleResult) -> float:
         if result.commands:
@@ -463,6 +741,7 @@ class FastTradingStrategyManager:
             book=book,
             fast_trading_groups=groups,
             account_metas=self._account_metas_provider(),
+            account_snapshots=self._account_snapshots_provider() if self._account_snapshots_provider is not None else None,
         )
         test_mode = _truthy_bool(command.get("fast_trading_test_mode"))
         for cmd in result.commands:

@@ -1,6 +1,7 @@
 import os
 import logging
 import secrets
+from datetime import datetime, timezone
 from hmac import compare_digest
 from typing import Dict, Tuple
 
@@ -25,6 +26,7 @@ from .templates import (
     render_trading_status_page,
 )
 from .services.fallback import load_fallback_snapshots
+from .services.operations_log import OperationsLog
 from .services.orders import (
     validate_order_inputs,
     validate_quick_order_inputs,
@@ -58,6 +60,7 @@ ACCOUNT_CONSUMER = None
 MARKET_DATA_CONSUMER = None
 COMMANDS_PRODUCER = None
 FAST_TRADING_MANAGER = None
+OPERATIONS_LOG = None
 
 MD_STORE = MarketDataStore()
 HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
@@ -130,8 +133,9 @@ def _require_auth_api(request: Request):
 
 @app.on_event("startup")
 def on_startup() -> None:
-    global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, HIST_CLOSE_STORE
+    global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG, HIST_CLOSE_STORE
 
+    server_started_at = datetime.now(timezone.utc)
     config_path = os.getenv("ACCOUNT_DASHBOARD_CONFIG", "./trading_ui/sample/config.json")
     APP_CONFIG = load_config(config_path)
     ACCOUNT_METAS = load_account_metas(APP_CONFIG)
@@ -139,6 +143,12 @@ def on_startup() -> None:
     AUTH_USERS = APP_CONFIG["auth"]["users"]
     HIST_CLOSE_STORE = HistoricalCloseStore(APP_CONFIG["market_data"]["historical_prices_csv"])
     LOGGER.info("market-data historical_prices_csv=%s", APP_CONFIG["market_data"]["historical_prices_csv"])
+    OPERATIONS_LOG = OperationsLog(
+        log_dir=os.getenv("OPERATIONS_LOG_DIR", "./logs"),
+        server_started_at=server_started_at,
+        snapshots_provider=get_served_snapshots,
+    )
+    LOGGER.info("operations log path=%s", OPERATIONS_LOG.path)
 
     ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store, ACCOUNT_METAS)
     ACCOUNT_CONSUMER.start()
@@ -150,6 +160,8 @@ def on_startup() -> None:
     FAST_TRADING_MANAGER = FastTradingStrategyManager(
         market_data_store=MD_STORE,
         account_metas_provider=lambda: ACCOUNT_METAS,
+        account_snapshots_provider=lambda: get_served_snapshots()[0],
+        operations_log=OPERATIONS_LOG,
         publish_command=_publish_fast_trading_command,
     )
 

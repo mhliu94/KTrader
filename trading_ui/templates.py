@@ -20,6 +20,20 @@ def html_escape(s: str) -> str:
     )
 
 
+def _account_server_label(meta: AccountMeta) -> str:
+    server_name = meta.machine_alias or meta.ip_address or meta.id
+    return f"#{meta.num_id} {server_name}"
+
+
+def _account_server_title(meta: AccountMeta) -> str:
+    parts = [meta.id, meta.broker]
+    if meta.machine_alias:
+        parts.append(meta.machine_alias)
+    if meta.ip_address:
+        parts.append(meta.ip_address)
+    return " | ".join(part for part in parts if part)
+
+
 def render_layout(
     lang: str,
     active_tab: str,
@@ -183,6 +197,9 @@ def render_layout(
       user-select:none;
     }}
     .choice-input:checked + .choice-btn {{
+      background:#dbeafe; color:#1e40af; border-color:#93c5fd;
+    }}
+    .choice-btn.active {{
       background:#dbeafe; color:#1e40af; border-color:#93c5fd;
     }}
     .toolbar {{ display:flex; flex-wrap:wrap; gap:12px; align-items:end; margin-bottom:16px; }}
@@ -685,13 +702,13 @@ def render_control_panel_page(
         for idx, aid in enumerate(sorted_account_ids, start=1)
     )
     cancel_account_buttons = (
-        f"<input class='choice-input' type='radio' id='cancel-acct-all' name='account_ids' value='__ALL__' checked>"
+        f"<input class='choice-input cancel-account-choice' type='checkbox' id='cancel-acct-all' name='account_ids' value='__ALL__' data-cancel-all checked>"
         f"<label class='choice-btn' for='cancel-acct-all'>{html_escape(t(lang,'all_accounts'))}</label>"
         + "\n"
         + "\n".join(
             (
-                f"<input class='choice-input' type='radio' id='cancel-acct-{idx}' name='account_ids' value='{html_escape(aid)}'>"
-                f"<label class='choice-btn' for='cancel-acct-{idx}'>#{account_metas[aid].num_id}</label>"
+                f"<input class='choice-input cancel-account-choice' type='checkbox' id='cancel-acct-{idx}' name='account_ids' value='{html_escape(aid)}' data-cancel-account>"
+                f"<label class='choice-btn' for='cancel-acct-{idx}' title='{html_escape(_account_server_title(account_metas[aid]))}'>{html_escape(_account_server_label(account_metas[aid]))}</label>"
             )
             for idx, aid in enumerate(sorted_account_ids, start=1)
         )
@@ -727,6 +744,10 @@ def render_control_panel_page(
         f"<label class='choice-btn' for='limit-side-buy'>{html_escape(t(lang,'buy'))}</label>"
         f"<input class='choice-input' type='radio' id='limit-side-sell' name='side' value='SELL'>"
         f"<label class='choice-btn' for='limit-side-sell'>{html_escape(t(lang,'sell'))}</label>"
+    )
+    limit_share_buttons = "\n".join(
+        f"<button class='choice-btn' type='button' data-limit-shares='{shares}'>{shares}</button>"
+        for shares in (3000, 5000, 10000, 20000, 30000, 50000)
     )
     limit_through_market_buttons = (
         f"<input class='choice-input' type='radio' id='limit-through-none' name='through_market_pct' value='' checked>"
@@ -1298,6 +1319,9 @@ def render_control_panel_page(
         <div>
           <label for="limit_shares">{html_escape(t(lang,'shares'))}</label>
           <input id="limit_shares" name="shares" placeholder="e.g. 100" inputmode="numeric" required />
+          <div class="choice-grid" style="margin-top:8px;" aria-label="{html_escape(t(lang,'limit_quick_shares'))}">
+            {limit_share_buttons}
+          </div>
         </div>
         <div>
           <label for="limit_price">{html_escape(t(lang,'limit_price'))}</label>
@@ -1477,6 +1501,24 @@ def render_control_panel_page(
 
     <script>
       (function(){{
+        const cancelForm = document.getElementById("cancel-open-orders-form");
+        if (cancelForm) {{
+          const cancelAll = cancelForm.querySelector("input[data-cancel-all]");
+          const cancelAccounts = Array.from(cancelForm.querySelectorAll("input[data-cancel-account]"));
+          if (cancelAll) {{
+            cancelAll.addEventListener("change", function(){{
+              if (cancelAll.checked) {{
+                cancelAccounts.forEach(function(input) {{ input.checked = false; }});
+              }}
+            }});
+          }}
+          cancelAccounts.forEach(function(input) {{
+            input.addEventListener("change", function(){{
+              if (input.checked && cancelAll) cancelAll.checked = false;
+            }});
+          }});
+        }}
+
         const marketAccountEl = document.getElementById("account_id");
         const delayedAccountEl = document.getElementById("delayed_account_id");
         const marketCashEl = document.getElementById("market-selected-cash");
@@ -1617,9 +1659,49 @@ def render_control_panel_page(
         const cashEl = document.getElementById("limit-selected-cash");
         const lastEl = document.getElementById("limit-selected-last");
         const symbolEl = document.getElementById("limit_symbol");
+        const sharesEl = document.getElementById("limit_shares");
+        const shareButtons = limitForm ? Array.from(limitForm.querySelectorAll("button[data-limit-shares]")) : [];
         const accountInputs = limitForm ? Array.from(limitForm.querySelectorAll("input[name='account_ids']")) : [];
+        const symbolStorageKey = "trading_ui.limit_order.symbol";
         let accountsCache = null;
         let marketCache = null;
+
+        function storageGet(key) {{
+          try {{
+            return window.localStorage ? window.localStorage.getItem(key) : null;
+          }} catch (e) {{
+            return null;
+          }}
+        }}
+
+        function storageSet(key, value) {{
+          try {{
+            if (window.localStorage) window.localStorage.setItem(key, value);
+          }} catch (e) {{
+            // ignore unavailable storage
+          }}
+        }}
+
+        function restoreLimitSymbol() {{
+          if (!symbolEl) return;
+          const savedSymbol = storageGet(symbolStorageKey);
+          if (!savedSymbol) return;
+          const hasOption = Array.from(symbolEl.options).some((opt) => opt.value === savedSymbol);
+          if (hasOption) symbolEl.value = savedSymbol;
+        }}
+
+        function persistLimitSymbol() {{
+          if (!symbolEl || !symbolEl.value) return;
+          storageSet(symbolStorageKey, symbolEl.value);
+        }}
+
+        function syncShareButtons() {{
+          if (!sharesEl) return;
+          const current = String(sharesEl.value || "").trim();
+          shareButtons.forEach((button) => {{
+            button.classList.toggle("active", String(button.dataset.limitShares || "") === current);
+          }});
+        }}
 
         function fmtMoney(x) {{
           if (x === null || x === undefined) return "-";
@@ -1668,7 +1750,22 @@ def render_control_panel_page(
         }}
 
         accountInputs.forEach((el) => el.addEventListener("change", renderLimitSummary));
-        if (symbolEl) symbolEl.addEventListener("change", renderLimitSummary);
+        shareButtons.forEach((button) => {{
+          button.addEventListener("click", function() {{
+            if (!sharesEl) return;
+            sharesEl.value = String(button.dataset.limitShares || "");
+            syncShareButtons();
+            sharesEl.focus();
+          }});
+        }});
+        if (sharesEl) sharesEl.addEventListener("input", syncShareButtons);
+        restoreLimitSymbol();
+        if (symbolEl) symbolEl.addEventListener("change", function() {{
+          persistLimitSymbol();
+          renderLimitSummary();
+        }});
+        if (limitForm) limitForm.addEventListener("submit", persistLimitSymbol);
+        syncShareButtons();
         refreshLimitSummary();
         setInterval(refreshLimitSummary, 5000);
       }})();

@@ -66,7 +66,22 @@ def _first_present(obj: dict, keys: tuple[str, ...]) -> object:
     return None
 
 
-def _extract_levels(side_obj: object, depth_limit: int) -> list[BookLevel]:
+def _sort_levels_most_aggressive(levels: list[BookLevel], *, is_bid: bool) -> list[BookLevel]:
+    def sort_key(level: BookLevel) -> tuple[int, float]:
+        price = level.price
+        if price is None:
+            return (1, 0.0)
+        return (0, -price if is_bid else price)
+
+    return sorted(levels, key=sort_key)
+
+
+def _top_levels(levels: list[BookLevel], depth_limit: int, *, is_bid: bool) -> list[BookLevel]:
+    capped_limit = max(0, depth_limit)
+    return _sort_levels_most_aggressive(list(levels), is_bid=is_bid)[:capped_limit]
+
+
+def _extract_levels(side_obj: object, depth_limit: int, *, is_bid: bool) -> list[BookLevel]:
     if not isinstance(side_obj, dict):
         return []
     levels = side_obj.get("levels")
@@ -74,7 +89,7 @@ def _extract_levels(side_obj: object, depth_limit: int) -> list[BookLevel]:
         return []
 
     out: list[BookLevel] = []
-    for level in levels[: max(0, depth_limit)]:
+    for level in levels:
         if not isinstance(level, dict):
             continue
         out.append(
@@ -84,19 +99,14 @@ def _extract_levels(side_obj: object, depth_limit: int) -> list[BookLevel]:
                 order_count=_to_int(_first_present(level, ("order_count", "num_orders", "TotalOrderCount"))),
             )
         )
-    return out
+    return _top_levels(out, depth_limit, is_bid=is_bid)
 
 
-def _best_price(side_obj: object) -> Optional[float]:
-    if not isinstance(side_obj, dict):
+def _best_price(side_obj: object, *, is_bid: bool) -> Optional[float]:
+    levels = _extract_levels(side_obj, 1, is_bid=is_bid)
+    if not levels:
         return None
-    levels = side_obj.get("levels")
-    if not isinstance(levels, list) or not levels:
-        return None
-    best = levels[0]
-    if not isinstance(best, dict):
-        return None
-    return _to_float(_first_present(best, ("prc", "price", "Price")))
+    return levels[0].price
 
 
 def quote_row_from_price_book(payload: dict) -> Optional[QuoteRow]:
@@ -104,8 +114,8 @@ def quote_row_from_price_book(payload: dict) -> Optional[QuoteRow]:
     if not symbol:
         return None
 
-    bid = _best_price(payload.get("bid_side"))
-    ask = _best_price(payload.get("offer_side"))
+    bid = _best_price(payload.get("bid_side"), is_bid=True)
+    ask = _best_price(payload.get("offer_side"), is_bid=False)
     if bid is not None and ask is not None:
         last = (bid + ask) / 2.0
     elif bid is not None:
@@ -156,8 +166,8 @@ def order_book_from_price_book(payload: dict, depth_limit: int = 20) -> Optional
     capped_limit = max(1, min(int(depth_limit), 20))
     return OrderBookSnapshot(
         symbol=symbol,
-        bids=_extract_levels(payload.get("bid_side"), capped_limit),
-        asks=_extract_levels(payload.get("offer_side"), capped_limit),
+        bids=_extract_levels(payload.get("bid_side"), capped_limit, is_bid=True),
+        asks=_extract_levels(payload.get("offer_side"), capped_limit, is_bid=False),
         asof_epoch=asof_epoch,
         depth_limit=capped_limit,
         error=None,
@@ -230,8 +240,8 @@ class MarketDataStore:
 
             return OrderBookSnapshot(
                 symbol=existing.symbol,
-                bids=list(existing.bids[:capped_limit]),
-                asks=list(existing.asks[:capped_limit]),
+                bids=_top_levels(existing.bids, capped_limit, is_bid=True),
+                asks=_top_levels(existing.asks, capped_limit, is_bid=False),
                 asof_epoch=existing.asof_epoch,
                 depth_limit=capped_limit,
                 error=existing.error,

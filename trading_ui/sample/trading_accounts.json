@@ -19,12 +19,12 @@
       "trading_medium": "API"
     },
     {
-      "ip_address": "45.32.110.212",
-      "machine_alias": "Vultr-BareMetal-SG1",
+      "ip_address": "45.32.153.180",
+      "machine_alias": "Vultr-BareMetal-DE",
       "numeric_id": 3,
-      "string_id": "FUYUAN_1",
-      "owner_type": "institution",
-      "broker": "MetaSecurities",
+      "string_id": "GIGA-HWK",
+      "owner_type": "individual",
+      "broker": "GigaMoney",
       "trading_medium": "EMULATOR"
     },
     {
@@ -88,6 +88,24 @@
       "string_id": "ZR-WJY",
       "owner_type": "individual",
       "broker": "Zhuorui",
+      "trading_medium": "EMULATOR"
+    },
+    {
+      "ip_address": "135.148.52.187",
+      "machine_alias": "OVH-BareMetal-NL",
+      "numeric_id": 11,
+      "string_id": "FANGDE-1",
+      "owner_type": "individual",
+      "broker": "Fangde",
+      "trading_medium": "WINDOWS"
+    },
+    {
+      "ip_address": "192.248.191.248",
+      "machine_alias": "Vultr-BareMetal-DE2",
+      "numeric_id": 12,
+      "string_id": "GIGA-DENGLEI",
+      "owner_type": "individual",
+      "broker": "GigaMoney",
       "trading_medium": "EMULATOR"
     }
   ]

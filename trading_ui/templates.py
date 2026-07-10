@@ -44,7 +44,7 @@ def render_layout(
     can_manage_trading: bool = False,
 ) -> str:
     next_path = f"/{active_tab}"
-    refresh_enabled = active_tab not in ("control-panel", "currency-conversion", "trading-status", "market-insights")
+    refresh_enabled = active_tab == "account-details"
     refresh_meta = '<meta http-equiv="refresh" content="30" />' if refresh_enabled else ""
     refresh_status = ""
     if refresh_enabled:
@@ -1662,7 +1662,10 @@ def render_control_panel_page(
         const sharesEl = document.getElementById("limit_shares");
         const shareButtons = limitForm ? Array.from(limitForm.querySelectorAll("button[data-limit-shares]")) : [];
         const accountInputs = limitForm ? Array.from(limitForm.querySelectorAll("input[name='account_ids']")) : [];
+        const sideInputs = limitForm ? Array.from(limitForm.querySelectorAll("input[name='side']")) : [];
         const symbolStorageKey = "trading_ui.limit_order.symbol";
+        const accountStorageKey = "trading_ui.limit_order.account_ids";
+        const sideStorageKey = "trading_ui.limit_order.side";
         let accountsCache = null;
         let marketCache = null;
 
@@ -1693,6 +1696,56 @@ def render_control_panel_page(
         function persistLimitSymbol() {{
           if (!symbolEl || !symbolEl.value) return;
           storageSet(symbolStorageKey, symbolEl.value);
+        }}
+
+        function parseStoredAccountIds(raw) {{
+          if (!raw) return [];
+          try {{
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {{
+              return parsed.map((value) => String(value || "").trim()).filter(Boolean);
+            }}
+          }} catch (e) {{
+            // fall back to legacy comma-separated values
+          }}
+          return String(raw).split(",").map((value) => value.trim()).filter(Boolean);
+        }}
+
+        function restoreLimitAccounts() {{
+          if (!accountInputs.length) return;
+          const savedAccounts = parseStoredAccountIds(storageGet(accountStorageKey));
+          if (!savedAccounts.length) return;
+          const savedSet = new Set(savedAccounts);
+          let matched = false;
+          accountInputs.forEach((input) => {{
+            const shouldCheck = savedSet.has(input.value);
+            input.checked = shouldCheck;
+            if (shouldCheck) matched = true;
+          }});
+          if (!matched) {{
+            accountInputs.forEach((input, idx) => {{
+              input.checked = idx === 0;
+            }});
+          }}
+        }}
+
+        function persistLimitAccounts() {{
+          const selectedAccounts = accountInputs.filter((input) => input.checked).map((input) => input.value);
+          if (selectedAccounts.length) {{
+            storageSet(accountStorageKey, JSON.stringify(selectedAccounts));
+          }}
+        }}
+
+        function restoreLimitSide() {{
+          const savedSide = storageGet(sideStorageKey);
+          if (savedSide !== "BUY" && savedSide !== "SELL") return;
+          const matchingInput = sideInputs.find((input) => input.value === savedSide);
+          if (matchingInput) matchingInput.checked = true;
+        }}
+
+        function persistLimitSide() {{
+          const selectedSide = sideInputs.find((input) => input.checked);
+          if (selectedSide) storageSet(sideStorageKey, selectedSide.value);
         }}
 
         function syncShareButtons() {{
@@ -1749,7 +1802,11 @@ def render_control_panel_page(
           renderLimitSummary();
         }}
 
-        accountInputs.forEach((el) => el.addEventListener("change", renderLimitSummary));
+        accountInputs.forEach((el) => el.addEventListener("change", function() {{
+          persistLimitAccounts();
+          renderLimitSummary();
+        }}));
+        sideInputs.forEach((el) => el.addEventListener("change", persistLimitSide));
         shareButtons.forEach((button) => {{
           button.addEventListener("click", function() {{
             if (!sharesEl) return;
@@ -1760,11 +1817,17 @@ def render_control_panel_page(
         }});
         if (sharesEl) sharesEl.addEventListener("input", syncShareButtons);
         restoreLimitSymbol();
+        restoreLimitAccounts();
+        restoreLimitSide();
         if (symbolEl) symbolEl.addEventListener("change", function() {{
           persistLimitSymbol();
           renderLimitSummary();
         }});
-        if (limitForm) limitForm.addEventListener("submit", persistLimitSymbol);
+        if (limitForm) limitForm.addEventListener("submit", function() {{
+          persistLimitSymbol();
+          persistLimitAccounts();
+          persistLimitSide();
+        }});
         syncShareButtons();
         refreshLimitSummary();
         setInterval(refreshLimitSummary, 5000);

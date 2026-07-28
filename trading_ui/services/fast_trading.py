@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Callable, Dict, List, Optional
 
 from ..models import AccountMeta, AccountSnapshot
@@ -219,6 +220,34 @@ def _scan_indices_for_mode(mode: str, group_count: int) -> List[int]:
     return list(range(group_count - 1, -1, -1))
 
 
+def _best_resting_price(levels: List[BookLevel], mode: str) -> Optional[float]:
+    prices = [
+        price
+        for level in levels
+        if (price := _level_price(level)) is not None and price > 0
+    ]
+    if not prices:
+        return None
+    return min(prices) if mode == "E" else max(prices)
+
+
+def _execution_limit_price(mode: str, price_limit: float, best_resting_price: float) -> float:
+    configured_limit = Decimal(str(price_limit))
+    best_price = Decimal(str(best_resting_price))
+    if mode == "E":
+        market_limit = (best_price * Decimal("1.01")).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_CEILING,
+        )
+        return float(min(configured_limit, market_limit))
+
+    market_limit = (best_price * Decimal("0.99")).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_FLOOR,
+    )
+    return float(max(configured_limit, market_limit))
+
+
 def _group_account_percentages(group: _FastGroup) -> Dict[str, float]:
     out: Dict[str, float] = {}
     for account in group.accounts:
@@ -279,6 +308,7 @@ def _allocate_group_quantity(
     group: _FastGroup,
     mode: str,
     symbol: str,
+    limit_price: float,
     account_snapshots: Optional[Dict[str, AccountSnapshot]],
     used_cash_by_account: Dict[str, float],
     used_shares_by_account: Dict[str, int],
@@ -299,7 +329,7 @@ def _allocate_group_quantity(
             account_id=account_id,
             mode=mode,
             symbol=symbol,
-            limit_price=group.price_limit,
+            limit_price=limit_price,
             account_snapshots=account_snapshots,
             used_cash_by_account=used_cash_by_account,
             used_shares_by_account=used_shares_by_account,
@@ -316,7 +346,7 @@ def _allocate_group_quantity(
             account_id=account_id,
             mode=mode,
             qty=actual_qty,
-            limit_price=group.price_limit,
+            limit_price=limit_price,
             used_cash_by_account=used_cash_by_account,
             used_shares_by_account=used_shares_by_account,
         )
@@ -353,7 +383,7 @@ def _allocate_group_quantity(
                 account_id=account_id,
                 mode=mode,
                 qty=actual_qty,
-                limit_price=group.price_limit,
+                limit_price=limit_price,
                 used_cash_by_account=used_cash_by_account,
                 used_shares_by_account=used_shares_by_account,
             )
@@ -414,6 +444,11 @@ def build_fast_trading_cycle_commands(
         result.reason = "no_resting_orders_in_configured_ranges"
         return result
 
+    best_resting_price = _best_resting_price(levels, mode)
+    if best_resting_price is None:
+        result.reason = "no_resting_orders_in_configured_ranges"
+        return result
+
     total_qty = 0
     selected_positions: set[int] = set()
     selected_first_index = scan_indices[start_pos]
@@ -426,7 +461,11 @@ def build_fast_trading_cycle_commands(
 
     result.total_resting_qty = total_qty
     result.execution_group_id = groups[selected_first_index].group_id
-    result.limit_price = groups[selected_first_index].price_limit
+    result.limit_price = _execution_limit_price(
+        mode,
+        groups[selected_first_index].price_limit,
+        best_resting_price,
+    )
 
     if total_qty < FAST_MIN_EXECUTABLE_SHARES:
         result.reason = "total_below_minimum"
@@ -440,6 +479,7 @@ def build_fast_trading_cycle_commands(
     for pos in range(start_pos, len(scan_indices)):
         group_index = scan_indices[pos]
         group = groups[group_index]
+        limit_price = _execution_limit_price(mode, group.price_limit, best_resting_price)
         own_qty = quantities[group_index] if pos in selected_positions else 0
 
         if 0 < carryover_qty < FAST_MIN_EXECUTABLE_SHARES:
@@ -457,6 +497,7 @@ def build_fast_trading_cycle_commands(
             group=group,
             mode=mode,
             symbol=clean_symbol,
+            limit_price=limit_price,
             account_snapshots=account_snapshots,
             used_cash_by_account=used_cash_by_account,
             used_shares_by_account=used_shares_by_account,
@@ -468,7 +509,7 @@ def build_fast_trading_cycle_commands(
                 symbol=clean_symbol,
                 side=order_side,
                 shares=qty,
-                limit_price=group.price_limit,
+                limit_price=limit_price,
                 account_metas=account_metas,
             )
             cmd["trading_mode"] = mode

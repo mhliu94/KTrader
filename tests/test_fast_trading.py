@@ -86,10 +86,10 @@ class FastTradingCycleTests(unittest.TestCase):
 
         self.assertEqual(result.total_resting_qty, 900)
         self.assertEqual(result.execution_group_id, 3)
-        self.assertEqual(result.limit_price, 100)
+        self.assertEqual(result.limit_price, 103.95)
         self.assertEqual([cmd["account_id"] for cmd in result.commands], ["K", "J", "G", "H", "I"])
         self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [300, 200, 80, 120, 160])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [100, 90, 80, 80, 80])
+        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [103.95] * 5)
         self.assertTrue(all(cmd["type"] == "LIMIT_ORDER_FOK" for cmd in result.commands))
         self.assertTrue(all(cmd["side"] == "SELL" for cmd in result.commands))
 
@@ -118,11 +118,67 @@ class FastTradingCycleTests(unittest.TestCase):
 
         self.assertEqual(result.total_resting_qty, 1100)
         self.assertEqual(result.execution_group_id, 1)
-        self.assertEqual(result.limit_price, 105)
+        self.assertEqual(result.limit_price, 102.01)
         self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
         self.assertEqual([cmd["side"] for cmd in result.commands], ["BUY", "BUY"])
         self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [600, 250])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [105, 110])
+        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [102.01, 102.01])
+
+    def test_mode_e_uses_rounded_best_ask_adjustment_or_configured_cap(self):
+        cases = [
+            (100.001, 200, 101.01),
+            (100, 100.50, 100.50),
+        ]
+        for best_ask, price_limit, expected_limit in cases:
+            with self.subTest(best_ask=best_ask, price_limit=price_limit):
+                result = build_fast_trading_cycle_commands(
+                    trading_mode="E",
+                    symbol="MSFT",
+                    book=OrderBookSnapshot(
+                        symbol="MSFT",
+                        bids=[],
+                        asks=[BookLevel(price=best_ask, quantity=1000)],
+                    ),
+                    fast_trading_groups=[
+                        {
+                            "group_id": 1,
+                            "price_limit": price_limit,
+                            "accounts": [{"account_id": "A", "allocation_pct": 100}],
+                        },
+                    ],
+                    account_metas=metas("A"),
+                )
+
+                self.assertEqual(result.limit_price, expected_limit)
+                self.assertEqual(result.commands[0]["limit_price"], expected_limit)
+
+    def test_mode_f_uses_rounded_best_bid_adjustment_or_configured_floor(self):
+        cases = [
+            (100.999, 50, 99.98),
+            (100, 99.50, 99.50),
+        ]
+        for best_bid, price_limit, expected_limit in cases:
+            with self.subTest(best_bid=best_bid, price_limit=price_limit):
+                result = build_fast_trading_cycle_commands(
+                    trading_mode="F",
+                    symbol="AAPL",
+                    book=OrderBookSnapshot(
+                        symbol="AAPL",
+                        bids=[BookLevel(price=best_bid, quantity=1000)],
+                        asks=[],
+                    ),
+                    fast_trading_groups=[
+                        {
+                            "group_id": 1,
+                            "price_limit": price_limit,
+                            "accounts": [{"account_id": "A", "allocation_pct": 100}],
+                        },
+                    ],
+                    account_metas=metas("A"),
+                )
+
+                self.assertEqual(result.limit_price, expected_limit)
+                self.assertEqual(result.commands[0]["limit_price"], expected_limit)
 
     def test_skips_when_combined_quantity_is_below_minimum(self):
         book = OrderBookSnapshot(
@@ -249,8 +305,8 @@ class FastTradingCycleTests(unittest.TestCase):
             fast_trading_groups=groups,
             account_metas=metas("A", "B"),
             account_snapshots=snapshots(
-                A={"cash_by_currency": {"USD": 80 * 300}},
-                B={"cash_by_currency": {"USD": 80 * 1000}},
+                A={"cash_by_currency": {"USD": 75.75 * 300}},
+                B={"cash_by_currency": {"USD": 75.75 * 1000}},
             ),
             cycle_id="cycle-buy-redistribute",
         )
@@ -279,15 +335,15 @@ class FastTradingCycleTests(unittest.TestCase):
             fast_trading_groups=groups,
             account_metas=metas("A", "B"),
             account_snapshots=snapshots(
-                A={"cash_by_currency": {"USD": 80 * 1600}},
-                B={"cash_by_currency": {"USD": 90 * 1000}},
+                A={"cash_by_currency": {"USD": 75.75 * 1600}},
+                B={"cash_by_currency": {"USD": 75.75 * 1000}},
             ),
             cycle_id="cycle-buy-delegate",
         )
 
         self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
         self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [1600, 400])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [80, 90])
+        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [75.75, 75.75])
 
     def test_fast_buying_ignores_carryover_below_one_hundred_shares(self):
         book = OrderBookSnapshot(
@@ -310,8 +366,8 @@ class FastTradingCycleTests(unittest.TestCase):
             fast_trading_groups=groups,
             account_metas=metas("A", "B"),
             account_snapshots=snapshots(
-                A={"cash_by_currency": {"USD": 80 * 1950}},
-                B={"cash_by_currency": {"USD": 90 * 1000}},
+                A={"cash_by_currency": {"USD": 75.75 * 1950}},
+                B={"cash_by_currency": {"USD": 75.75 * 1000}},
             ),
             cycle_id="cycle-buy-small-carry",
         )
@@ -381,7 +437,7 @@ class FastTradingCycleTests(unittest.TestCase):
 
         self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
         self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [1600, 400])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [100, 90])
+        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [103.95, 103.95])
 
     def test_past_stop_time_becomes_manual_termination_time(self):
         normalized = normalize_fast_trading_end_time(

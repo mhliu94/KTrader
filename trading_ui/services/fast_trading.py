@@ -23,8 +23,8 @@ FAST_MANUAL_END_TIME = datetime(2099, 1, 1, tzinfo=timezone.utc)
 FAST_TRADING_WAIT_SECONDS_BY_MEDIUM = {
     "API": 5.0,
     "WEB": 20.0,
-    "WINDOWS": 25.0,
-    "EMULATOR": 35.0,
+    "WINDOWS": 40.0,
+    "EMULATOR": 40.0,
 }
 STOP_REASON_MANUAL = "Manual stop"
 STOP_REASON_END_TIME = "Hit end time"

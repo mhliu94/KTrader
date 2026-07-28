@@ -201,8 +201,8 @@ class FastTradingCycleTests(unittest.TestCase):
             cycle_id="cycle-5",
         )
 
-        self.assertEqual(result.wait_seconds, 35.0)
-        self.assertTrue(all(cmd["fast_trading_wait_seconds"] == 35.0 for cmd in result.commands))
+        self.assertEqual(result.wait_seconds, 40.0)
+        self.assertTrue(all(cmd["fast_trading_wait_seconds"] == 40.0 for cmd in result.commands))
 
     def test_wait_for_api_only_execution_group_is_five_seconds(self):
         book = OrderBookSnapshot(

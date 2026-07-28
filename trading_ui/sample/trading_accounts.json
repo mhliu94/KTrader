@@ -13,9 +13,9 @@
       "ip_address": "172.235.244.20",
       "machine_alias": "Linode-Jakarta2",
       "numeric_id": 2,
-      "string_id": "TIGER_PEAKRISE",
-      "owner_type": "institution",
-      "broker": "Tiger",
+      "string_id": "NA-1",
+      "owner_type": "undefined",
+      "broker": "NA",
       "trading_medium": "API"
     },
     {
@@ -76,9 +76,9 @@
       "ip_address": "49.234.22.212",
       "machine_alias": "Tencent-Shanghai2",
       "numeric_id": 9,
-      "string_id": "TIGER_DENGLEI",
-      "owner_type": "individual",
-      "broker": "Tiger",
+      "string_id": "NA-2",
+      "owner_type": "undefined",
+      "broker": "NA",
       "trading_medium": "API"
     },
     {
@@ -94,7 +94,7 @@
       "ip_address": "135.148.52.187",
       "machine_alias": "OVH-BareMetal-NL",
       "numeric_id": 11,
-      "string_id": "FANGDE-1",
+      "string_id": "FANGDE-WJY",
       "owner_type": "individual",
       "broker": "Fangde",
       "trading_medium": "WINDOWS"
@@ -104,6 +104,42 @@
       "machine_alias": "Vultr-BareMetal-DE2",
       "numeric_id": 12,
       "string_id": "GIGA-DENGLEI",
+      "owner_type": "individual",
+      "broker": "GigaMoney",
+      "trading_medium": "EMULATOR"
+    },
+    {
+      "ip_address": "15.235.43.53",
+      "machine_alias": "OVH-BareMetal-Toronto1",
+      "numeric_id": 13,
+      "string_id": "FANGDE-WXL",
+      "owner_type": "individual",
+      "broker": "Fangde",
+      "trading_medium": "WINDOWS"
+    },
+    {
+      "ip_address": "148.113.213.109",
+      "machine_alias": "OVH-BareMetal-Toronto2",
+      "numeric_id": 14,
+      "string_id": "FANGDE-HKW",
+      "owner_type": "individual",
+      "broker": "Fangde",
+      "trading_medium": "WINDOWS"
+    },
+    {
+      "ip_address": "57.129.145.108",
+      "machine_alias": "OVH-BareMetal-UK1",
+      "numeric_id": 15,
+      "string_id": "GIGA-WXL",
+      "owner_type": "individual",
+      "broker": "GigaMoney",
+      "trading_medium": "EMULATOR"
+    },
+    {
+      "ip_address": "37.59.185.97",
+      "machine_alias": "OVH-BareMetal-FR1",
+      "numeric_id": 16,
+      "string_id": "GIGA-WJY",
       "owner_type": "individual",
       "broker": "GigaMoney",
       "trading_medium": "EMULATOR"

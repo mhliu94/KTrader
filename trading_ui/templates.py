@@ -143,6 +143,21 @@ def render_layout(
     .ts {{ font-size: 12px; color: #888; }}
     .meta {{ font-size: 12px; color: #666; margin-bottom: 10px; }}
     .cash {{ margin: 8px 0 12px 0; }}
+    .portfolio-card {{ margin-bottom: 16px; }}
+    .portfolio-card .hdr {{ align-items:flex-start; gap:16px; }}
+    .portfolio-card .ts {{ max-width:520px; text-align:right; line-height:1.4; }}
+    .portfolio-cash {{ display:flex; flex-wrap:wrap; gap:10px; margin:12px 0 16px 0; }}
+    .cash-total {{
+      min-width:150px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px;
+      background:#f8fafc; box-sizing:border-box;
+    }}
+    .cash-total-label {{ color:#64748b; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }}
+    .cash-total-value {{ margin-top:3px; color:#0f172a; font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; }}
+    .portfolio-note {{ color:#666; font-size:12px; margin-top:4px; }}
+    .portfolio-note.warn-note {{ color:#9a3412; }}
+    .section-heading {{ margin:20px 0 10px 2px; color:#334155; font-size:14px; font-weight:700; }}
+    .portfolio-card .section-heading {{ margin-top:12px; }}
+    .table-scroll {{ overflow-x:auto; }}
     .status-row {{ display:flex; align-items:center; gap:8px; margin: 8px 0 12px 0; font-size: 13px; }}
     .status-pill {{ display:inline-block; padding: 3px 8px; border-radius: 999px; font-weight: 700; font-size: 12px; }}
     .status-on {{ color:#166534; background:#dcfce7; border:1px solid #86efac; }}
@@ -246,6 +261,17 @@ def render_layout(
     .fast-account-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:600; color:#333; }}
     .fast-account-row input[type=number] {{ width:100%; min-width:0; }}
     @media (max-width: 640px) {{
+      body {{ margin:16px; }}
+      .topbar {{ align-items:flex-start; gap:12px; }}
+      .right {{ gap:10px; }}
+      .tabs {{ overflow-x:auto; padding:2px 0 4px 0; }}
+      .tab {{ flex:0 0 auto; }}
+      .grid {{ grid-template-columns:minmax(0, 1fr); }}
+      .card {{ min-width:0; }}
+      .portfolio-card .hdr {{ flex-direction:column; gap:4px; }}
+      .portfolio-card .ts {{ max-width:none; text-align:left; }}
+      .portfolio-cash {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); }}
+      .cash-total {{ min-width:0; }}
       .fast-account-row {{ grid-template-columns:auto minmax(0, 1fr); }}
       .fast-account-row input[type=number] {{ grid-column:2; }}
       .modal-actions {{ justify-content:stretch; }}
@@ -293,6 +319,96 @@ def render_layout(
 """
 
 
+def _aggregate_portfolio(
+    accounts: Dict[str, AccountSnapshot],
+    account_metas: Dict[str, AccountMeta],
+):
+    """Aggregate the latest configured-account snapshots for portfolio display."""
+    cash_totals: Dict[str, float] = {}
+    position_totals = {}
+    included_accounts = 0
+
+    for account_id in account_metas:
+        account = accounts.get(account_id)
+        if account is None:
+            continue
+
+        included_accounts += 1
+        balances: Dict[str, float] = {}
+        for raw_currency, raw_amount in account.cash_by_currency.items():
+            currency = str(raw_currency or "").strip().upper()
+            if not currency:
+                continue
+            balances[currency] = float(raw_amount or 0.0)
+        if "USD" not in balances:
+            balances["USD"] = float(account.cash or 0.0)
+        for currency, amount in balances.items():
+            cash_totals[currency] = cash_totals.get(currency, 0.0) + amount
+
+        symbols_seen = set()
+        for position in account.positions:
+            symbol = str(position.symbol or "").strip().upper()
+            if not symbol:
+                continue
+            qty = float(position.qty or 0.0)
+            if not qty:
+                continue
+
+            aggregate = position_totals.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "qty": 0.0,
+                    "priced_value": 0.0,
+                    "priced_qty": 0.0,
+                    "all_priced": True,
+                    "directions": set(),
+                    "account_count": 0,
+                },
+            )
+            aggregate["qty"] += qty
+            if qty > 0:
+                aggregate["directions"].add(1)
+            elif qty < 0:
+                aggregate["directions"].add(-1)
+
+            if position.avg_price is None:
+                aggregate["all_priced"] = False
+            else:
+                abs_qty = abs(qty)
+                aggregate["priced_qty"] += abs_qty
+                aggregate["priced_value"] += abs_qty * float(position.avg_price)
+
+            if symbol not in symbols_seen:
+                aggregate["account_count"] += 1
+                symbols_seen.add(symbol)
+
+    positions = []
+    for aggregate in position_totals.values():
+        avg_price = None
+        if (
+            aggregate["all_priced"]
+            and len(aggregate["directions"]) == 1
+            and aggregate["priced_qty"]
+        ):
+            avg_price = aggregate["priced_value"] / aggregate["priced_qty"]
+        positions.append(
+            {
+                "symbol": aggregate["symbol"],
+                "qty": aggregate["qty"],
+                "avg_price": avg_price,
+                "account_count": aggregate["account_count"],
+            }
+        )
+
+    return {
+        "cash": dict(sorted(cash_totals.items())),
+        "positions": sorted(positions, key=lambda position: position["symbol"]),
+        "included_accounts": included_accounts,
+        "total_accounts": len(account_metas),
+    }
+
+
 def render_account_details_page(
     lang: str,
     store: AccountStore,
@@ -302,6 +418,57 @@ def render_account_details_page(
     account_details_topic: str,
 ) -> str:
     items = sorted(account_metas.values(), key=lambda meta: (meta.num_id, meta.id))
+    portfolio = _aggregate_portfolio(accounts, account_metas)
+
+    cash_totals = []
+    for currency, amount in portfolio["cash"].items():
+        cash_totals.append(
+            "<div class='cash-total'>"
+            f"<div class='cash-total-label'>{html_escape(currency)}</div>"
+            f"<div class='cash-total-value'>{amount:,.2f}</div>"
+            "</div>"
+        )
+
+    portfolio_position_rows = []
+    for position in portfolio["positions"]:
+        avg_price = position["avg_price"]
+        portfolio_position_rows.append(
+            "<tr>"
+            f"<td><b>{html_escape(position['symbol'])}</b></td>"
+            f"<td style='text-align:right'>{position['qty']:,.2f}</td>"
+            f"<td style='text-align:right'>{'—' if avg_price is None else f'{avg_price:,.4f}'}</td>"
+            f"<td style='text-align:right'>{position['account_count']:,}</td>"
+            "</tr>"
+        )
+
+    coverage_note = (
+        f"{html_escape(t(lang, 'snapshot_coverage'))}: "
+        f"<b>{portfolio['included_accounts']} / {portfolio['total_accounts']}</b>"
+    )
+    if portfolio["included_accounts"] < portfolio["total_accounts"]:
+        coverage_note += (
+            f"<div class='portfolio-note warn-note'>{html_escape(t(lang, 'portfolio_incomplete'))}</div>"
+        )
+
+    portfolio_html = (
+        "<section id='portfolio-summary' class='card portfolio-card'>"
+        "<div class='hdr'>"
+        f"<div class='acct'>{html_escape(t(lang, 'portfolio'))}</div>"
+        f"<div class='ts'>{coverage_note}</div>"
+        "</div>"
+        f"<div class='meta'>{html_escape(t(lang, 'portfolio_summary'))}</div>"
+        f"<div class='section-heading'>{html_escape(t(lang, 'cash_holdings'))}</div>"
+        f"<div class='portfolio-cash'>{''.join(cash_totals) if cash_totals else '<em>—</em>'}</div>"
+        f"<div class='section-heading'>{html_escape(t(lang, 'positions'))}</div>"
+        "<div class='table-scroll'><table class='pos'>"
+        f"<thead><tr><th>{html_escape(t(lang, 'symbol'))}</th>"
+        f"<th style='text-align:right'>{html_escape(t(lang, 'qty'))}</th>"
+        f"<th style='text-align:right' title='{html_escape(t(lang, 'weighted_avg_px'))}'>{html_escape(t(lang, 'avg_px'))}</th>"
+        f"<th style='text-align:right'>{html_escape(t(lang, 'holding_accounts'))}</th></tr></thead>"
+        f"<tbody>{''.join(portfolio_position_rows) if portfolio_position_rows else '<tr><td colspan=4><em>—</em></td></tr>'}</tbody>"
+        "</table></div>"
+        "</section>"
+    )
 
     cards: List[str] = []
     for meta in items:
@@ -364,6 +531,8 @@ def render_account_details_page(
 
     # NOTE REMOVED: no source/topic line, users don't care
     inner = f"""
+  {portfolio_html}
+  <div class="section-heading">{html_escape(t(lang, 'trading_accounts'))}</div>
   <div class="grid">
     {''.join(cards) if cards else f"<div><em>{html_escape(t(lang,'no_data'))}</em></div>"}
   </div>

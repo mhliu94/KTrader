@@ -204,6 +204,7 @@ def load_account_metas(cfg: Dict[str, Any]) -> Dict[str, AccountMeta]:
             broker_id=str(a.get("broker_id", "") or "").strip(),
             ip_address=_optional_account_string(a, ("ip_address", "ip"), "ip_address"),
             machine_alias=_optional_account_string(a, ("machine_alias",), "machine_alias"),
+            monitor=a.get("monitor") is True,
         )
         metas[meta.id] = meta
     return metas

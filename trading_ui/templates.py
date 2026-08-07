@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from .services.market_data import QuoteRow
@@ -7,7 +7,8 @@ from .i18n import t
 from .models import AccountMeta, AccountSnapshot
 from .store import AccountStore
 
-from datetime import datetime, timezone
+
+ACCOUNT_STALE_AFTER = timedelta(minutes=5)
 
 
 def html_escape(s: str) -> str:
@@ -18,6 +19,28 @@ def html_escape(s: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&#39;")
     )
+
+
+def _is_snapshot_stale(ts: str | None, now: datetime | None = None) -> bool:
+    """Return whether a snapshot timestamp is more than five minutes old."""
+    if not ts:
+        return False
+
+    try:
+        timestamp = str(ts).strip()
+        if timestamp.endswith(("Z", "z")):
+            timestamp = f"{timestamp[:-1]}+00:00"
+        updated_at = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return False
+
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    reference_time = now or datetime.now(timezone.utc)
+    if reference_time.tzinfo is None:
+        reference_time = reference_time.replace(tzinfo=timezone.utc)
+
+    return reference_time.astimezone(timezone.utc) - updated_at.astimezone(timezone.utc) > ACCOUNT_STALE_AFTER
 
 
 def _account_server_label(meta: AccountMeta) -> str:
@@ -163,6 +186,7 @@ def render_layout(
     .status-on {{ color:#166534; background:#dcfce7; border:1px solid #86efac; }}
     .status-off {{ color:#991b1b; background:#fee2e2; border:1px solid #fecaca; }}
     .status-unknown {{ color:#475569; background:#f1f5f9; border:1px solid #cbd5e1; }}
+    .status-stale {{ color:#9a3412; background:#ffedd5; border:1px solid #fdba74; }}
     table.pos {{ width: 100%; border-collapse: collapse; }}
     table.pos th, table.pos td {{ border-top: 1px solid #eee; padding: 8px; font-size: 13px; }}
     table.pos thead th {{ border-top: none; color: #444; }}
@@ -481,7 +505,13 @@ def render_account_details_page(
         if meta.machine_alias:
             meta_parts.append(f"{html_escape(t(lang,'machine_alias'))}: {html_escape(meta.machine_alias)}")
         if meta.ip_address:
-            meta_parts.append(f"{html_escape(t(lang,'ip_address'))}: {html_escape(meta.ip_address)}")
+            ip_address = html_escape(meta.ip_address)
+            if meta.monitor:
+                ip_address = (
+                    f"<a href='https://{ip_address}' target='_blank' rel='noopener noreferrer'>"
+                    f"{ip_address}</a>"
+                )
+            meta_parts.append(f"{html_escape(t(lang,'ip_address'))}: {ip_address}")
         if meta.broker_id:
             meta_parts.append(f"{html_escape(t(lang,'broker_id'))}={html_escape(meta.broker_id)}")
         meta_line = " · ".join(meta_parts)
@@ -502,11 +532,19 @@ def render_account_details_page(
             trading_text = t(lang, "trading_unknown")
             cash_text = "—"
             ts_text = t(lang, "no_snapshot")
+            stale_status = ""
         else:
             trading_cls = "status-on" if acct.trading_enabled else "status-off"
             trading_text = t(lang, "trading_on" if acct.trading_enabled else "trading_off")
             cash_text = f"${acct.cash:,.2f}"
             ts_text = acct.ts or ""
+            stale_status = ""
+            if _is_snapshot_stale(acct.ts):
+                stale_status = (
+                    f"<span class='status-pill status-stale' "
+                    f"title='{html_escape(t(lang, 'stale_account_help'))}'>"
+                    f"{html_escape(t(lang, 'stale'))}</span>"
+                )
 
         pos_table = (
             "<table class='pos'>"
@@ -523,7 +561,8 @@ def render_account_details_page(
             f"<div class='ts'>{html_escape(ts_text)}</div></div>"
             f"<div class='meta'>{meta_line}</div>"
             f"<div class='status-row'>{html_escape(t(lang,'trading'))}: "
-            f"<span class='status-pill {trading_cls}'>{html_escape(trading_text)}</span></div>"
+            f"<span class='status-pill {trading_cls}'>{html_escape(trading_text)}</span>"
+            f"{stale_status}</div>"
             f"<div class='cash'>{html_escape(t(lang,'cash'))} (USD): <b>{html_escape(cash_text)}</b></div>"
             f"{pos_table}"
             "</div>"

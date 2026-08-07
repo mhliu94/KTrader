@@ -1,8 +1,14 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 
+from trading_ui.config import load_account_metas
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
 from trading_ui.store import AccountStore
-from trading_ui.templates import _aggregate_portfolio, render_account_details_page
+from trading_ui.templates import (
+    _aggregate_portfolio,
+    _is_snapshot_stale,
+    render_account_details_page,
+)
 
 
 def snapshot(
@@ -11,12 +17,16 @@ def snapshot(
     cash=0.0,
     cash_by_currency=None,
     positions=None,
+    ts=None,
+    trading_enabled=False,
 ):
     return AccountSnapshot(
         account_id=account_id,
         cash=float(cash),
         cash_by_currency=dict(cash_by_currency or {}),
         positions=list(positions or []),
+        ts=ts,
+        trading_enabled=trading_enabled,
     )
 
 
@@ -50,6 +60,80 @@ def portfolio_fragment(html):
 
 
 class AccountPortfolioTests(unittest.TestCase):
+    def test_monitor_defaults_to_unavailable_when_loading_account_metadata(self):
+        account_metas = load_account_metas(
+            {
+                "accounts": [
+                    {"string_id": "ENABLED", "numeric_id": 1, "broker": "Tiger", "monitor": True},
+                    {"string_id": "DISABLED", "numeric_id": 2, "broker": "Tiger", "monitor": False},
+                    {"string_id": "DEFAULT", "numeric_id": 3, "broker": "Tiger"},
+                ]
+            }
+        )
+
+        self.assertTrue(account_metas["ENABLED"].monitor)
+        self.assertFalse(account_metas["DISABLED"].monitor)
+        self.assertFalse(account_metas["DEFAULT"].monitor)
+
+    def test_monitor_ip_is_linked_and_unavailable_monitor_ip_is_plain_text(self):
+        account_metas = {
+            "MONITORED": AccountMeta(
+                id="MONITORED",
+                num_id=1,
+                broker="Tiger",
+                ip_address="10.0.0.1",
+                monitor=True,
+            ),
+            "UNAVAILABLE": AccountMeta(
+                id="UNAVAILABLE",
+                num_id=2,
+                broker="Tiger",
+                ip_address="10.0.0.2",
+            ),
+        }
+
+        html = render({}, account_metas)
+        monitored_card = html[html.index("#1 - MONITORED"):html.index("#2 - UNAVAILABLE")]
+        unavailable_card = html[html.index("#2 - UNAVAILABLE"):]
+
+        self.assertIn("href='https://10.0.0.1'", monitored_card)
+        self.assertIn(">10.0.0.1</a>", monitored_card)
+        self.assertIn("10.0.0.2", unavailable_card)
+        self.assertNotIn("href=", unavailable_card)
+
+    def test_snapshot_is_stale_only_after_five_minutes(self):
+        now = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+
+        self.assertFalse(_is_snapshot_stale("2026-07-30T11:55:00Z", now))
+        self.assertTrue(_is_snapshot_stale("2026-07-30T11:54:59.999999+00:00", now))
+        self.assertFalse(_is_snapshot_stale("not-a-timestamp", now))
+        self.assertFalse(_is_snapshot_stale(None, now))
+
+    def test_stale_badge_is_shown_next_to_trading_status(self):
+        account_metas = metas("STALE", "CURRENT", "WAITING")
+        accounts = {
+            "STALE": snapshot(
+                "STALE",
+                ts=(datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat(),
+                trading_enabled=True,
+            ),
+            "CURRENT": snapshot(
+                "CURRENT",
+                ts=(datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
+            ),
+        }
+
+        html = render(accounts, account_metas)
+        stale_card = html[html.index("#1 - STALE"):html.index("#2 - CURRENT")]
+        current_card = html[html.index("#2 - CURRENT"):html.index("#3 - WAITING")]
+        waiting_card = html[html.index("#3 - WAITING"):]
+
+        self.assertIn("status-on", stale_card)
+        self.assertIn("status-stale", stale_card)
+        self.assertIn(">Stale</span>", stale_card)
+        self.assertNotIn("status-stale", current_card)
+        self.assertNotIn("status-stale", waiting_card)
+
     def test_aggregates_cash_per_currency_and_same_symbol_positions(self):
         account_metas = metas("A", "B")
         accounts = {

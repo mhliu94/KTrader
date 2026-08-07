@@ -11,6 +11,7 @@ class AccountMeta:
     broker_id: str = ""
     ip_address: Optional[str] = None
     machine_alias: Optional[str] = None
+    monitor: bool = False
 
 
 @dataclass

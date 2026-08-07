@@ -88,7 +88,8 @@
       "string_id": "ZR-WJY",
       "owner_type": "individual",
       "broker": "Zhuorui",
-      "trading_medium": "EMULATOR"
+      "trading_medium": "EMULATOR",
+      "monitor": true
     },
     {
       "ip_address": "135.148.52.187",
@@ -140,6 +141,34 @@
       "machine_alias": "OVH-BareMetal-FR1",
       "numeric_id": 16,
       "string_id": "GIGA-WJY",
+      "owner_type": "individual",
+      "broker": "GigaMoney",
+      "trading_medium": "EMULATOR"
+    },
+    {
+      "ip_address": "37.59.185.183",
+      "machine_alias": "OVH-BareMetal-FR2",
+      "numeric_id": 17,
+      "string_id": "GIGA-YSY",
+      "owner_type": "individual",
+      "broker": "GigaMoney",
+      "trading_medium": "EMULATOR"
+    },
+    {
+      "ip_address": "57.128.235.101",
+      "machine_alias": "OVH-BareMetal-PL1",
+      "numeric_id": 18,
+      "string_id": "ZR-HWK",
+      "owner_type": "individual",
+      "broker": "Zhuorui",
+      "trading_medium": "EMULATOR",
+      "monitor": true
+    },
+    {
+      "ip_address": "195.201.12.224",
+      "machine_alias": "HT-BareMetal-DE1",
+      "numeric_id": 19,
+      "string_id": "GIGA-GAOYUE",
       "owner_type": "individual",
       "broker": "GigaMoney",
       "trading_medium": "EMULATOR"

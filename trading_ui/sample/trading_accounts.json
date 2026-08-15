@@ -7,7 +7,8 @@
       "string_id": "TIGER_PENGYUAN",
       "owner_type": "institution",
       "broker": "Tiger",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "172.235.244.20",
@@ -44,7 +45,8 @@
       "string_id": "TIGER_RONGHUANG",
       "owner_type": "institution",
       "broker": "Tiger",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "43.163.104.109",

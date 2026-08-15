@@ -9,6 +9,9 @@ from .store import AccountStore
 
 
 ACCOUNT_STALE_AFTER = timedelta(minutes=5)
+ACCOUNT_SORT_NUMERIC_ID = "numeric_id"
+ACCOUNT_SORT_USD_CASH = "usd_cash"
+ACCOUNT_SORT_SECURITY = "security"
 
 
 def html_escape(s: str) -> str:
@@ -180,6 +183,12 @@ def render_layout(
     .portfolio-note.warn-note {{ color:#9a3412; }}
     .section-heading {{ margin:20px 0 10px 2px; color:#334155; font-size:14px; font-weight:700; }}
     .portfolio-card .section-heading {{ margin-top:12px; }}
+    .account-list-heading {{ display:flex; flex-wrap:wrap; justify-content:space-between; align-items:end; gap:12px; margin:20px 2px 10px; }}
+    .account-list-heading .section-heading {{ margin:0; }}
+    form.account-sort-form {{ display:flex; flex-direction:row; flex-wrap:wrap; align-items:end; gap:8px; margin:0; }}
+    .account-sort-field {{ display:flex; flex-direction:column; gap:4px; min-width:190px; }}
+    .account-sort-field select {{ padding:7px 10px; }}
+    .account-sort-form .btn {{ padding:8px 12px; }}
     .table-scroll {{ overflow-x:auto; }}
     .status-row {{ display:flex; align-items:center; gap:8px; margin: 8px 0 12px 0; font-size: 13px; }}
     .status-pill {{ display:inline-block; padding: 3px 8px; border-radius: 999px; font-weight: 700; font-size: 12px; }}
@@ -433,6 +442,84 @@ def _aggregate_portfolio(
     }
 
 
+def _account_usd_cash(account: AccountSnapshot | None) -> float:
+    if account is None:
+        return 0.0
+    for raw_currency, raw_amount in account.cash_by_currency.items():
+        if str(raw_currency or "").strip().upper() == "USD":
+            return float(raw_amount or 0.0)
+    return float(account.cash or 0.0)
+
+
+def _account_security_holding(account: AccountSnapshot | None, security: str) -> float:
+    if account is None:
+        return 0.0
+    normalized_security = str(security or "").strip().upper()
+    return sum(
+        float(position.qty or 0.0)
+        for position in account.positions
+        if str(position.symbol or "").strip().upper() == normalized_security
+    )
+
+
+def _sort_account_metas(
+    account_metas: Dict[str, AccountMeta],
+    accounts: Dict[str, AccountSnapshot],
+    sort_by: str,
+    security: str = "",
+) -> List[AccountMeta]:
+    items = list(account_metas.values())
+    if sort_by == ACCOUNT_SORT_USD_CASH:
+        return sorted(
+            items,
+            key=lambda meta: (
+                accounts.get(meta.id) is None,
+                -_account_usd_cash(accounts.get(meta.id)),
+                meta.num_id,
+                meta.id,
+            ),
+        )
+    if sort_by == ACCOUNT_SORT_SECURITY:
+        return sorted(
+            items,
+            key=lambda meta: (
+                accounts.get(meta.id) is None,
+                -_account_security_holding(accounts.get(meta.id), security),
+                -_account_usd_cash(accounts.get(meta.id)),
+                meta.num_id,
+                meta.id,
+            ),
+        )
+    return sorted(items, key=lambda meta: (meta.num_id, meta.id))
+
+
+def _configured_securities(symbols: List[str] | None) -> List[str]:
+    configured = []
+    seen = set()
+    for raw_symbol in symbols or []:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        configured.append(symbol)
+        seen.add(symbol)
+    return configured
+
+
+def resolve_account_sort(
+    symbols: List[str] | None,
+    account_sort: str | None,
+    security: str | None,
+) -> tuple[str, str, List[str]]:
+    sort_modes = {ACCOUNT_SORT_NUMERIC_ID, ACCOUNT_SORT_USD_CASH, ACCOUNT_SORT_SECURITY}
+    effective_sort = account_sort if account_sort in sort_modes else ACCOUNT_SORT_NUMERIC_ID
+    securities = _configured_securities(symbols)
+    requested_security = str(security or "").strip().upper()
+    selected_security = requested_security if requested_security in securities else (securities[0] if securities else "")
+    if effective_sort == ACCOUNT_SORT_SECURITY and not selected_security:
+        effective_sort = ACCOUNT_SORT_NUMERIC_ID
+    return effective_sort, selected_security, securities
+
+
 def render_account_details_page(
     lang: str,
     store: AccountStore,
@@ -440,8 +527,13 @@ def render_account_details_page(
     source_label: str,
     account_metas: Dict[str, AccountMeta],
     account_details_topic: str,
+    symbols: List[str] | None = None,
+    account_sort: str = ACCOUNT_SORT_NUMERIC_ID,
+    security: str | None = None,
 ) -> str:
-    items = sorted(account_metas.values(), key=lambda meta: (meta.num_id, meta.id))
+    effective_sort, selected_security, securities = resolve_account_sort(symbols, account_sort, security)
+
+    items = _sort_account_metas(account_metas, accounts, effective_sort, selected_security)
     portfolio = _aggregate_portfolio(accounts, account_metas)
 
     cash_totals = []
@@ -536,7 +628,7 @@ def render_account_details_page(
         else:
             trading_cls = "status-on" if acct.trading_enabled else "status-off"
             trading_text = t(lang, "trading_on" if acct.trading_enabled else "trading_off")
-            cash_text = f"${acct.cash:,.2f}"
+            cash_text = f"${_account_usd_cash(acct):,.2f}"
             ts_text = acct.ts or ""
             stale_status = ""
             if _is_snapshot_stale(acct.ts):
@@ -568,10 +660,54 @@ def render_account_details_page(
             "</div>"
         )
 
+    sort_options = "".join(
+        f"<option value='{value}'{' selected' if effective_sort == value else ''}>"
+        f"{html_escape(t(lang, label))}</option>"
+        for value, label in (
+            (ACCOUNT_SORT_NUMERIC_ID, "sort_numeric_id"),
+            (ACCOUNT_SORT_USD_CASH, "sort_usd_cash"),
+            (ACCOUNT_SORT_SECURITY, "sort_security_holdings"),
+        )
+    )
+    security_options = "".join(
+        f"<option value='{html_escape(symbol)}'{' selected' if selected_security == symbol else ''}>"
+        f"{html_escape(symbol)}</option>"
+        for symbol in securities
+    )
+    if not security_options:
+        security_options = "<option value=''>—</option>"
+    security_hidden = "" if effective_sort == ACCOUNT_SORT_SECURITY else " hidden"
+    sort_controls = f"""
+    <form class="account-sort-form" method="get" action="/account-details">
+      <div class="account-sort-field">
+        <label for="account-sort">{html_escape(t(lang, 'sort_accounts'))}</label>
+        <select id="account-sort" name="sort_by">{sort_options}</select>
+      </div>
+      <div class="account-sort-field" id="account-sort-security-field"{security_hidden}>
+        <label for="account-sort-security">{html_escape(t(lang, 'sort_security'))}</label>
+        <select id="account-sort-security" name="security">{security_options}</select>
+      </div>
+      <button class="btn btn-blue" type="submit">{html_escape(t(lang, 'apply_sort'))}</button>
+    </form>
+    <script>
+      (function() {{
+        const sort = document.getElementById("account-sort");
+        const securityField = document.getElementById("account-sort-security-field");
+        if (!sort || !securityField) return;
+        function syncSecurityField() {{ securityField.hidden = sort.value !== "{ACCOUNT_SORT_SECURITY}"; }}
+        sort.addEventListener("change", syncSecurityField);
+        syncSecurityField();
+      }})();
+    </script>
+    """
+
     # NOTE REMOVED: no source/topic line, users don't care
     inner = f"""
   {portfolio_html}
-  <div class="section-heading">{html_escape(t(lang, 'trading_accounts'))}</div>
+  <div class="account-list-heading">
+    <div class="section-heading">{html_escape(t(lang, 'trading_accounts'))}</div>
+    {sort_controls}
+  </div>
   <div class="grid">
     {''.join(cards) if cards else f"<div><em>{html_escape(t(lang,'no_data'))}</em></div>"}
   </div>

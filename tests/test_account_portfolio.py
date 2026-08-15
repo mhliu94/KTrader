@@ -5,8 +5,11 @@ from trading_ui.config import load_account_metas
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
 from trading_ui.store import AccountStore
 from trading_ui.templates import (
+    ACCOUNT_SORT_SECURITY,
+    ACCOUNT_SORT_USD_CASH,
     _aggregate_portfolio,
     _is_snapshot_stale,
+    _sort_account_metas,
     render_account_details_page,
 )
 
@@ -42,7 +45,7 @@ def metas(*account_ids):
     }
 
 
-def render(accounts, account_metas):
+def render(accounts, account_metas, *, symbols=None, account_sort="numeric_id", security=None):
     return render_account_details_page(
         lang="en",
         store=AccountStore(),
@@ -50,6 +53,9 @@ def render(accounts, account_metas):
         source_label="unit-test",
         account_metas=account_metas,
         account_details_topic="account-details",
+        symbols=symbols,
+        account_sort=account_sort,
+        security=security,
     )
 
 
@@ -72,6 +78,78 @@ class AccountPortfolioTests(unittest.TestCase):
         )
 
         self.assertEqual(list(account_metas), ["VISIBLE"])
+
+    def test_accounts_sort_by_usd_cash_descending_then_numeric_id(self):
+        account_metas = {
+            "A": AccountMeta(id="A", num_id=3, broker="Tiger"),
+            "B": AccountMeta(id="B", num_id=1, broker="Tiger"),
+            "C": AccountMeta(id="C", num_id=2, broker="Tiger"),
+            "WAITING": AccountMeta(id="WAITING", num_id=4, broker="Tiger"),
+        }
+        accounts = {
+            "A": snapshot("A", cash=9_999, cash_by_currency={"USD": 100}),
+            "B": snapshot("B", cash=1, cash_by_currency={"usd": 100}),
+            "C": snapshot("C", cash=-25),
+        }
+
+        sorted_metas = _sort_account_metas(account_metas, accounts, ACCOUNT_SORT_USD_CASH)
+
+        self.assertEqual([meta.id for meta in sorted_metas], ["B", "A", "C", "WAITING"])
+        html = render(accounts, account_metas, account_sort=ACCOUNT_SORT_USD_CASH)
+        a_card = html[html.index("#3 - A"):html.index("#2 - C")]
+        self.assertIn("$100.00", a_card)
+        self.assertNotIn("$9,999.00", a_card)
+
+    def test_accounts_sort_by_net_security_holding_then_cash_then_numeric_id(self):
+        account_metas = {
+            "A": AccountMeta(id="A", num_id=3, broker="Tiger"),
+            "B": AccountMeta(id="B", num_id=1, broker="Tiger"),
+            "C": AccountMeta(id="C", num_id=2, broker="Tiger"),
+            "D": AccountMeta(id="D", num_id=6, broker="Tiger"),
+            "E": AccountMeta(id="E", num_id=5, broker="Tiger"),
+            "F": AccountMeta(id="F", num_id=4, broker="Tiger"),
+            "WAITING": AccountMeta(id="WAITING", num_id=7, broker="Tiger"),
+        }
+        accounts = {
+            "A": snapshot(
+                "A",
+                cash_by_currency={"USD": 100},
+                positions=[Position("TSLA", 3), Position(" tsla ", 7)],
+            ),
+            "B": snapshot("B", cash_by_currency={"USD": 200}, positions=[Position("TSLA", 10)]),
+            "C": snapshot("C", cash_by_currency={"USD": -1}, positions=[Position("TSLA", 20)]),
+            "D": snapshot("D", cash_by_currency={"USD": 1_000}, positions=[Position("TSLA", -5)]),
+            "E": snapshot("E", cash_by_currency={"USD": -100}, positions=[Position("NVDA", 99)]),
+            "F": snapshot("F", cash_by_currency={"USD": 100}, positions=[Position("TSLA", 10)]),
+        }
+
+        sorted_metas = _sort_account_metas(account_metas, accounts, ACCOUNT_SORT_SECURITY, "tsla")
+
+        self.assertEqual(
+            [meta.id for meta in sorted_metas],
+            ["C", "B", "A", "F", "E", "D", "WAITING"],
+        )
+
+    def test_account_sort_controls_use_configured_securities_and_keep_selection(self):
+        html = render(
+            {},
+            metas("A"),
+            symbols=["tsla", "NVDA", "TSLA", ""],
+            account_sort=ACCOUNT_SORT_SECURITY,
+            security="nvda",
+        )
+
+        self.assertIn("<option value='security' selected>", html)
+        self.assertEqual(html.count("<option value='TSLA'"), 1)
+        self.assertEqual(html.count("<option value='NVDA'"), 1)
+        self.assertIn("<option value='NVDA' selected>", html)
+        self.assertNotIn('id="account-sort-security-field" hidden', html)
+
+    def test_invalid_account_sort_defaults_to_numeric_id(self):
+        html = render({}, metas("A"), symbols=["TSLA"], account_sort="not-a-sort")
+
+        self.assertIn("<option value='numeric_id' selected>", html)
+        self.assertIn('id="account-sort-security-field" hidden', html)
 
     def test_monitor_defaults_to_unavailable_when_loading_account_metadata(self):
         account_metas = load_account_metas(

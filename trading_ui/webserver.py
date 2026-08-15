@@ -18,11 +18,13 @@ from .config import load_config, load_account_metas, load_symbols
 from .i18n import resolve_lang, SUPPORTED_LANGS, t
 from .store import AccountStore
 from .templates import (
+    ACCOUNT_SORT_NUMERIC_ID,
     render_layout,
     render_account_details_page,
     render_control_panel_page,
     render_currency_conversion_page,
     render_login_page,
+    resolve_account_sort,
     render_trading_status_page,
 )
 from .services.fallback import load_fallback_snapshots
@@ -64,6 +66,10 @@ OPERATIONS_LOG = None
 
 MD_STORE = MarketDataStore()
 HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
+
+ACCOUNT_SORT_COOKIE = "account_details_sort"
+ACCOUNT_SECURITY_COOKIE = "account_details_security"
+ACCOUNT_SORT_COOKIE_MAX_AGE = 180 * 24 * 3600
 
 
 def _filter_configured_snapshots(accounts: Dict[str, AccountSnapshot]) -> Dict[str, AccountSnapshot]:
@@ -234,11 +240,22 @@ def logout(request: Request) -> RedirectResponse:
 
 
 @app.get("/account-details", response_class=HTMLResponse)
-def account_details(request: Request) -> HTMLResponse:
+def account_details(
+    request: Request,
+    sort_by: str | None = None,
+    security: str | None = None,
+) -> HTMLResponse:
     user, gate = _require_auth_page(request)
     if gate is not None:
         return gate
     lang = resolve_lang(request)
+    preferred_sort = sort_by if sort_by is not None else request.cookies.get(ACCOUNT_SORT_COOKIE)
+    preferred_security = security if security is not None else request.cookies.get(ACCOUNT_SECURITY_COOKIE)
+    effective_sort, selected_security, _ = resolve_account_sort(
+        SYMBOLS,
+        preferred_sort or ACCOUNT_SORT_NUMERIC_ID,
+        preferred_security,
+    )
     accounts, src = get_served_snapshots()
     inner = render_account_details_page(
         lang=lang,
@@ -247,8 +264,29 @@ def account_details(request: Request) -> HTMLResponse:
         source_label=src,
         account_metas=ACCOUNT_METAS,
         account_details_topic=APP_CONFIG["kafka"]["account_details_topic"],
+        symbols=SYMBOLS,
+        account_sort=effective_sort,
+        security=selected_security,
     )
-    return HTMLResponse(render_layout(lang, "account-details", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
+    response = HTMLResponse(render_layout(lang, "account-details", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
+    secure_cookie = bool(APP_CONFIG.get("server", {}).get("ssl_enabled", False))
+    response.set_cookie(
+        ACCOUNT_SORT_COOKIE,
+        effective_sort,
+        max_age=ACCOUNT_SORT_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=secure_cookie,
+    )
+    response.set_cookie(
+        ACCOUNT_SECURITY_COOKIE,
+        selected_security,
+        max_age=ACCOUNT_SORT_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=secure_cookie,
+    )
+    return response
 
 
 @app.get("/control-panel", response_class=HTMLResponse)

@@ -165,6 +165,8 @@ def load_account_metas(cfg: Dict[str, Any]) -> Dict[str, AccountMeta]:
     for idx, a in enumerate(accounts, start=1):
         if not isinstance(a, dict):
             raise ValueError(f"Account entry #{idx} must be an object.")
+        if _account_field(a, "hidden", "Hidden") is True:
+            continue
 
         raw_string_id = _account_field(a, "string_id", "id", "account_id")
         if not isinstance(raw_string_id, str) or not raw_string_id.strip():

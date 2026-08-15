@@ -60,6 +60,19 @@ def portfolio_fragment(html):
 
 
 class AccountPortfolioTests(unittest.TestCase):
+    def test_hidden_accounts_are_excluded_when_loading_account_metadata(self):
+        account_metas = load_account_metas(
+            {
+                "accounts": [
+                    {"string_id": "VISIBLE", "numeric_id": 1, "broker": "Tiger"},
+                    {"string_id": "HIDDEN", "numeric_id": 2, "broker": "Tiger", "hidden": True},
+                    {"string_id": "HIDDEN_ALIAS", "numeric_id": 3, "broker": "Tiger", "Hidden": True},
+                ]
+            }
+        )
+
+        self.assertEqual(list(account_metas), ["VISIBLE"])
+
     def test_monitor_defaults_to_unavailable_when_loading_account_metadata(self):
         account_metas = load_account_metas(
             {

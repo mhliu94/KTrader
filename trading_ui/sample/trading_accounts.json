@@ -16,7 +16,8 @@
       "string_id": "NA-1",
       "owner_type": "undefined",
       "broker": "NA",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "45.32.153.180",
@@ -79,7 +80,8 @@
       "string_id": "NA-2",
       "owner_type": "undefined",
       "broker": "NA",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "209.250.240.250",
@@ -128,13 +130,15 @@
       "trading_medium": "WINDOWS"
     },
     {
-      "ip_address": "57.129.145.108",
-      "machine_alias": "OVH-BareMetal-UK1",
+      "ip_address": "15.235.236.200",
+      "machine_alias": "OVH-BareMetal-SG1",
+      "operating_system": "linux",
       "numeric_id": 15,
       "string_id": "GIGA-WXL",
       "owner_type": "individual",
       "broker": "GigaMoney",
-      "trading_medium": "EMULATOR"
+      "trading_medium": "EMULATOR",
+      "monitor": true
     },
     {
       "ip_address": "37.59.185.97",

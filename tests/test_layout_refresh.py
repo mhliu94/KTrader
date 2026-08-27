@@ -1,17 +1,13 @@
 import unittest
 
+from admin_ui.templates import render_layout as render_admin_layout
 from trading_ui.templates import render_layout
 
 
 class LayoutRefreshTests(unittest.TestCase):
-    def test_account_details_keeps_page_auto_refresh(self):
-        html = render_layout("en", "account-details", "<p>account</p>")
-
-        self.assertIn('<meta http-equiv="refresh" content="30" />', html)
-        self.assertIn('id="refreshCountdown"', html)
-
-    def test_other_tabs_do_not_page_auto_refresh(self):
+    def test_no_trading_ui_page_has_auto_refresh(self):
         for tab in (
+            "account-details",
             "control-panel",
             "market-data",
             "market-insights",
@@ -21,8 +17,16 @@ class LayoutRefreshTests(unittest.TestCase):
             with self.subTest(tab=tab):
                 html = render_layout("en", tab, "<p>tab</p>")
 
-                self.assertNotIn('<meta http-equiv="refresh" content="30" />', html)
-                self.assertNotIn('id="refreshCountdown"', html)
+                self.assertNotIn('http-equiv="refresh"', html.lower())
+                self.assertNotIn("refreshCountdown", html)
+                self.assertNotIn("Auto-refresh", html)
+
+    def test_no_admin_ui_page_has_auto_refresh(self):
+        html = render_admin_layout("en", "strategies", "<p>strategies</p>")
+
+        self.assertNotIn('http-equiv="refresh"', html.lower())
+        self.assertNotIn("refreshCountdown", html)
+        self.assertNotIn("Auto-refresh", html)
 
 
 if __name__ == "__main__":

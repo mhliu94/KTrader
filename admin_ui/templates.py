@@ -36,14 +36,12 @@ def render_layout(lang: str, active_tab: str, inner_html: str, current_user: str
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="refresh" content="30" />
   <title>{html_escape(t(lang, "title"))}</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 24px; background: #fafafa; }}
     .topbar {{ display:flex; align-items:center; justify-content:space-between; margin-bottom: 12px; }}
     .right {{ display:flex; align-items:center; gap: 16px; }}
     h1 {{ margin: 0; font-size: 22px; }}
-    .sub {{ color: #666; margin-top: 8px; }}
     .tabs {{ display:flex; gap:10px; margin: 14px 0 16px 0; }}
     .tab {{
       display:inline-block; padding:10px 14px; border-radius: 12px;
@@ -87,13 +85,7 @@ def render_layout(lang: str, active_tab: str, inner_html: str, current_user: str
 </head>
 <body>
   <div class="topbar">
-    <div>
-      <h1>{html_escape(t(lang, "title"))}</h1>
-      <div class="sub">
-        {html_escape(t(lang, "auto_refresh"))}
-        · {html_escape(t(lang, "refresh_in"))}: <b><span id="refreshCountdown">30</span>s</b>
-      </div>
-    </div>
+    <h1>{html_escape(t(lang, "title"))}</h1>
     <div class="right">
       <div>{user_html}</div>
       <div>{lang_toggle}</div>
@@ -105,19 +97,6 @@ def render_layout(lang: str, active_tab: str, inner_html: str, current_user: str
   </div>
 
   {inner_html}
-
-  <script>
-    (function(){{
-      var left = 30;
-      var el = document.getElementById("refreshCountdown");
-      if (el) el.textContent = left;
-      setInterval(function(){{
-        left = left - 1;
-        if (left < 0) left = 0;
-        if (el) el.textContent = left;
-      }}, 1000);
-    }})();
-  </script>
 </body>
 </html>
 """

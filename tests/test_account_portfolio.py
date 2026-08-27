@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from trading_ui.config import load_account_metas
+from trading_ui.config import load_account_metas, load_symbols
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
 from trading_ui.store import AccountStore
 from trading_ui.templates import (
@@ -66,6 +66,12 @@ def portfolio_fragment(html):
 
 
 class AccountPortfolioTests(unittest.TestCase):
+    def test_configured_symbols_are_normalized_and_deduplicated(self):
+        self.assertEqual(
+            load_symbols({"symbols": [" aapl ", "MSFT", "AAPL", ""]}),
+            ["AAPL", "MSFT"],
+        )
+
     def test_hidden_accounts_are_excluded_when_loading_account_metadata(self):
         account_metas = load_account_metas(
             {

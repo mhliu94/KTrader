@@ -19,6 +19,7 @@ class Position:
     symbol: str
     qty: float
     avg_price: Optional[float] = None
+    available_qty: Optional[float] = None
 
 
 @dataclass
@@ -27,6 +28,7 @@ class AccountSnapshot:
     cash: float
     account_num_id: Optional[int] = None
     cash_by_currency: Dict[str, float] = field(default_factory=dict)
+    available_cash_by_currency: Dict[str, float] = field(default_factory=dict)
     positions: List[Position] = field(default_factory=list)
     ts: Optional[str] = None
     trading_enabled: bool = False
@@ -37,6 +39,7 @@ class AccountSnapshot:
             "account_num_id": self.account_num_id,
             "cash": self.cash,
             "cash_by_currency": dict(self.cash_by_currency),
+            "available_cash_by_currency": dict(self.available_cash_by_currency),
             "ts": self.ts,
             "trading_enabled": self.trading_enabled,
             "positions": [asdict(p) for p in self.positions],

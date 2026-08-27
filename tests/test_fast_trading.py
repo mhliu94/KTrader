@@ -1,14 +1,58 @@
 import unittest
+import threading
 import time
-from datetime import datetime, timedelta, timezone
 
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
 from trading_ui.services.fast_trading import (
     FastTradingStrategyManager,
     build_fast_trading_cycle_commands,
-    normalize_fast_trading_end_time,
 )
 from trading_ui.services.market_data import BookLevel, MarketDataStore, OrderBookSnapshot
+
+
+DEFAULT_MINIMUM_CYCLE_SECONDS = {
+    "API": 3.0,
+    "WEB": 30.0,
+    "WINDOWS": 40.0,
+    "EMULATOR": 40.0,
+}
+
+
+def fast_trading_settings(*, cycle_seconds=0.01):
+    return {
+        "aggression_levels": {
+            1: {"book_levels": 2, "cycle_seconds": cycle_seconds},
+            2: {"book_levels": 3, "cycle_seconds": cycle_seconds},
+            3: {"book_levels": 5, "cycle_seconds": cycle_seconds},
+        },
+        "minimum_cycle_seconds_by_medium": {
+            "API": 0.001,
+            "WEB": 0.001,
+            "WINDOWS": 0.001,
+            "EMULATOR": 0.001,
+        },
+    }
+
+
+def strategy_command(*, aggression_level=1):
+    return {
+        "command_id": "fast-session-test",
+        "trading_mode": "E",
+        "symbol": "AAPL",
+        "fast_trading_price_limit": 10,
+        "fast_trading_account_ids": ["A"],
+        "fast_trading_aggression_level": aggression_level,
+    }
+
+
+class RecordingMarketDataStore(MarketDataStore):
+    def __init__(self):
+        super().__init__()
+        self.get_book_times = []
+
+    def get_book(self, symbol, depth_limit=20):
+        self.get_book_times.append(time.monotonic())
+        return super().get_book(symbol, depth_limit=depth_limit)
 
 
 def metas(*account_ids):
@@ -41,538 +85,806 @@ def snapshots(**snapshot_by_account_id):
             account_id=account_id,
             cash=float(data.get("cash", 0.0)),
             cash_by_currency=dict(data.get("cash_by_currency", {})),
+            available_cash_by_currency=dict(
+                data.get("available_cash_by_currency", {})
+            ),
             positions=[
-                Position(symbol=str(symbol), qty=float(qty))
-                for symbol, qty in data.get("positions", [])
+                Position(
+                    symbol=str(position[0]),
+                    qty=float(position[1]),
+                    available_qty=(
+                        float(position[2])
+                        if len(position) > 2 and position[2] is not None
+                        else None
+                    ),
+                )
+                for position in data.get("positions", [])
             ],
         )
         for account_id, data in snapshot_by_account_id.items()
     }
 
 
+def build_cycle(
+    *,
+    mode,
+    book,
+    price_limit,
+    account_ids,
+    book_levels,
+    account_metas=None,
+    account_snapshots=None,
+    last_actions=None,
+    now=100.0,
+    cycle_id="test-cycle",
+):
+    return build_fast_trading_cycle_commands(
+        trading_mode=mode,
+        symbol=book.symbol,
+        book=book,
+        price_limit=price_limit,
+        account_ids=account_ids,
+        book_levels=book_levels,
+        account_metas=account_metas or metas(*account_ids),
+        account_snapshots=account_snapshots,
+        minimum_cycle_seconds_by_medium=DEFAULT_MINIMUM_CYCLE_SECONDS,
+        last_action_monotonic_by_account=last_actions or {},
+        now_monotonic=now,
+        cycle_id=cycle_id,
+    )
+
+
 class FastTradingCycleTests(unittest.TestCase):
-    def test_mode_f_combines_bid_intervals_and_processes_each_selected_group(self):
-        book = OrderBookSnapshot(
-            symbol="AAPL",
-            bids=[
-                BookLevel(price=105, quantity=300),
-                BookLevel(price=95, quantity=200),
-                BookLevel(price=85, quantity=400),
-            ],
-            asks=[],
-        )
-        groups = [
-            {
-                "group_id": 1,
-                "price_limit": 80,
-                "accounts": [
-                    {"account_id": "G", "allocation_pct": 20},
-                    {"account_id": "H", "allocation_pct": 30},
-                    {"account_id": "I", "allocation_pct": 40},
-                ],
-            },
-            {"group_id": 2, "price_limit": 90, "accounts": [{"account_id": "J", "allocation_pct": 100}]},
-            {"group_id": 3, "price_limit": 100, "accounts": [{"account_id": "K", "allocation_pct": 100}]},
-        ]
-
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
-            book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("G", "H", "I", "J", "K"),
-            cycle_id="cycle-1",
-        )
-
-        self.assertEqual(result.total_resting_qty, 900)
-        self.assertEqual(result.execution_group_id, 3)
-        self.assertEqual(result.limit_price, 103.95)
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["K", "J", "G", "H", "I"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [300, 200, 80, 120, 160])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [103.95] * 5)
-        self.assertTrue(all(cmd["type"] == "LIMIT_ORDER_FOK" for cmd in result.commands))
-        self.assertTrue(all(cmd["side"] == "SELL" for cmd in result.commands))
-
-    def test_mode_e_combines_ask_intervals_and_processes_each_selected_group(self):
+    def test_mode_e_sums_only_top_n_asks(self):
         book = OrderBookSnapshot(
             symbol="MSFT",
             bids=[],
             asks=[
-                BookLevel(price=101, quantity=600),
-                BookLevel(price=108, quantity=500),
+                BookLevel(price=100, quantity=200),
+                BookLevel(price=110, quantity=300),
+                BookLevel(price=120, quantity=700),
             ],
         )
-        groups = [
-            {"group_id": 1, "price_limit": 105, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            {"group_id": 2, "price_limit": 110, "accounts": [{"account_id": "B", "allocation_pct": 50}]},
-        ]
 
-        result = build_fast_trading_cycle_commands(
-            trading_mode="E",
-            symbol="MSFT",
+        result = build_cycle(
+            mode="E",
             book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A", "B"),
-            cycle_id="cycle-2",
+            price_limit=130,
+            account_ids=["A"],
+            book_levels=2,
         )
 
-        self.assertEqual(result.total_resting_qty, 1100)
-        self.assertEqual(result.execution_group_id, 1)
-        self.assertEqual(result.limit_price, 102.01)
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
-        self.assertEqual([cmd["side"] for cmd in result.commands], ["BUY", "BUY"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [600, 250])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [102.01, 102.01])
+        self.assertEqual(result.total_resting_qty, 500)
+        self.assertEqual(len(result.commands), 1)
+        self.assertEqual(result.commands[0]["qty_shares"], 500)
+        self.assertEqual(result.limit_price, 110)
 
-    def test_mode_e_uses_rounded_best_ask_adjustment_or_configured_cap(self):
-        cases = [
-            (100.001, 200, 101.01),
-            (100, 100.50, 100.50),
-        ]
-        for best_ask, price_limit, expected_limit in cases:
-            with self.subTest(best_ask=best_ask, price_limit=price_limit):
-                result = build_fast_trading_cycle_commands(
-                    trading_mode="E",
-                    symbol="MSFT",
-                    book=OrderBookSnapshot(
-                        symbol="MSFT",
-                        bids=[],
-                        asks=[BookLevel(price=best_ask, quantity=1000)],
-                    ),
-                    fast_trading_groups=[
-                        {
-                            "group_id": 1,
-                            "price_limit": price_limit,
-                            "accounts": [{"account_id": "A", "allocation_pct": 100}],
-                        },
-                    ],
-                    account_metas=metas("A"),
-                )
+    def test_nonpositive_book_rows_do_not_consume_top_n_slots(self):
+        result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[
+                    BookLevel(price=1, quantity=0),
+                    BookLevel(price=2, quantity=100),
+                    BookLevel(price=3, quantity=100),
+                ],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+        )
 
-                self.assertEqual(result.limit_price, expected_limit)
-                self.assertEqual(result.commands[0]["limit_price"], expected_limit)
+        self.assertEqual(result.total_resting_qty, 200)
+        self.assertEqual(result.limit_price, 3)
 
-    def test_mode_f_uses_rounded_best_bid_adjustment_or_configured_floor(self):
-        cases = [
-            (100.999, 50, 99.98),
-            (100, 99.50, 99.50),
-        ]
-        for best_bid, price_limit, expected_limit in cases:
-            with self.subTest(best_bid=best_bid, price_limit=price_limit):
-                result = build_fast_trading_cycle_commands(
-                    trading_mode="F",
-                    symbol="AAPL",
-                    book=OrderBookSnapshot(
-                        symbol="AAPL",
-                        bids=[BookLevel(price=best_bid, quantity=1000)],
-                        asks=[],
-                    ),
-                    fast_trading_groups=[
-                        {
-                            "group_id": 1,
-                            "price_limit": price_limit,
-                            "accounts": [{"account_id": "A", "allocation_pct": 100}],
-                        },
-                    ],
-                    account_metas=metas("A"),
-                )
+    def test_mode_e_caps_quantity_and_limit_at_upper_price(self):
+        book = OrderBookSnapshot(
+            symbol="MSFT",
+            bids=[],
+            asks=[
+                BookLevel(price=100, quantity=200),
+                BookLevel(price=110, quantity=300),
+                BookLevel(price=120, quantity=700),
+            ],
+        )
 
-                self.assertEqual(result.limit_price, expected_limit)
-                self.assertEqual(result.commands[0]["limit_price"], expected_limit)
+        result = build_cycle(
+            mode="E",
+            book=book,
+            price_limit=105,
+            account_ids=["A"],
+            book_levels=2,
+        )
 
-    def test_skips_when_combined_quantity_is_below_minimum(self):
+        self.assertEqual(result.total_resting_qty, 200)
+        self.assertEqual(result.limit_price, 105)
+        self.assertEqual(result.commands[0]["limit_price"], 105)
+        self.assertEqual(result.commands[0]["side"], "BUY")
+        self.assertEqual(result.commands[0]["type"], "LIMIT_ORDER_FOK")
+        self.assertEqual(result.commands[0]["time_in_force"], "FOK")
+        self.assertTrue(result.commands[0]["cancel_unfilled"])
+
+    def test_mode_f_sums_only_top_n_bids(self):
         book = OrderBookSnapshot(
             symbol="AAPL",
-            bids=[BookLevel(price=105, quantity=99)],
+            bids=[
+                BookLevel(price=120, quantity=200),
+                BookLevel(price=110, quantity=300),
+                BookLevel(price=100, quantity=700),
+            ],
             asks=[],
         )
-        groups = [
-            {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-        ]
 
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
+        result = build_cycle(
+            mode="F",
             book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A"),
-            cycle_id="cycle-3",
+            price_limit=90,
+            account_ids=["A"],
+            book_levels=2,
         )
 
-        self.assertEqual(result.total_resting_qty, 99)
+        self.assertEqual(result.total_resting_qty, 500)
+        self.assertEqual(len(result.commands), 1)
+        self.assertEqual(result.commands[0]["qty_shares"], 500)
+        self.assertEqual(result.limit_price, 110)
+
+    def test_mode_f_floors_quantity_and_limit_at_lower_price(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[
+                BookLevel(price=100, quantity=200),
+                BookLevel(price=90, quantity=300),
+                BookLevel(price=80, quantity=700),
+            ],
+            asks=[],
+        )
+
+        result = build_cycle(
+            mode="F",
+            book=book,
+            price_limit=95,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots=snapshots(A={"positions": [("AAPL", 1000)]}),
+        )
+
+        self.assertEqual(result.total_resting_qty, 200)
+        self.assertEqual(result.limit_price, 95)
+        self.assertEqual(result.commands[0]["limit_price"], 95)
+        self.assertEqual(result.commands[0]["side"], "SELL")
+        self.assertEqual(result.commands[0]["type"], "LIMIT_ORDER_FOK")
+        self.assertEqual(result.commands[0]["time_in_force"], "FOK")
+        self.assertTrue(result.commands[0]["cancel_unfilled"])
+
+    def test_even_allocation_discards_indivisible_remainder(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[],
+            asks=[BookLevel(price=10, quantity=1001)],
+        )
+
+        result = build_cycle(
+            mode="E",
+            book=book,
+            price_limit=10,
+            account_ids=["A", "B", "C"],
+            book_levels=2,
+        )
+
+        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B", "C"])
+        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [333, 333, 333])
+        self.assertEqual(result.allocated_quantity, 999)
+
+    def test_buy_capacity_exclusion_is_iterative_and_redistributes_evenly(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[],
+            asks=[BookLevel(price=10, quantity=900)],
+        )
+
+        result = build_cycle(
+            mode="E",
+            book=book,
+            price_limit=10,
+            account_ids=["A", "B", "C"],
+            book_levels=2,
+            account_snapshots=snapshots(
+                A={"cash_by_currency": {"USD": 2500}},
+                B={"cash_by_currency": {"USD": 4000}},
+                C={"cash_by_currency": {"USD": 9000}},
+            ),
+        )
+
+        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["C"])
+        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [900])
+
+    def test_sell_capacity_exclusion_is_iterative_and_redistributes_evenly(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[BookLevel(price=10, quantity=900)],
+            asks=[],
+        )
+
+        result = build_cycle(
+            mode="F",
+            book=book,
+            price_limit=10,
+            account_ids=["A", "B", "C"],
+            book_levels=2,
+            account_snapshots=snapshots(
+                A={"positions": [("AAPL", 250)]},
+                B={"positions": [("AAPL", 400)]},
+                C={"positions": [("AAPL", 900)]},
+            ),
+        )
+
+        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["C"])
+        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [900])
+
+    def test_buy_capacity_prefers_available_cash_over_balance(self):
+        result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots=snapshots(
+                A={
+                    "cash_by_currency": {"USD": 2_000},
+                    "available_cash_by_currency": {"USD": 1_990},
+                }
+            ),
+        )
+
         self.assertEqual(result.commands, [])
-        self.assertEqual(result.reason, "total_below_minimum")
+        self.assertEqual(result.reason, "no_account_capacity")
+        self.assertTrue(result.capacity_noop)
 
-    def test_floors_allocated_share_quantities(self):
-        book = OrderBookSnapshot(
-            symbol="AAPL",
-            bids=[BookLevel(price=105, quantity=101)],
-            asks=[],
-        )
-        groups = [
-            {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 33.3}]},
-        ]
-
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
-            book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A"),
-            cycle_id="cycle-4",
-        )
-
-        self.assertEqual(result.commands[0]["qty_shares"], 33)
-
-    def test_wait_uses_slowest_trading_medium_in_execution_group(self):
-        book = OrderBookSnapshot(
-            symbol="AAPL",
-            bids=[BookLevel(price=105, quantity=1000)],
-            asks=[],
-        )
-        groups = [
-            {
-                "group_id": 1,
-                "price_limit": 100,
-                "accounts": [
-                    {"account_id": "API_ACCOUNT", "allocation_pct": 10},
-                    {"account_id": "WEB_ACCOUNT", "allocation_pct": 10},
-                    {"account_id": "WINDOWS_ACCOUNT", "allocation_pct": 10},
-                    {"account_id": "EMULATOR_ACCOUNT", "allocation_pct": 10},
-                ],
-            },
-        ]
-
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
-            book=book,
-            fast_trading_groups=groups,
-            account_metas=metas_by_medium(
-                API_ACCOUNT="API",
-                WEB_ACCOUNT="WEB",
-                WINDOWS_ACCOUNT="WINDOWS",
-                EMULATOR_ACCOUNT="EMULATOR",
+    def test_sell_capacity_prefers_available_quantity_over_position_quantity(self):
+        result = build_cycle(
+            mode="F",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[BookLevel(price=10, quantity=200)],
+                asks=[],
             ),
-            cycle_id="cycle-5",
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots=snapshots(A={"positions": [("AAPL", 200, 199)]}),
         )
 
-        self.assertEqual(result.wait_seconds, 40.0)
-        self.assertTrue(all(cmd["fast_trading_wait_seconds"] == 40.0 for cmd in result.commands))
+        self.assertEqual(result.commands, [])
+        self.assertEqual(result.reason, "no_account_capacity")
+        self.assertTrue(result.capacity_noop)
 
-    def test_wait_for_api_only_execution_group_is_five_seconds(self):
-        book = OrderBookSnapshot(
-            symbol="AAPL",
-            bids=[BookLevel(price=105, quantity=1000)],
-            asks=[],
-        )
-        groups = [
-            {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-        ]
-
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
-            book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A"),
-            cycle_id="cycle-6",
-        )
-
-        self.assertEqual(result.wait_seconds, 5.0)
-
-    def test_fast_buying_partially_fills_and_redistributes_cash_shortfall_within_group(self):
+    def test_cycle_is_skipped_when_equal_order_is_under_one_hundred_shares(self):
         book = OrderBookSnapshot(
             symbol="AAPL",
             bids=[],
-            asks=[BookLevel(price=75, quantity=1000)],
+            asks=[BookLevel(price=10, quantity=399)],
         )
-        groups = [
-            {
-                "group_id": 1,
-                "price_limit": 80,
-                "accounts": [
-                    {"account_id": "A", "allocation_pct": 50},
-                    {"account_id": "B", "allocation_pct": 50},
-                ],
-            },
-        ]
 
-        result = build_fast_trading_cycle_commands(
-            trading_mode="E",
-            symbol="AAPL",
+        result = build_cycle(
+            mode="E",
             book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A", "B"),
-            account_snapshots=snapshots(
-                A={"cash_by_currency": {"USD": 75.75 * 300}},
-                B={"cash_by_currency": {"USD": 75.75 * 1000}},
-            ),
-            cycle_id="cycle-buy-redistribute",
+            price_limit=10,
+            account_ids=["A", "B", "C", "D"],
+            book_levels=2,
         )
 
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [300, 700])
+        self.assertEqual(result.total_resting_qty, 399)
+        self.assertEqual(result.commands, [])
+        self.assertEqual(result.reason, "per_account_quantity_below_minimum")
+        self.assertFalse(result.capacity_noop)
 
-    def test_fast_buying_delegates_cash_shortfall_to_next_more_aggressive_group(self):
+    def test_underfunded_account_can_be_removed_before_minimum_share_check(self):
+        result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=150)],
+            ),
+            price_limit=10,
+            account_ids=["A", "B"],
+            book_levels=2,
+            account_snapshots=snapshots(
+                A={"cash_by_currency": {"USD": 0}},
+                B={"cash_by_currency": {"USD": 1500}},
+            ),
+        )
+
+        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["B"])
+        self.assertEqual(result.commands[0]["qty_shares"], 150)
+
+    def test_accounts_without_a_previous_action_are_immediately_eligible(self):
+        account_metas = metas_by_medium(
+            API_ACCOUNT="API",
+            WEB_ACCOUNT="WEB",
+            WINDOWS_ACCOUNT="WINDOWS",
+            EMULATOR_ACCOUNT="EMULATOR",
+        )
         book = OrderBookSnapshot(
             symbol="AAPL",
             bids=[],
-            asks=[
-                BookLevel(price=75, quantity=2000),
-                BookLevel(price=85, quantity=1000),
-            ],
+            asks=[BookLevel(price=10, quantity=800)],
         )
-        groups = [
-            {"group_id": 1, "price_limit": 80, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            {"group_id": 2, "price_limit": 90, "accounts": [{"account_id": "B", "allocation_pct": 100}]},
-        ]
 
-        result = build_fast_trading_cycle_commands(
-            trading_mode="E",
-            symbol="AAPL",
+        result = build_cycle(
+            mode="E",
             book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A", "B"),
-            account_snapshots=snapshots(
-                A={"cash_by_currency": {"USD": 75.75 * 1600}},
-                B={"cash_by_currency": {"USD": 75.75 * 1000}},
-            ),
-            cycle_id="cycle-buy-delegate",
+            price_limit=10,
+            account_ids=list(account_metas),
+            book_levels=2,
+            account_metas=account_metas,
+            last_actions={},
         )
 
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [1600, 400])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [75.75, 75.75])
+        self.assertEqual(
+            result.cooldown_eligible_account_ids,
+            ["API_ACCOUNT", "WEB_ACCOUNT", "WINDOWS_ACCOUNT", "EMULATOR_ACCOUNT"],
+        )
+        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [200, 200, 200, 200])
 
-    def test_fast_buying_ignores_carryover_below_one_hundred_shares(self):
+    def test_cooldown_is_filtered_per_account_and_medium(self):
+        account_metas = metas_by_medium(
+            API_ACCOUNT="API",
+            WEB_ACCOUNT="WEB",
+            WINDOWS_ACCOUNT="WINDOWS",
+            EMULATOR_ACCOUNT="EMULATOR",
+        )
         book = OrderBookSnapshot(
             symbol="AAPL",
             bids=[],
-            asks=[
-                BookLevel(price=75, quantity=2000),
-                BookLevel(price=85, quantity=1000),
-            ],
+            asks=[BookLevel(price=10, quantity=800)],
         )
-        groups = [
-            {"group_id": 1, "price_limit": 80, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            {"group_id": 2, "price_limit": 90, "accounts": [{"account_id": "B", "allocation_pct": 100}]},
-        ]
 
-        result = build_fast_trading_cycle_commands(
-            trading_mode="E",
-            symbol="AAPL",
+        result = build_cycle(
+            mode="E",
             book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A", "B"),
-            account_snapshots=snapshots(
-                A={"cash_by_currency": {"USD": 75.75 * 1950}},
-                B={"cash_by_currency": {"USD": 75.75 * 1000}},
-            ),
-            cycle_id="cycle-buy-small-carry",
-        )
-
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [1950])
-
-    def test_fast_selling_partially_fills_and_redistributes_share_shortfall_within_group(self):
-        book = OrderBookSnapshot(
-            symbol="AAPL",
-            bids=[BookLevel(price=105, quantity=1000)],
-            asks=[],
-        )
-        groups = [
-            {
-                "group_id": 1,
-                "price_limit": 100,
-                "accounts": [
-                    {"account_id": "A", "allocation_pct": 50},
-                    {"account_id": "B", "allocation_pct": 50},
-                ],
+            price_limit=10,
+            account_ids=list(account_metas),
+            book_levels=2,
+            account_metas=account_metas,
+            now=100.0,
+            last_actions={
+                "API_ACCOUNT": 97.001,
+                "WEB_ACCOUNT": 70.001,
+                "WINDOWS_ACCOUNT": 60.001,
+                "EMULATOR_ACCOUNT": 60.0,
             },
-        ]
-
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
-            book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A", "B"),
-            account_snapshots=snapshots(
-                A={"positions": [("AAPL", 300)]},
-                B={"positions": [("AAPL", 1000)]},
-            ),
-            cycle_id="cycle-sell-redistribute",
         )
 
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [300, 700])
+        self.assertEqual(result.cooldown_eligible_account_ids, ["EMULATOR_ACCOUNT"])
+        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["EMULATOR_ACCOUNT"])
+        self.assertEqual(result.commands[0]["qty_shares"], 800)
 
-    def test_fast_selling_delegates_share_shortfall_to_next_more_aggressive_group(self):
+    def test_exact_medium_cooldown_boundary_is_eligible(self):
+        account_metas = metas_by_medium(
+            API_ACCOUNT="API",
+            WEB_ACCOUNT="WEB",
+            WINDOWS_ACCOUNT="WINDOWS",
+            EMULATOR_ACCOUNT="EMULATOR",
+        )
         book = OrderBookSnapshot(
             symbol="AAPL",
-            bids=[
-                BookLevel(price=105, quantity=2000),
-                BookLevel(price=95, quantity=1000),
-            ],
-            asks=[],
+            bids=[],
+            asks=[BookLevel(price=10, quantity=800)],
         )
-        groups = [
-            {"group_id": 1, "price_limit": 90, "accounts": [{"account_id": "B", "allocation_pct": 100}]},
-            {"group_id": 2, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-        ]
 
-        result = build_fast_trading_cycle_commands(
-            trading_mode="F",
-            symbol="AAPL",
+        result = build_cycle(
+            mode="E",
             book=book,
-            fast_trading_groups=groups,
-            account_metas=metas("A", "B"),
-            account_snapshots=snapshots(
-                A={"positions": [("AAPL", 1600)]},
-                B={"positions": [("AAPL", 1000)]},
+            price_limit=10,
+            account_ids=list(account_metas),
+            book_levels=2,
+            account_metas=account_metas,
+            now=100.0,
+            last_actions={
+                "API_ACCOUNT": 97.0,
+                "WEB_ACCOUNT": 70.0,
+                "WINDOWS_ACCOUNT": 60.0,
+                "EMULATOR_ACCOUNT": 60.0,
+            },
+        )
+
+        self.assertEqual(
+            result.cooldown_eligible_account_ids,
+            ["API_ACCOUNT", "WEB_ACCOUNT", "WINDOWS_ACCOUNT", "EMULATOR_ACCOUNT"],
+        )
+
+    def test_only_capacity_exhaustion_is_a_capacity_noop(self):
+        capacity_result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
             ),
-            cycle_id="cycle-sell-delegate",
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots=snapshots(A={"cash_by_currency": {"USD": 1990}}),
+        )
+        sell_capacity_result = build_cycle(
+            mode="F",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[BookLevel(price=10, quantity=200)],
+                asks=[],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots=snapshots(A={"positions": [("AAPL", 199)]}),
+        )
+        cooldown_result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            last_actions={"A": 100.0},
+        )
+        empty_book_result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(symbol="AAPL", bids=[], asks=[]),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+        )
+        out_of_limit_result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=11, quantity=1000)],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+        )
+        minimum_result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=99)],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots=snapshots(A={"cash_by_currency": {"USD": 0}}),
         )
 
-        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B"])
-        self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [1600, 400])
-        self.assertEqual([cmd["limit_price"] for cmd in result.commands], [103.95, 103.95])
+        self.assertEqual(capacity_result.reason, "no_account_capacity")
+        self.assertTrue(capacity_result.capacity_noop)
+        self.assertEqual(sell_capacity_result.reason, "no_account_capacity")
+        self.assertTrue(sell_capacity_result.capacity_noop)
+        self.assertEqual(cooldown_result.reason, "no_accounts_off_cooldown")
+        self.assertFalse(cooldown_result.capacity_noop)
+        self.assertEqual(empty_book_result.reason, "no_resting_orders")
+        self.assertFalse(empty_book_result.capacity_noop)
+        self.assertEqual(out_of_limit_result.reason, "no_resting_orders_within_price_limit")
+        self.assertFalse(out_of_limit_result.capacity_noop)
+        self.assertEqual(minimum_result.reason, "per_account_quantity_below_minimum")
+        self.assertFalse(minimum_result.capacity_noop)
 
-    def test_past_stop_time_becomes_manual_termination_time(self):
-        normalized = normalize_fast_trading_end_time(
-            "2024-01-01T00:00:00Z",
-            now=datetime(2026, 7, 6, tzinfo=timezone.utc),
+    def test_missing_snapshot_data_is_not_a_capacity_noop(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[],
+            asks=[BookLevel(price=10, quantity=200)],
         )
 
-        self.assertEqual(normalized, "2099-01-01T00:00:00Z")
+        unavailable = build_cycle(
+            mode="E",
+            book=book,
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=2,
+            account_snapshots={},
+        )
+        incomplete = build_cycle(
+            mode="E",
+            book=book,
+            price_limit=10,
+            account_ids=["A", "B"],
+            book_levels=2,
+            account_snapshots=snapshots(A={"cash_by_currency": {"USD": 0}}),
+        )
 
-    def test_test_mode_logs_without_publishing(self):
+        self.assertEqual(unavailable.reason, "account_snapshots_unavailable")
+        self.assertFalse(unavailable.capacity_noop)
+        self.assertEqual(incomplete.reason, "account_snapshots_incomplete")
+        self.assertFalse(incomplete.capacity_noop)
+
+
+class FastTradingManagerTests(unittest.TestCase):
+    def test_manager_records_order_action_time_for_future_cooldown_checks(self):
         store = MarketDataStore()
         store.upsert_book(
             OrderBookSnapshot(
                 symbol="AAPL",
-                bids=[BookLevel(price=105, quantity=1000)],
-                asks=[],
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
             )
         )
-        published = []
+        settings = fast_trading_settings()
+        settings["minimum_cycle_seconds_by_medium"]["API"] = 10.0
         manager = FastTradingStrategyManager(
             market_data_store=store,
             account_metas_provider=lambda: metas("A"),
-            publish_command=lambda cmd, key: published.append((key, cmd)),
+            publish_command=lambda command, key: None,
+            fast_trading_settings=settings,
         )
 
-        command = {
-            "trading_mode": "F",
-            "symbol": "AAPL",
-            "fast_trading_test_mode": True,
-            "fast_trading_groups": [
-                {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            ],
-        }
+        first_result = manager.run_cycle(strategy_command())
+        second_result = manager.run_cycle(strategy_command())
 
-        with self.assertLogs("trading-ui.fast-trading", level="INFO") as logs:
-            result = manager.run_cycle(command)
+        self.assertEqual(len(first_result.commands), 1)
+        self.assertEqual(second_result.commands, [])
+        self.assertEqual(second_result.reason, "no_accounts_off_cooldown")
+        self.assertFalse(second_result.capacity_noop)
 
-        self.assertEqual(len(result.commands), 1)
-        self.assertEqual(published, [])
-        self.assertTrue(result.commands[0]["fast_trading_test_mode"])
-        self.assertIn("TEST MODE", "\n".join(logs.output))
-        self.assertIn("without Kafka publish", "\n".join(logs.output))
-
-    def test_normal_mode_logs_and_publishes(self):
+    def test_failed_publish_does_not_start_account_cooldown(self):
         store = MarketDataStore()
         store.upsert_book(
             OrderBookSnapshot(
                 symbol="AAPL",
-                bids=[BookLevel(price=105, quantity=1000)],
-                asks=[],
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
             )
         )
+        publish_attempts = 0
+
+        def publish(command, key):
+            nonlocal publish_attempts
+            publish_attempts += 1
+            if publish_attempts == 1:
+                raise RuntimeError("publisher unavailable")
+
+        settings = fast_trading_settings()
+        settings["minimum_cycle_seconds_by_medium"]["API"] = 10.0
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            publish_command=publish,
+            fast_trading_settings=settings,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "publisher unavailable"):
+            manager.run_cycle(strategy_command())
+        retry_result = manager.run_cycle(strategy_command())
+
+        self.assertEqual(len(retry_result.commands), 1)
+        self.assertEqual(publish_attempts, 2)
+
+    def test_account_is_reserved_while_publish_is_in_flight(self):
+        store = MarketDataStore()
+        store.upsert_book(
+            OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
+            )
+        )
+        publish_started = threading.Event()
+        release_publish = threading.Event()
+        first_result = []
+
+        def publish(command, key):
+            publish_started.set()
+            if not release_publish.wait(1.0):
+                raise RuntimeError("test publisher timed out")
+
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            publish_command=publish,
+            fast_trading_settings=fast_trading_settings(),
+        )
+        worker = threading.Thread(
+            target=lambda: first_result.append(manager.run_cycle(strategy_command())),
+        )
+
+        worker.start()
+        self.assertTrue(publish_started.wait(1.0))
+        concurrent_result = manager.run_cycle(strategy_command())
+        release_publish.set()
+        worker.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(first_result[0].commands), 1)
+        self.assertEqual(concurrent_result.commands, [])
+        self.assertEqual(concurrent_result.reason, "no_accounts_off_cooldown")
+
+    def test_account_cooldown_is_shared_across_buy_and_sell_sessions(self):
+        store = MarketDataStore()
+        store.upsert_book(
+            OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[BookLevel(price=10, quantity=200)],
+                asks=[BookLevel(price=10, quantity=200)],
+            )
+        )
+        settings = fast_trading_settings()
+        settings["minimum_cycle_seconds_by_medium"]["API"] = 10.0
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            account_snapshots_provider=lambda: snapshots(
+                A={
+                    "cash_by_currency": {"USD": 2000},
+                    "positions": [("AAPL", 200)],
+                }
+            ),
+            publish_command=lambda command, key: None,
+            fast_trading_settings=settings,
+        )
+
+        buy_result = manager.run_cycle(strategy_command())
+        sell_command = {
+            **strategy_command(),
+            "trading_mode": "F",
+        }
+        sell_result = manager.run_cycle(sell_command)
+
+        self.assertEqual(len(buy_result.commands), 1)
+        self.assertEqual(sell_result.reason, "no_accounts_off_cooldown")
+        self.assertEqual(sell_result.commands, [])
+
+    def test_manager_uses_configured_book_depth_for_each_aggression_level(self):
+        book = OrderBookSnapshot(
+            symbol="AAPL",
+            bids=[],
+            asks=[
+                BookLevel(price=6, quantity=100),
+                BookLevel(price=7, quantity=100),
+                BookLevel(price=8, quantity=100),
+                BookLevel(price=9, quantity=100),
+                BookLevel(price=10, quantity=100),
+                BookLevel(price=11, quantity=1000),
+            ],
+        )
+
+        for aggression_level, expected_quantity in ((1, 200), (2, 300), (3, 500)):
+            with self.subTest(aggression_level=aggression_level):
+                store = MarketDataStore()
+                store.upsert_book(book)
+                manager = FastTradingStrategyManager(
+                    market_data_store=store,
+                    account_metas_provider=lambda: metas("A"),
+                    publish_command=lambda command, key: None,
+                    fast_trading_settings=fast_trading_settings(),
+                )
+
+                result = manager.run_cycle(strategy_command(aggression_level=aggression_level))
+
+                self.assertEqual(result.total_resting_qty, expected_quantity)
+
+    def test_strategy_cycles_at_configured_aggression_interval_even_for_skips(self):
+        store = RecordingMarketDataStore()
+        settings = fast_trading_settings(cycle_seconds=0.04)
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            publish_command=lambda command, key: None,
+            fast_trading_settings=settings,
+        )
+
+        try:
+            key = manager.start_strategy(strategy_command(aggression_level=2))
+            deadline = time.monotonic() + 1.0
+            while len(store.get_book_times) < 3 and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+            self.assertGreaterEqual(len(store.get_book_times), 3)
+            self.assertIn(key, manager._strategies)
+            gaps = [
+                later - earlier
+                for earlier, later in zip(store.get_book_times[:2], store.get_book_times[1:3])
+            ]
+            self.assertTrue(all(gap >= 0.025 for gap in gaps), gaps)
+        finally:
+            manager.stop_all()
+
+    def test_ten_capacity_noops_auto_stop_and_commands_reset_the_counter(self):
+        store = MarketDataStore()
+        store.upsert_book(
+            OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
+            )
+        )
+        provider_calls = 0
+
+        def provide_snapshots():
+            nonlocal provider_calls
+            provider_calls += 1
+            cash = 2000 if provider_calls == 10 else 1990
+            return snapshots(A={"cash_by_currency": {"USD": cash}})
+
         published = []
         manager = FastTradingStrategyManager(
             market_data_store=store,
             account_metas_provider=lambda: metas("A"),
-            publish_command=lambda cmd, key: published.append((key, cmd)),
+            account_snapshots_provider=provide_snapshots,
+            publish_command=lambda command, key: published.append((key, command)),
+            fast_trading_settings=fast_trading_settings(cycle_seconds=0.01),
         )
-
-        command = {
-            "trading_mode": "F",
-            "symbol": "AAPL",
-            "fast_trading_groups": [
-                {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            ],
-        }
-
-        with self.assertLogs("trading-ui.fast-trading", level="INFO") as logs:
-            result = manager.run_cycle(command)
-
-        self.assertEqual(len(result.commands), 1)
-        self.assertEqual(len(published), 1)
-        self.assertEqual(published[0][0], "A")
-        self.assertNotIn("fast_trading_test_mode", published[0][1])
-        self.assertIn("Publishing fast trading command", "\n".join(logs.output))
-
-    def test_start_and_manual_stop_are_logged_with_reason(self):
-        manager = FastTradingStrategyManager(
-            market_data_store=MarketDataStore(),
-            account_metas_provider=lambda: metas("A"),
-            publish_command=lambda cmd, key: None,
-            idle_cycle_seconds=0.1,
-        )
-        command = {
-            "command_id": "algo-start-1",
-            "trading_mode": "F",
-            "symbol": "AAPL",
-            "end_time_et": "2099-01-01T00:00:00Z",
-            "fast_trading_groups": [
-                {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            ],
-        }
 
         try:
-            with self.assertLogs("trading-ui.fast-trading", level="INFO") as logs:
-                manager.start_strategy(command)
-                manager.stop_matching("F")
+            key = manager.start_strategy(strategy_command())
+            deadline = time.monotonic() + 2.0
+            while key in manager._strategies and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+            self.assertNotIn(key, manager._strategies)
+            self.assertGreaterEqual(provider_calls, 20)
+            self.assertEqual(len(published), 1)
         finally:
             manager.stop_all()
 
-        joined_logs = "\n".join(logs.output)
-        self.assertIn("Algo trading started successfully", joined_logs)
-        self.assertIn("Algo trading stopped", joined_logs)
-        self.assertIn("reason=Manual stop", joined_logs)
-
-    def test_end_time_stop_is_logged_with_reason(self):
+    def test_non_capacity_skips_do_not_auto_stop(self):
+        store = RecordingMarketDataStore()
         manager = FastTradingStrategyManager(
-            market_data_store=MarketDataStore(),
+            market_data_store=store,
             account_metas_provider=lambda: metas("A"),
-            publish_command=lambda cmd, key: None,
-            idle_cycle_seconds=0.1,
+            publish_command=lambda command, key: None,
+            fast_trading_settings=fast_trading_settings(cycle_seconds=0.01),
         )
-        end_time = datetime.now(timezone.utc) + timedelta(milliseconds=150)
-        command = {
-            "command_id": "algo-start-2",
-            "trading_mode": "F",
-            "symbol": "AAPL",
-            "end_time_et": end_time.isoformat().replace("+00:00", "Z"),
-            "fast_trading_groups": [
-                {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-            ],
-        }
 
         try:
-            with self.assertLogs("trading-ui.fast-trading", level="INFO") as logs:
-                manager.start_strategy(command)
-                deadline = datetime.now(timezone.utc) + timedelta(seconds=2)
-                while datetime.now(timezone.utc) < deadline:
-                    if "reason=Hit end time" in "\n".join(logs.output):
-                        break
-                    time.sleep(0.02)
+            key = manager.start_strategy(strategy_command())
+            deadline = time.monotonic() + 1.0
+            while len(store.get_book_times) < 12 and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+            self.assertGreaterEqual(len(store.get_book_times), 12)
+            self.assertIn(key, manager._strategies)
         finally:
             manager.stop_all()
 
-        self.assertIn("reason=Hit end time", "\n".join(logs.output))
+    def test_missing_snapshots_do_not_auto_stop(self):
+        store = RecordingMarketDataStore()
+        store.upsert_book(
+            OrderBookSnapshot(
+                symbol="AAPL",
+                bids=[],
+                asks=[BookLevel(price=10, quantity=200)],
+            )
+        )
+        manager = FastTradingStrategyManager(
+            market_data_store=store,
+            account_metas_provider=lambda: metas("A"),
+            account_snapshots_provider=lambda: {},
+            publish_command=lambda command, key: None,
+            fast_trading_settings=fast_trading_settings(cycle_seconds=0.01),
+        )
+
+        try:
+            key = manager.start_strategy(strategy_command())
+            deadline = time.monotonic() + 1.0
+            while len(store.get_book_times) < 12 and time.monotonic() < deadline:
+                time.sleep(0.005)
+
+            self.assertGreaterEqual(len(store.get_book_times), 12)
+            self.assertIn(key, manager._strategies)
+        finally:
+            manager.stop_all()
 
 
 if __name__ == "__main__":

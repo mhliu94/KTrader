@@ -70,31 +70,6 @@ def render_layout(
     can_manage_trading: bool = False,
 ) -> str:
     next_path = f"/{active_tab}"
-    refresh_enabled = active_tab == "account-details"
-    refresh_meta = '<meta http-equiv="refresh" content="30" />' if refresh_enabled else ""
-    refresh_status = ""
-    if refresh_enabled:
-        refresh_status = (
-            f"{html_escape(t(lang, 'auto_refresh'))}"
-            f" · {html_escape(t(lang, 'refresh_in'))}: <b><span id=\"refreshCountdown\">30</span>s</b>"
-        )
-    refresh_script = ""
-    if refresh_enabled:
-        refresh_script = """
-  <script>
-    (function(){
-      // Page refresh countdown (starts at 30s and resets on reload)
-      var left = 30;
-      var el = document.getElementById("refreshCountdown");
-      if (el) el.textContent = left;
-      setInterval(function(){
-        left = left - 1;
-        if (left < 0) left = 0;
-        if (el) el.textContent = left;
-      }, 1000);
-    })();
-  </script>
-"""
 
     tab1_cls = "tab active" if active_tab == "account-details" else "tab"
     tab2_cls = "tab active" if active_tab == "control-panel" else "tab"
@@ -140,14 +115,12 @@ def render_layout(
 <html>
 <head>
   <meta charset="utf-8" />
-  {refresh_meta}
   <title>{html_escape(t(lang, "title"))}</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 24px; background: #fafafa; }}
     .topbar {{ display:flex; align-items:center; justify-content:space-between; margin-bottom: 12px; }}
     .right {{ display:flex; align-items:center; gap: 16px; }}
     h1 {{ margin: 0; font-size: 22px; }}
-    .sub {{ color: #666; margin-top: 8px; }}
     .tabs {{ display:flex; gap:10px; margin: 14px 0 16px 0; }}
     .tab {{
       display:inline-block; padding:10px 14px; border-radius: 12px;
@@ -247,6 +220,9 @@ def render_layout(
     .choice-input:checked + .choice-btn {{
       background:#dbeafe; color:#1e40af; border-color:#93c5fd;
     }}
+    .choice-input:focus-visible + .choice-btn {{
+      outline:3px solid rgba(37,99,235,0.35); outline-offset:2px;
+    }}
     .choice-btn.active {{
       background:#dbeafe; color:#1e40af; border-color:#93c5fd;
     }}
@@ -269,6 +245,12 @@ def render_layout(
     .status-item:first-child {{ border-top:none; }}
     .status-title {{ font-weight:700; }}
     .status-meta {{ color:#666; font-size:12px; margin-top:3px; }}
+    .account-card-actions {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }}
+    .account-order-form {{ display:flex; flex-direction:column; gap:12px; }}
+    .account-order-account {{ font-size:13px; color:#475569; }}
+    .account-order-message {{ min-height:18px; font-size:13px; }}
+    .account-order-message.success {{ color:#15803d; }}
+    .account-order-message.error {{ color:#b91c1c; }}
     body.modal-open {{ overflow:hidden; }}
     .modal-backdrop {{
       position:fixed; inset:0; z-index:1000; padding:20px;
@@ -284,15 +266,9 @@ def render_layout(
     .modal-header {{ display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }}
     .modal-close {{ border:1px solid #ddd; background:#fff; color:#222; border-radius:10px; width:36px; height:36px; cursor:pointer; font-size:20px; line-height:1; }}
     .modal-actions {{ display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; margin-top:14px; }}
-    .fast-groups {{ display:flex; flex-direction:column; gap:12px; }}
-    .fast-group {{ border:1px solid #e5e5e5; border-radius:10px; padding:12px; background:#fff; }}
-    .fast-group-header {{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:10px; }}
-    .fast-group-title {{ margin:0; font-size:15px; }}
     .fast-account-list {{ display:flex; flex-direction:column; gap:8px; margin-top:8px; }}
-    .fast-account-row {{ display:grid; grid-template-columns:auto minmax(0, 1fr) 126px; gap:8px; align-items:center; }}
-    .fast-account-row.disabled {{ opacity:0.48; }}
+    .fast-account-row {{ display:grid; grid-template-columns:auto minmax(0, 1fr); gap:8px; align-items:center; }}
     .fast-account-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:600; color:#333; }}
-    .fast-account-row input[type=number] {{ width:100%; min-width:0; }}
     @media (max-width: 640px) {{
       body {{ margin:16px; }}
       .topbar {{ align-items:flex-start; gap:12px; }}
@@ -305,8 +281,6 @@ def render_layout(
       .portfolio-card .ts {{ max-width:none; text-align:left; }}
       .portfolio-cash {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); }}
       .cash-total {{ min-width:0; }}
-      .fast-account-row {{ grid-template-columns:auto minmax(0, 1fr); }}
-      .fast-account-row input[type=number] {{ grid-column:2; }}
       .modal-actions {{ justify-content:stretch; }}
       .modal-actions .btn {{ width:100%; }}
     }}
@@ -324,10 +298,7 @@ def render_layout(
 </head>
 <body>
   <div class="topbar">
-    <div>
-      <h1>{html_escape(t(lang, "title"))}</h1>
-      <div class="sub">{refresh_status}</div>
-    </div>
+    <h1>{html_escape(t(lang, "title"))}</h1>
     <div class="right">
       <div>{user_html}</div>
       <div>{lang_toggle}</div>
@@ -345,7 +316,6 @@ def render_layout(
 
   {flash_html}
   {inner_html}
-  {refresh_script}
 
 </body>
 </html>
@@ -589,6 +559,7 @@ def render_account_details_page(
     cards: List[str] = []
     for meta in items:
         acct = accounts.get(meta.id)
+        updated_at = str(acct.ts or "") if acct is not None else ""
         acct_title = f"#{meta.num_id} - {html_escape(meta.id)}"
         meta_parts = [
             f"{html_escape(t(lang,'broker'))}: {html_escape(meta.broker)}",
@@ -648,7 +619,10 @@ def render_account_details_page(
         )
 
         cards.append(
-            "<div class='card'>"
+            "<div class='card account-card' "
+            f"data-updated-at='{html_escape(updated_at)}' "
+            f"data-stale-label='{html_escape(t(lang, 'stale'))}' "
+            f"data-stale-title='{html_escape(t(lang, 'stale_account_help'))}'>"
             f"<div class='hdr'><div class='acct'>{acct_title}</div>"
             f"<div class='ts'>{html_escape(ts_text)}</div></div>"
             f"<div class='meta'>{meta_line}</div>"
@@ -657,6 +631,14 @@ def render_account_details_page(
             f"{stale_status}</div>"
             f"<div class='cash'>{html_escape(t(lang,'cash'))} (USD): <b>{html_escape(cash_text)}</b></div>"
             f"{pos_table}"
+            "<div class='account-card-actions'>"
+            f"<button class='btn btn-blue' type='button' data-account-order='market' "
+            f"data-account-id='{html_escape(meta.id)}' data-account-label='#{meta.num_id} - {html_escape(meta.id)}'>"
+            f"{html_escape(t(lang, 'market_order'))}</button>"
+            f"<button class='btn btn-green' type='button' data-account-order='limit' "
+            f"data-account-id='{html_escape(meta.id)}' data-account-label='#{meta.num_id} - {html_escape(meta.id)}'>"
+            f"{html_escape(t(lang, 'limit_order'))}</button>"
+            "</div>"
             "</div>"
         )
 
@@ -708,11 +690,488 @@ def render_account_details_page(
     <div class="section-heading">{html_escape(t(lang, 'trading_accounts'))}</div>
     {sort_controls}
   </div>
-  <div class="grid">
+  <div id="trading-account-grid" class="grid">
     {''.join(cards) if cards else f"<div><em>{html_escape(t(lang,'no_data'))}</em></div>"}
   </div>
 """
     return inner
+
+
+def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
+    configured_symbols = sorted(_configured_securities(symbols))
+    quick_symbol_buttons = "".join(
+        (
+            f"<input class='choice-input' type='radio' id='account-quick-symbol-{idx}' "
+            f"name='symbol' value='{html_escape(symbol)}'{' checked' if idx == 1 else ''}>"
+            f"<label class='choice-btn' for='account-quick-symbol-{idx}'>{html_escape(symbol)}</label>"
+        )
+        for idx, symbol in enumerate(configured_symbols, start=1)
+    )
+    limit_symbol_options = "".join(
+        f"<option value='{html_escape(symbol)}'>{html_escape(symbol)}</option>"
+        for symbol in configured_symbols
+    )
+    limit_share_buttons = "".join(
+        f"<button class='choice-btn' type='button' data-account-limit-shares='{shares}'>{shares}</button>"
+        for shares in (3000, 5000, 10000, 20000, 30000, 50000)
+    )
+
+    market_modal = f"""
+    <div class="modal-backdrop" id="account-quick-order-modal" hidden>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="account-quick-order-title">
+        <div class="modal-header">
+          <div>
+            <div class="acct" id="account-quick-order-title">{html_escape(t(lang, 'quick_market_order'))}</div>
+            <div class="account-order-account">
+              {html_escape(t(lang, 'account'))}: <b data-account-order-label>—</b>
+            </div>
+          </div>
+          <button class="modal-close" type="button" data-account-order-close
+                  aria-label="{html_escape(t(lang, 'fast_config_cancel'))}">&times;</button>
+        </div>
+        <form class="account-order-form" id="account-quick-order-form" method="post"
+              action="/api/account-orders/quick-market"
+              data-failure-message="{html_escape(t(lang, 'publish_failed'))}">
+          <input type="hidden" name="account_id" value="">
+          <div>
+            <label>{html_escape(t(lang, 'quick_symbol'))}</label>
+            <div class="choice-grid">{quick_symbol_buttons}</div>
+          </div>
+          <div>
+            <label>{html_escape(t(lang, 'quick_side'))}</label>
+            <div class="choice-grid">
+              <input class="choice-input" type="radio" id="account-quick-side-buy" name="side" value="BUY" checked>
+              <label class="choice-btn" for="account-quick-side-buy">{html_escape(t(lang, 'buy'))}</label>
+              <input class="choice-input" type="radio" id="account-quick-side-sell" name="side" value="SELL">
+              <label class="choice-btn" for="account-quick-side-sell">{html_escape(t(lang, 'sell'))}</label>
+            </div>
+          </div>
+          <div>
+            <label for="account-quick-dollar-amount">{html_escape(t(lang, 'quick_dollars'))}</label>
+            <input id="account-quick-dollar-amount" name="dollar_amount" placeholder="10000" inputmode="decimal">
+          </div>
+          <div class="help">
+            {html_escape(t(lang, 'quick_selected_cash'))}: <b data-account-order-cash>—</b>
+            &nbsp;|&nbsp;
+            {html_escape(t(lang, 'quick_selected_last'))}: <b data-account-order-last>—</b>
+          </div>
+          <div class="account-order-message" data-account-order-message aria-live="polite"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-account-order-close style="background:#64748b;">
+              {html_escape(t(lang, 'fast_config_cancel'))}
+            </button>
+            <button class="btn btn-blue" type="submit">{html_escape(t(lang, 'submit_order'))}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    """
+
+    limit_modal = f"""
+    <div class="modal-backdrop" id="account-limit-order-modal" hidden>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="account-limit-order-title">
+        <div class="modal-header">
+          <div>
+            <div class="acct" id="account-limit-order-title">{html_escape(t(lang, 'limit_order'))}</div>
+            <div class="account-order-account">
+              {html_escape(t(lang, 'account'))}: <b data-account-order-label>—</b>
+            </div>
+          </div>
+          <button class="modal-close" type="button" data-account-order-close
+                  aria-label="{html_escape(t(lang, 'fast_config_cancel'))}">&times;</button>
+        </div>
+        <form class="account-order-form" id="account-limit-order-form" method="post"
+              action="/api/account-orders/limit"
+              data-failure-message="{html_escape(t(lang, 'publish_failed'))}">
+          <input type="hidden" name="account_id" value="">
+          <div class="row">
+            <div>
+              <label for="account-limit-symbol">{html_escape(t(lang, 'limit_symbol'))}</label>
+              <select id="account-limit-symbol" name="symbol" required>{limit_symbol_options}</select>
+            </div>
+            <div>
+              <label>{html_escape(t(lang, 'limit_side'))}</label>
+              <div class="choice-grid">
+                <input class="choice-input" type="radio" id="account-limit-side-buy" name="side" value="BUY" checked>
+                <label class="choice-btn" for="account-limit-side-buy">{html_escape(t(lang, 'buy'))}</label>
+                <input class="choice-input" type="radio" id="account-limit-side-sell" name="side" value="SELL">
+                <label class="choice-btn" for="account-limit-side-sell">{html_escape(t(lang, 'sell'))}</label>
+              </div>
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="account-limit-shares">{html_escape(t(lang, 'shares'))}</label>
+              <input id="account-limit-shares" name="shares" placeholder="e.g. 100" inputmode="numeric" required>
+              <div class="choice-grid" style="margin-top:8px;">{limit_share_buttons}</div>
+              <div class="help">{html_escape(t(lang, 'limit_quick_shares'))}</div>
+            </div>
+            <div>
+              <label for="account-limit-price">{html_escape(t(lang, 'limit_price'))}</label>
+              <input id="account-limit-price" name="limit_price" placeholder="e.g. 123.45" inputmode="decimal">
+              <div class="help">{html_escape(t(lang, 'limit_price_precedence'))}</div>
+            </div>
+          </div>
+          <div>
+            <label>{html_escape(t(lang, 'through_market_pct'))}</label>
+            <div class="choice-grid">
+              <input class="choice-input" type="radio" id="account-limit-through-none" name="through_market_pct" value="" checked>
+              <label class="choice-btn" for="account-limit-through-none">{html_escape(t(lang, 'none'))}</label>
+              <input class="choice-input" type="radio" id="account-limit-through-1" name="through_market_pct" value="1">
+              <label class="choice-btn" for="account-limit-through-1">1%</label>
+              <input class="choice-input" type="radio" id="account-limit-through-5" name="through_market_pct" value="5">
+              <label class="choice-btn" for="account-limit-through-5">5%</label>
+              <input class="choice-input" type="radio" id="account-limit-through-10" name="through_market_pct" value="10">
+              <label class="choice-btn" for="account-limit-through-10">10%</label>
+              <input class="choice-input" type="radio" id="account-limit-through-20" name="through_market_pct" value="20">
+              <label class="choice-btn" for="account-limit-through-20">20%</label>
+            </div>
+          </div>
+          <div class="help">
+            {html_escape(t(lang, 'quick_selected_cash'))}: <b data-account-order-cash>—</b>
+            &nbsp;|&nbsp;
+            {html_escape(t(lang, 'quick_selected_last'))}: <b data-account-order-last>—</b>
+          </div>
+          <div class="account-order-message" data-account-order-message aria-live="polite"></div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-account-order-close style="background:#64748b;">
+              {html_escape(t(lang, 'fast_config_cancel'))}
+            </button>
+            <button class="btn btn-blue" type="submit">{html_escape(t(lang, 'submit_limit_order'))}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    """
+
+    controller_script = """
+    <script>
+      (function() {
+        const root = document.getElementById("account-details-live-root");
+        const marketModal = document.getElementById("account-quick-order-modal");
+        const limitModal = document.getElementById("account-limit-order-modal");
+        if (!root || !marketModal || !limitModal) return;
+
+        const modals = { market: marketModal, limit: limitModal };
+        let activeModal = null;
+        let lastFocused = null;
+        let activeAccountId = "";
+        let activeOrderKind = "";
+        let accountsCache = null;
+        let marketCache = null;
+        let summaryRequest = null;
+        let nextContextVersion = 1;
+
+        function formatMoney(value) {
+          const number = Number(value);
+          if (value === null || value === undefined || !Number.isFinite(number)) return "—";
+          return "$" + number.toLocaleString(undefined, {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          });
+        }
+
+        function formatPrice(value) {
+          const number = Number(value);
+          if (value === null || value === undefined || !Number.isFinite(number)) return "—";
+          return number.toLocaleString(undefined, {
+            minimumFractionDigits: 4,
+            maximumFractionDigits: 4
+          });
+        }
+
+        function usdCash(account) {
+          if (!account) return null;
+          const balances = account.cash_by_currency || {};
+          const usdKey = Object.keys(balances).find(function(key) {
+            return String(key).trim().toUpperCase() === "USD";
+          });
+          return usdKey === undefined ? account.cash : balances[usdKey];
+        }
+
+        function selectedSymbol(modal) {
+          const checked = modal.querySelector("input[name='symbol']:checked");
+          if (checked) return checked.value;
+          const select = modal.querySelector("select[name='symbol']");
+          return select ? select.value : "";
+        }
+
+        function renderSummary(modal) {
+          if (!modal) return;
+          const accountInput = modal.querySelector("input[name='account_id']");
+          const accountId = accountInput ? accountInput.value : "";
+          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
+          const account = accounts.find(function(row) { return row.account_id === accountId; });
+          const cash = modal.querySelector("[data-account-order-cash]");
+          if (cash) cash.textContent = formatMoney(usdCash(account));
+
+          const rows = marketCache && marketCache.rows ? marketCache.rows : {};
+          const quote = rows[selectedSymbol(modal)] || null;
+          const last = modal.querySelector("[data-account-order-last]");
+          if (last) last.textContent = quote && !quote.error ? formatPrice(quote.last) : "—";
+        }
+
+        function refreshSummary() {
+          if (!activeModal) return Promise.resolve();
+          if (summaryRequest) return summaryRequest;
+          summaryRequest = Promise.all([
+            fetch("/api/accounts", { cache: "no-store", credentials: "same-origin" }),
+            fetch("/api/market-data", { cache: "no-store", credentials: "same-origin" })
+          ]).then(async function(responses) {
+            if (responses[0].ok) accountsCache = await responses[0].json();
+            if (responses[1].ok) marketCache = await responses[1].json();
+          }).catch(function() {
+            // Keep the last successful values through transient network failures.
+          }).finally(function() {
+            summaryRequest = null;
+            renderSummary(activeModal);
+          });
+          return summaryRequest;
+        }
+
+        function clearMessage(modal) {
+          const message = modal.querySelector("[data-account-order-message]");
+          if (!message) return;
+          message.textContent = "";
+          message.classList.remove("success", "error");
+        }
+
+        function openModal(kind, accountId, accountLabel, trigger) {
+          const modal = modals[kind];
+          if (!modal || !accountId) return;
+          if (activeModal && activeModal !== modal) activeModal.hidden = true;
+          const form = modal.querySelector("form");
+          if (!form) return;
+          Array.from(form.elements).forEach(function(control) { control.disabled = false; });
+          form.reset();
+          form.dataset.contextVersion = String(nextContextVersion++);
+          const accountInput = form.querySelector("input[name='account_id']");
+          if (accountInput) accountInput.value = accountId;
+          const label = modal.querySelector("[data-account-order-label]");
+          if (label) label.textContent = accountLabel || accountId;
+          clearMessage(modal);
+          modal.querySelectorAll("[data-account-limit-shares]").forEach(function(button) {
+            button.classList.remove("active");
+          });
+          lastFocused = trigger;
+          activeAccountId = accountId;
+          activeOrderKind = kind;
+          activeModal = modal;
+          modal.hidden = false;
+          document.body.classList.add("modal-open");
+          renderSummary(modal);
+          refreshSummary();
+          const closeButton = modal.querySelector(".modal-close");
+          if (closeButton) closeButton.focus();
+        }
+
+        function closeModal() {
+          if (!activeModal) return;
+          activeModal.hidden = true;
+          activeModal = null;
+          document.body.classList.remove("modal-open");
+          if (lastFocused && lastFocused.isConnected) {
+            lastFocused.focus();
+            return;
+          }
+          const replacement = Array.from(root.querySelectorAll("[data-account-order]")).find(function(button) {
+            return button.dataset.accountOrder === activeOrderKind && button.dataset.accountId === activeAccountId;
+          });
+          if (replacement) replacement.focus();
+        }
+
+        async function submitOrder(form) {
+          const modal = form.closest(".modal-backdrop");
+          if (!modal) return;
+          const contextVersion = form.dataset.contextVersion || "";
+          const formData = new FormData(form);
+          const controls = Array.from(form.elements);
+          const message = modal.querySelector("[data-account-order-message]");
+          controls.forEach(function(control) { control.disabled = true; });
+          clearMessage(modal);
+          try {
+            const response = await fetch(form.action, {
+              method: "POST",
+              body: formData,
+              credentials: "same-origin",
+              headers: { Accept: "application/json" }
+            });
+            let payload = {};
+            try { payload = await response.json(); } catch (_error) {}
+            if (!response.ok || !payload.ok) {
+              throw new Error(payload.error || form.dataset.failureMessage || "Request failed");
+            }
+            if (form.dataset.contextVersion !== contextVersion) return;
+            if (message) {
+              message.textContent = payload.message || "";
+              message.classList.add("success");
+            }
+            refreshSummary();
+          } catch (error) {
+            if (form.dataset.contextVersion !== contextVersion) return;
+            if (message) {
+              message.textContent = error && error.message ? error.message : (form.dataset.failureMessage || "Request failed");
+              message.classList.add("error");
+            }
+          } finally {
+            if (form.dataset.contextVersion === contextVersion) {
+              controls.forEach(function(control) { control.disabled = false; });
+            }
+          }
+        }
+
+        root.addEventListener("click", function(event) {
+          if (!(event.target instanceof Element)) return;
+          const trigger = event.target.closest("[data-account-order]");
+          if (trigger && root.contains(trigger)) {
+            openModal(trigger.dataset.accountOrder || "", trigger.dataset.accountId || "", trigger.dataset.accountLabel || "", trigger);
+            return;
+          }
+          if (event.target.closest("[data-account-order-close]")) {
+            closeModal();
+            return;
+          }
+          const sharesButton = event.target.closest("[data-account-limit-shares]");
+          if (sharesButton && activeModal === limitModal) {
+            const shares = limitModal.querySelector("input[name='shares']");
+            if (shares) shares.value = sharesButton.dataset.accountLimitShares || "";
+            limitModal.querySelectorAll("[data-account-limit-shares]").forEach(function(button) {
+              button.classList.toggle("active", button === sharesButton);
+            });
+            if (shares) shares.focus();
+            return;
+          }
+          if (activeModal && event.target === activeModal) closeModal();
+        });
+
+        root.addEventListener("input", function(event) {
+          if (!(event.target instanceof Element)) return;
+          if (event.target.matches("#account-limit-shares")) {
+            const current = event.target.value.trim();
+            limitModal.querySelectorAll("[data-account-limit-shares]").forEach(function(button) {
+              button.classList.toggle("active", button.dataset.accountLimitShares === current);
+            });
+          }
+        });
+
+        root.addEventListener("change", function(event) {
+          if (activeModal && event.target instanceof Element && event.target.matches("[name='symbol']")) {
+            renderSummary(activeModal);
+          }
+        });
+
+        [marketModal, limitModal].forEach(function(modal) {
+          const form = modal.querySelector("form");
+          if (form) form.addEventListener("submit", function(event) {
+            event.preventDefault();
+            submitOrder(form);
+          });
+        });
+
+        document.addEventListener("keydown", function(event) {
+          if (!activeModal) return;
+          if (event.key === "Escape") {
+            closeModal();
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const focusable = Array.from(activeModal.querySelectorAll(
+            "button:not([disabled]), input:not([type='hidden']):not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]"
+          ));
+          if (!focusable.length) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && (document.activeElement === first || !activeModal.contains(document.activeElement))) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && (document.activeElement === last || !activeModal.contains(document.activeElement))) {
+            event.preventDefault();
+            first.focus();
+          }
+        });
+
+        const summaryTimer = window.setInterval(function() {
+          if (activeModal) refreshSummary();
+        }, 5000);
+        window.addEventListener("pagehide", function() {
+          window.clearInterval(summaryTimer);
+        }, { once: true });
+      })();
+    </script>
+    """
+    return market_modal + limit_modal + controller_script
+
+
+def render_live_account_details_page(
+    inner_html: str,
+    lang: str | None = None,
+    symbols: List[str] | None = None,
+) -> str:
+    order_controls = _render_account_order_controls(lang, symbols) if lang is not None else ""
+    return f"""
+  <div id="account-details-live-root">
+    {inner_html}
+    {order_controls}
+  </div>
+  <script>
+    (function() {{
+      const root = document.getElementById("account-details-live-root");
+      if (!root || !window.EventSource) return;
+
+      const updates = new EventSource("/api/account-details/stream");
+      function refreshStaleStatuses() {{
+        root.querySelectorAll(".account-card[data-updated-at]").forEach(function(card) {{
+          let timestamp = (card.getAttribute("data-updated-at") || "").trim();
+          if (!timestamp) return;
+          if (!/(?:[zZ]|[+-]\d{{2}}:?\d{{2}})$/.test(timestamp)) timestamp += "Z";
+          const updatedAt = Date.parse(timestamp);
+          if (Number.isNaN(updatedAt)) return;
+
+          const statusRow = card.querySelector(".status-row");
+          if (!statusRow) return;
+          const existing = statusRow.querySelector(".status-stale");
+          const isStale = Date.now() - updatedAt > 5 * 60 * 1000;
+          if (!isStale && existing) existing.remove();
+          if (isStale && !existing) {{
+            const badge = document.createElement("span");
+            badge.className = "status-pill status-stale";
+            badge.title = card.getAttribute("data-stale-title") || "";
+            badge.textContent = card.getAttribute("data-stale-label") || "";
+            statusRow.appendChild(badge);
+          }}
+        }});
+      }}
+
+      updates.onmessage = function(event) {{
+        try {{
+          const payload = JSON.parse(event.data);
+          if (!payload || typeof payload.html !== "string") return;
+
+          const template = document.createElement("template");
+          template.innerHTML = payload.html;
+          const nextPortfolio = template.content.querySelector("#portfolio-summary");
+          const nextGrid = template.content.querySelector("#trading-account-grid");
+          const currentPortfolio = root.querySelector("#portfolio-summary");
+          const currentGrid = root.querySelector("#trading-account-grid");
+          if (nextPortfolio && currentPortfolio) currentPortfolio.replaceWith(nextPortfolio);
+          if (nextGrid && currentGrid) currentGrid.replaceWith(nextGrid);
+          refreshStaleStatuses();
+        }} catch (_error) {{
+          // EventSource reconnects automatically; keep the last complete snapshot visible.
+        }}
+      }};
+
+      refreshStaleStatuses();
+      const staleTimer = window.setInterval(refreshStaleStatuses, 15000);
+      function closeUpdates() {{
+        window.clearInterval(staleTimer);
+        updates.close();
+      }}
+      window.addEventListener("pagehide", closeUpdates, {{ once: true }});
+      window.addEventListener("beforeunload", closeUpdates, {{ once: true }});
+    }})();
+  </script>
+"""
 
 
 def render_login_page(lang: str, next_path: str, error: str = "") -> str:
@@ -1131,31 +1590,26 @@ def render_control_panel_page(
         for idx, aid in enumerate(sorted_account_ids, start=1)
     )
 
-    fast_account_rows = [
-        {
-            "id": aid,
-            "label": f"#{account_metas[aid].num_id} {aid} ({account_metas[aid].broker})",
-        }
+    fast_account_buttons = "\n".join(
+        (
+            f"<label class='fast-account-row'>"
+            f"<input type='checkbox' data-fast-account-id='{html_escape(aid)}'>"
+            f"<span class='fast-account-label'>#{account_metas[aid].num_id} "
+            f"{html_escape(aid)} ({html_escape(account_metas[aid].broker)})</span>"
+            f"</label>"
+        )
         for aid in sorted_account_ids
-    ]
-    fast_accounts_json = json.dumps(fast_account_rows).replace("<", "\\u003c")
+    )
     fast_labels = {
         "modeE": t(lang, "mode_e"),
         "modeF": t(lang, "mode_f"),
         "fastSelectedMode": t(lang, "fast_selected_mode"),
-        "fastGroupTitle": t(lang, "fast_group_title"),
-        "fastPriceLimit": t(lang, "fast_price_limit"),
-        "fastAccountsAllocations": t(lang, "fast_accounts_allocations"),
-        "fastAllocationPct": t(lang, "fast_allocation_pct"),
-        "fastAddGroup": t(lang, "fast_add_group"),
-        "fastRemoveGroup": t(lang, "fast_remove_group"),
+        "fastBuyPriceLimit": t(lang, "fast_buy_price_limit"),
+        "fastSellPriceLimit": t(lang, "fast_sell_price_limit"),
         "fastConfigRequired": t(lang, "fast_config_required"),
-        "fastGroupRequired": t(lang, "fast_group_required"),
         "fastPriceLimitPositive": t(lang, "fast_price_limit_positive"),
-        "fastGroupAccountsRequired": t(lang, "fast_group_accounts_required"),
-        "fastAccountDuplicate": t(lang, "fast_account_duplicate"),
-        "fastAllocationPositive": t(lang, "fast_allocation_positive"),
-        "fastAllocationTotal": t(lang, "fast_allocation_total"),
+        "fastAccountsRequired": t(lang, "fast_accounts_required"),
+        "fastAggressionLevelInvalid": t(lang, "fast_aggression_level_invalid"),
     }
     fast_labels_json = json.dumps(fast_labels).replace("<", "\\u003c")
     fast_trading_modal = f"""
@@ -1168,9 +1622,26 @@ def render_control_panel_page(
           </div>
           <button class="modal-close" id="fast-trading-close" type="button" aria-label="{html_escape(t(lang,'fast_config_cancel'))}">&times;</button>
         </div>
-        <div class="fast-groups" id="fast-trading-groups"></div>
-        <div class="inline-actions" style="margin-top:12px;">
-          <button class="btn btn-blue" id="fast-add-group" type="button">{html_escape(t(lang,'fast_add_group'))}</button>
+        <div>
+          <label id="fast-price-limit-label" for="fast-price-limit">{html_escape(t(lang,'fast_buy_price_limit'))}</label>
+          <input id="fast-price-limit" type="number" min="0.01" step="0.01" inputmode="decimal">
+        </div>
+        <div style="margin-top:12px;">
+          <label>{html_escape(t(lang,'fast_accounts'))}</label>
+          <div class="fast-account-list" id="fast-trading-accounts">
+            {fast_account_buttons}
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <label>{html_escape(t(lang,'fast_aggression_level'))}</label>
+          <div class="choice-grid">
+            <input class="choice-input" type="radio" id="fast-aggression-1" name="fast_aggression_level" value="1" checked>
+            <label class="choice-btn" for="fast-aggression-1">{html_escape(t(lang,'fast_aggression_1'))}</label>
+            <input class="choice-input" type="radio" id="fast-aggression-2" name="fast_aggression_level" value="2">
+            <label class="choice-btn" for="fast-aggression-2">{html_escape(t(lang,'fast_aggression_2'))}</label>
+            <input class="choice-input" type="radio" id="fast-aggression-3" name="fast_aggression_level" value="3">
+            <label class="choice-btn" for="fast-aggression-3">{html_escape(t(lang,'fast_aggression_3'))}</label>
+          </div>
         </div>
         <label class="fast-account-row" style="margin-top:12px;">
           <input type="checkbox" id="fast-test-mode">
@@ -1190,41 +1661,21 @@ def render_control_panel_page(
         const form = document.getElementById("algo-form");
         const configEl = document.getElementById("fast_trading_config");
         const modal = document.getElementById("fast-trading-modal");
-        const groupsEl = document.getElementById("fast-trading-groups");
+        const genericConfigEl = document.getElementById("algo-generic-constraints");
         const modeLabelEl = document.getElementById("fast-trading-mode-label");
+        const priceLabelEl = document.getElementById("fast-price-limit-label");
+        const priceLimitEl = document.getElementById("fast-price-limit");
         const errorEl = document.getElementById("fast-trading-error");
-        const addGroupBtn = document.getElementById("fast-add-group");
         const cancelBtn = document.getElementById("fast-cancel");
         const closeBtn = document.getElementById("fast-trading-close");
         const submitBtn = document.getElementById("fast-submit-config");
         const testModeEl = document.getElementById("fast-test-mode");
-        const accounts = __FAST_ACCOUNTS__;
         const labels = __FAST_LABELS__;
 
-        if (!form || !configEl || !modal || !groupsEl) return;
+        if (!form || !configEl || !modal || !priceLimitEl) return;
 
         let confirmed = false;
         let lastFocused = null;
-        let nextGroupId = 1;
-        let groups = [];
-
-        function esc(value) {
-          return String(value).replace(/[&<>"']/g, function(ch) {
-            if (ch === "&") return "&amp;";
-            if (ch === "<") return "&lt;";
-            if (ch === ">") return "&gt;";
-            if (ch === '"') return "&quot;";
-            return "&#39;";
-          });
-        }
-
-        function fmt(template, values) {
-          let out = String(template || "");
-          Object.keys(values || {}).forEach(function(key) {
-            out = out.replaceAll("{" + key + "}", String(values[key]));
-          });
-          return out;
-        }
 
         function selectedMode() {
           const selected = form.querySelector("input[name='trading_mode']:checked");
@@ -1237,117 +1688,31 @@ def render_control_panel_page(
           return mode;
         }
 
-        function groupById(groupId) {
-          return groups.find(function(group) { return group.id === Number(groupId); }) || null;
-        }
-
-        function usedAccountsExcept(groupId) {
-          const used = new Set();
-          groups.forEach(function(group) {
-            if (group.id === groupId) return;
-            Object.keys(group.accounts).forEach(function(accountId) { used.add(accountId); });
-          });
-          return used;
-        }
-
-        function addGroup() {
-          groups.push({ id: nextGroupId++, priceLimit: "", accounts: {} });
-          renderGroups();
-        }
-
-        function removeGroup(groupId) {
-          groups = groups.filter(function(group) { return group.id !== groupId; });
-          if (!groups.length) addGroup();
-          renderGroups();
-        }
-
-        function renderGroups() {
-          groupsEl.innerHTML = groups.map(function(group, index) {
-            const usedByOther = usedAccountsExcept(group.id);
-            const accountRows = accounts.map(function(account) {
-              const selected = Object.prototype.hasOwnProperty.call(group.accounts, account.id);
-              const disabled = !selected && usedByOther.has(account.id);
-              const allocation = selected ? group.accounts[account.id] : "";
-              return `
-                <label class="fast-account-row${disabled ? " disabled" : ""}">
-                  <input type="checkbox" data-action="toggle-account" data-group-id="${group.id}" data-account-id="${esc(account.id)}" ${selected ? "checked" : ""} ${disabled ? "disabled" : ""}>
-                  <span class="fast-account-label">${esc(account.label)}</span>
-                  <input type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="${esc(labels.fastAllocationPct)}" data-action="allocation" data-group-id="${group.id}" data-account-id="${esc(account.id)}" value="${esc(allocation)}" ${selected ? "" : "disabled"}>
-                </label>`;
-            }).join("");
-
-            return `
-              <section class="fast-group" data-group-id="${group.id}">
-                <div class="fast-group-header">
-                  <h3 class="fast-group-title">${esc(fmt(labels.fastGroupTitle, { group: index + 1 }))}</h3>
-                  <button class="btn btn-red" type="button" data-action="remove-group" data-group-id="${group.id}">${esc(labels.fastRemoveGroup)}</button>
-                </div>
-                <div class="row">
-                  <div>
-                    <label>${esc(labels.fastPriceLimit)}</label>
-                    <input type="number" min="0.01" step="0.01" inputmode="decimal" data-action="price-limit" data-group-id="${group.id}" value="${esc(group.priceLimit)}">
-                  </div>
-                  <div>
-                    <label>${esc(labels.fastAccountsAllocations)}</label>
-                    <div class="fast-account-list">${accountRows}</div>
-                  </div>
-                </div>
-              </section>`;
-          }).join("");
-        }
-
         function setError(message) {
           if (errorEl) errorEl.textContent = message || "";
         }
 
         function validateConfig() {
-          if (!groups.length) return { ok: false, error: labels.fastGroupRequired };
-
-          const used = new Set();
-          const payloadGroups = [];
-          for (let i = 0; i < groups.length; i += 1) {
-            const group = groups[i];
-            const priceLimit = Number(group.priceLimit);
-            if (!isFinite(priceLimit) || priceLimit <= 0) {
-              return { ok: false, error: fmt(labels.fastPriceLimitPositive, { group: i + 1 }) };
-            }
-
-            const selectedAccounts = Object.keys(group.accounts);
-            if (!selectedAccounts.length) {
-              return { ok: false, error: fmt(labels.fastGroupAccountsRequired, { group: i + 1 }) };
-            }
-
-            let total = 0;
-            const payloadAccounts = [];
-            for (let j = 0; j < selectedAccounts.length; j += 1) {
-              const accountId = selectedAccounts[j];
-              if (used.has(accountId)) {
-                return { ok: false, error: fmt(labels.fastAccountDuplicate, { account: accountId }) };
-              }
-              const allocation = Number(group.accounts[accountId]);
-              if (!isFinite(allocation) || allocation <= 0) {
-                return { ok: false, error: fmt(labels.fastAllocationPositive, { group: i + 1 }) };
-              }
-              used.add(accountId);
-              total += allocation;
-              payloadAccounts.push({ account_id: accountId, allocation_pct: allocation });
-            }
-
-            if (total > 100 + Number.EPSILON) {
-              return { ok: false, error: fmt(labels.fastAllocationTotal, { group: i + 1 }) };
-            }
-
-            payloadGroups.push({
-              group_id: i + 1,
-              price_limit: priceLimit,
-              accounts: payloadAccounts
-            });
+          const priceLimit = Number(priceLimitEl.value);
+          if (!isFinite(priceLimit) || priceLimit <= 0) {
+            return { ok: false, error: labels.fastPriceLimitPositive };
+          }
+          const accountIds = Array.from(modal.querySelectorAll("[data-fast-account-id]:checked"))
+            .map(function(input) { return input.getAttribute("data-fast-account-id") || ""; })
+            .filter(Boolean);
+          if (!accountIds.length) return { ok: false, error: labels.fastAccountsRequired };
+          const aggressionEl = modal.querySelector("input[name='fast_aggression_level']:checked");
+          const aggressionLevel = aggressionEl ? Number(aggressionEl.value) : 0;
+          if (![1, 2, 3].includes(aggressionLevel)) {
+            return { ok: false, error: labels.fastAggressionLevelInvalid };
           }
 
           return {
             ok: true,
             payload: {
-              groups: payloadGroups,
+              price_limit: priceLimit,
+              account_ids: accountIds,
+              aggression_level: aggressionLevel,
               test_mode: Boolean(testModeEl && testModeEl.checked)
             }
           };
@@ -1355,14 +1720,14 @@ def render_control_panel_page(
 
         function openModal(mode) {
           lastFocused = document.activeElement;
-          if (!groups.length) addGroup();
           if (modeLabelEl) modeLabelEl.textContent = (labels.fastSelectedMode || "Mode") + ": " + modeName(mode);
+          if (priceLabelEl) {
+            priceLabelEl.textContent = mode === "F" ? labels.fastSellPriceLimit : labels.fastBuyPriceLimit;
+          }
           setError("");
-          renderGroups();
           modal.hidden = false;
           document.body.classList.add("modal-open");
-          const firstInput = modal.querySelector("input:not(:disabled), button:not(:disabled)");
-          if (firstInput) firstInput.focus();
+          priceLimitEl.focus();
         }
 
         function closeModal() {
@@ -1386,46 +1751,15 @@ def render_control_panel_page(
           openModal(mode);
         });
 
-        groupsEl.addEventListener("input", function(event) {
-          const target = event.target;
-          if (!(target instanceof HTMLInputElement)) return;
-          const action = target.getAttribute("data-action");
-          const group = groupById(target.getAttribute("data-group-id"));
-          if (!group) return;
-          if (action === "price-limit") {
-            group.priceLimit = target.value;
-          } else if (action === "allocation") {
-            const accountId = target.getAttribute("data-account-id") || "";
-            if (accountId && Object.prototype.hasOwnProperty.call(group.accounts, accountId)) {
-              group.accounts[accountId] = target.value;
-            }
-          }
+        function updateGenericVisibility() {
+          const mode = selectedMode();
+          if (genericConfigEl) genericConfigEl.hidden = mode === "E" || mode === "F";
+        }
+        form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
+          input.addEventListener("change", updateGenericVisibility);
         });
+        updateGenericVisibility();
 
-        groupsEl.addEventListener("change", function(event) {
-          const target = event.target;
-          if (!(target instanceof HTMLInputElement)) return;
-          if (target.getAttribute("data-action") !== "toggle-account") return;
-          const group = groupById(target.getAttribute("data-group-id"));
-          const accountId = target.getAttribute("data-account-id") || "";
-          if (!group || !accountId) return;
-          if (target.checked) {
-            group.accounts[accountId] = group.accounts[accountId] || "";
-          } else {
-            delete group.accounts[accountId];
-          }
-          renderGroups();
-        });
-
-        groupsEl.addEventListener("click", function(event) {
-          const target = event.target;
-          if (!(target instanceof HTMLElement)) return;
-          const button = target.closest("[data-action='remove-group']");
-          if (!button) return;
-          removeGroup(Number(button.getAttribute("data-group-id")));
-        });
-
-        if (addGroupBtn) addGroupBtn.addEventListener("click", addGroup);
         if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
         if (closeBtn) closeBtn.addEventListener("click", closeModal);
         modal.addEventListener("click", function(event) {
@@ -1450,10 +1784,9 @@ def render_control_panel_page(
           }
         });
 
-        addGroup();
       })();
     </script>
-    """.replace("__FAST_ACCOUNTS__", fast_accounts_json).replace("__FAST_LABELS__", fast_labels_json)
+    """.replace("__FAST_LABELS__", fast_labels_json)
 
     msg = ""
     if error:
@@ -1725,6 +2058,7 @@ def render_control_panel_page(
         </div>
       </div>
 
+      <div id="algo-generic-constraints">
       <div class="row">
         <div>
           <label for="max_volume">{html_escape(t(lang,'max_volume'))}</label>
@@ -1766,6 +2100,7 @@ def render_control_panel_page(
           <label for="order_rate_limit_per_minute">{html_escape(t(lang,'order_rate_limit_per_minute'))}</label>
           <input id="order_rate_limit_per_minute" name="order_rate_limit_per_minute" value="-1" inputmode="decimal" />
         </div>
+      </div>
       </div>
 
       <button class="btn btn-green" type="submit">{html_escape(t(lang,'algo_submit'))}</button>

@@ -112,16 +112,27 @@ class OperationsLogTests(unittest.TestCase):
                 account_metas_provider=lambda: metas("A"),
                 publish_command=lambda cmd, key: None,
                 operations_log=operations_log,
-                idle_cycle_seconds=0.1,
+                fast_trading_settings={
+                    "aggression_levels": {
+                        1: {"book_levels": 2, "cycle_seconds": 0.1},
+                        2: {"book_levels": 3, "cycle_seconds": 0.1},
+                        3: {"book_levels": 5, "cycle_seconds": 0.1},
+                    },
+                    "minimum_cycle_seconds_by_medium": {
+                        "API": 3,
+                        "WEB": 30,
+                        "WINDOWS": 40,
+                        "EMULATOR": 40,
+                    },
+                },
             )
             command = {
                 "command_id": "algo-start-2",
                 "trading_mode": "F",
                 "symbol": "AAPL",
-                "end_time_et": "2099-01-01T00:00:00Z",
-                "fast_trading_groups": [
-                    {"group_id": 1, "price_limit": 100, "accounts": [{"account_id": "A", "allocation_pct": 100}]},
-                ],
+                "fast_trading_price_limit": 100,
+                "fast_trading_account_ids": ["A"],
+                "fast_trading_aggression_level": 1,
             }
 
             try:
@@ -132,6 +143,9 @@ class OperationsLogTests(unittest.TestCase):
 
             events = read_json_events(operations_log.path)
             self.assertEqual([event["event"] for event in events], ["algo_trading_started", "algo_trading_ended"])
+            self.assertEqual(events[0]["session"]["fast_trading_price_limit"], 100)
+            self.assertEqual(events[0]["session"]["fast_trading_account_ids"], ["A"])
+            self.assertEqual(events[0]["session"]["fast_trading_aggression_level"], 1)
             self.assertEqual(events[0]["holdings"]["accounts"][0]["cash"], 1000)
             self.assertEqual(events[1]["holdings"]["accounts"][0]["cash"], 900)
             self.assertEqual(events[1]["details"]["reason"], "Manual stop")

@@ -5,8 +5,6 @@ from fastapi import Request
 I18N: Dict[str, Dict[str, str]] = {
     "en": {
         "title": "Admin UI",
-        "auto_refresh": "Auto-refresh 30s",
-        "refresh_in": "Page refresh in",
         "tab_overview": "strategy monitor",
         "lang_en": "EN",
         "lang_zh": "中文",
@@ -38,8 +36,6 @@ I18N: Dict[str, Dict[str, str]] = {
     },
     "zh": {
         "title": "管理界面",
-        "auto_refresh": "每 30 秒自动刷新",
-        "refresh_in": "页面刷新倒计时",
         "tab_overview": "策略监控",
         "lang_en": "EN",
         "lang_zh": "中文",

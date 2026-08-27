@@ -1,10 +1,140 @@
 import os
 import json
+import math
 from typing import Any, Dict, List
 
 from .models import AccountMeta
 
 TRADING_MEDIA = {"EMULATOR", "WINDOWS", "WEB", "API"}
+
+DEFAULT_FAST_TRADING_AGGRESSION_LEVELS = {
+    1: {"book_levels": 2, "cycle_seconds": 30.0},
+    2: {"book_levels": 3, "cycle_seconds": 20.0},
+    3: {"book_levels": 5, "cycle_seconds": 10.0},
+}
+DEFAULT_FAST_TRADING_MINIMUM_CYCLE_SECONDS_BY_MEDIUM = {
+    "API": 3.0,
+    "WEB": 30.0,
+    "WINDOWS": 40.0,
+    "EMULATOR": 40.0,
+}
+
+
+def _positive_finite_number(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Config {field} must be a positive finite number.")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError(f"Config {field} must be a positive finite number.")
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(f"Config {field} must be a positive finite number.")
+    return normalized
+
+
+def _positive_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"Config {field} must be a positive integer.")
+    return value
+
+
+def _normalize_aggression_level_key(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("Config fast_trading.aggression_levels must define exactly levels 1, 2, and 3.")
+    if isinstance(value, int):
+        level = value
+    elif isinstance(value, str) and value in {"1", "2", "3"}:
+        level = int(value)
+    else:
+        raise ValueError("Config fast_trading.aggression_levels must define exactly levels 1, 2, and 3.")
+    if level not in {1, 2, 3}:
+        raise ValueError("Config fast_trading.aggression_levels must define exactly levels 1, 2, and 3.")
+    return level
+
+
+def _normalize_fast_trading_config(raw: Any) -> Dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("Config fast_trading must be an object.")
+
+    allowed_keys = {"aggression_levels", "minimum_cycle_seconds_by_medium"}
+    unknown_keys = set(raw) - allowed_keys
+    if unknown_keys:
+        names = ", ".join(sorted(str(key) for key in unknown_keys))
+        raise ValueError(f"Config fast_trading contains unknown field(s): {names}")
+
+    raw_levels = raw.get("aggression_levels")
+    if raw_levels is None:
+        aggression_levels = {
+            level: dict(settings)
+            for level, settings in DEFAULT_FAST_TRADING_AGGRESSION_LEVELS.items()
+        }
+    else:
+        if not isinstance(raw_levels, dict):
+            raise ValueError("Config fast_trading.aggression_levels must be an object.")
+        aggression_levels: Dict[int, Dict[str, Any]] = {}
+        for raw_level, raw_settings in raw_levels.items():
+            level = _normalize_aggression_level_key(raw_level)
+            if level in aggression_levels:
+                raise ValueError(f"Config fast_trading.aggression_levels defines level {level} more than once.")
+            if not isinstance(raw_settings, dict):
+                raise ValueError(f"Config fast_trading.aggression_levels.{level} must be an object.")
+            expected_fields = {"book_levels", "cycle_seconds"}
+            if set(raw_settings) != expected_fields:
+                raise ValueError(
+                    f"Config fast_trading.aggression_levels.{level} must contain exactly "
+                    "book_levels and cycle_seconds."
+                )
+            book_levels = _positive_integer(
+                raw_settings["book_levels"],
+                f"fast_trading.aggression_levels.{level}.book_levels",
+            )
+            if book_levels > 20:
+                raise ValueError(
+                    f"Config fast_trading.aggression_levels.{level}.book_levels must be at most 20."
+                )
+            aggression_levels[level] = {
+                "book_levels": book_levels,
+                "cycle_seconds": _positive_finite_number(
+                    raw_settings["cycle_seconds"],
+                    f"fast_trading.aggression_levels.{level}.cycle_seconds",
+                ),
+            }
+        if set(aggression_levels) != {1, 2, 3}:
+            raise ValueError("Config fast_trading.aggression_levels must define exactly levels 1, 2, and 3.")
+
+    minimum_cycles = dict(DEFAULT_FAST_TRADING_MINIMUM_CYCLE_SECONDS_BY_MEDIUM)
+    raw_minimum_cycles = raw.get("minimum_cycle_seconds_by_medium")
+    if raw_minimum_cycles is not None:
+        if not isinstance(raw_minimum_cycles, dict):
+            raise ValueError("Config fast_trading.minimum_cycle_seconds_by_medium must be an object.")
+        seen_media = set()
+        for raw_medium, value in raw_minimum_cycles.items():
+            if not isinstance(raw_medium, str):
+                raise ValueError("Config fast_trading minimum-cycle medium names must be strings.")
+            medium = raw_medium.strip().upper()
+            if medium not in TRADING_MEDIA:
+                allowed = ", ".join(sorted(TRADING_MEDIA))
+                raise ValueError(
+                    "Invalid medium in fast_trading.minimum_cycle_seconds_by_medium: "
+                    f"{raw_medium!r}. Allowed: {allowed}"
+                )
+            if medium in seen_media:
+                raise ValueError(
+                    "Config fast_trading.minimum_cycle_seconds_by_medium defines "
+                    f"{medium} more than once."
+                )
+            seen_media.add(medium)
+            minimum_cycles[medium] = _positive_finite_number(
+                value,
+                f"fast_trading.minimum_cycle_seconds_by_medium.{medium}",
+            )
+
+    return {
+        "aggression_levels": aggression_levels,
+        "minimum_cycle_seconds_by_medium": minimum_cycles,
+    }
 
 
 def load_json_file(path: str) -> Any:
@@ -14,6 +144,8 @@ def load_json_file(path: str) -> Any:
 
 def load_config(config_path: str) -> Dict[str, Any]:
     cfg = load_json_file(config_path)
+    if not isinstance(cfg, dict):
+        raise ValueError("Config root must be an object.")
     config_dir = os.path.dirname(os.path.abspath(config_path))
 
     def _resolve_path(p: str) -> str:
@@ -77,6 +209,8 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cfg["market_data"]["historical_prices_csv"] = _resolve_path(
         str(cfg["market_data"]["historical_prices_csv"])
     )
+
+    cfg["fast_trading"] = _normalize_fast_trading_config(cfg.get("fast_trading"))
 
     cfg.setdefault("auth", {})
     cfg["auth"].setdefault("users", {})
@@ -213,4 +347,12 @@ def load_account_metas(cfg: Dict[str, Any]) -> Dict[str, AccountMeta]:
 
 
 def load_symbols(cfg: Dict[str, Any]) -> List[str]:
-    return [str(s) for s in cfg["symbols"]]
+    symbols: List[str] = []
+    seen = set()
+    for raw_symbol in cfg["symbols"]:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        symbols.append(symbol)
+        seen.add(symbol)
+    return symbols

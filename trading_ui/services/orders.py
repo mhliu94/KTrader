@@ -18,7 +18,10 @@ def safe_float(s: Optional[str]) -> Optional[float]:
     s = str(s).strip()
     if not s:
         return None
-    return float(s)
+    value = float(s)
+    if not math.isfinite(value):
+        raise ValueError("number must be finite")
+    return value
 
 
 def safe_int(s: Optional[str]) -> Optional[int]:
@@ -98,8 +101,14 @@ def validate_order_inputs(
     if side not in ("BUY", "SELL"):
         return None, invalid_side
 
-    shares = safe_int(shares_raw)
-    dollars = safe_float(dollars_raw)
+    try:
+        shares = safe_int(shares_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, shares_positive
+    try:
+        dollars = safe_float(dollars_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, dollars_positive
 
     if shares is not None and dollars is not None:
         return None, both_shares_and_dollars
@@ -137,13 +146,23 @@ def validate_quick_order_inputs(
     if side not in ("BUY", "SELL"):
         return None, invalid_side
 
-    dollars = safe_float(dollars_raw)
+    try:
+        dollars = safe_float(dollars_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, dollars_positive
     if dollars is None or dollars <= 0:
         return None, dollars_positive
-    if market_last is None or market_last <= 0:
+    try:
+        market_price = float(market_last) if market_last is not None else None
+    except (TypeError, ValueError, OverflowError):
+        market_price = None
+    if market_price is None or not math.isfinite(market_price) or market_price <= 0:
         return None, no_last_price
 
-    shares = int(math.floor(dollars / market_last))
+    share_estimate = dollars / market_price
+    if not math.isfinite(share_estimate):
+        return None, no_last_price
+    shares = int(math.floor(share_estimate))
     if shares <= 0:
         return None, dollars_too_low
 
@@ -218,28 +237,41 @@ def validate_limit_order_inputs(
     if side not in ("BUY", "SELL"):
         return None, invalid_side
 
-    shares = safe_int(shares_raw)
+    try:
+        shares = safe_int(shares_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, shares_positive
     if shares is None or shares <= 0:
         return None, shares_positive
 
-    limit_price = safe_float(limit_price_raw)
+    try:
+        limit_price = safe_float(limit_price_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, price_positive
     if limit_price is not None:
         if limit_price <= 0:
             return None, price_positive
         return build_limit_order_command(account_id, symbol, side, shares, limit_price, account_metas), None
 
-    through_market_pct = safe_float(through_market_pct_raw)
+    try:
+        through_market_pct = safe_float(through_market_pct_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, price_positive
     if through_market_pct is None or through_market_pct <= 0:
         return None, price_positive
-    if market_last is None or market_last <= 0:
+    try:
+        market_price = float(market_last) if market_last is not None else None
+    except (TypeError, ValueError, OverflowError):
+        market_price = None
+    if market_price is None or not math.isfinite(market_price) or market_price <= 0:
         return None, no_last_price
 
     if side == "BUY":
-        limit_price = market_last * (1.0 + through_market_pct / 100.0)
+        limit_price = market_price * (1.0 + through_market_pct / 100.0)
     else:
-        limit_price = market_last * (1.0 - through_market_pct / 100.0)
+        limit_price = market_price * (1.0 - through_market_pct / 100.0)
 
-    if limit_price <= 0:
+    if not math.isfinite(limit_price) or limit_price <= 0:
         return None, price_positive
 
     return build_limit_order_command(account_id, symbol, side, shares, round(limit_price, 4), account_metas), None
@@ -528,14 +560,16 @@ def validate_delayed_order_inputs(
 def build_algo_start_command(
     trading_mode: str,
     symbol: str,
-    max_volume: float,
-    market_volume_target: float,
-    end_time_et_iso: str,
-    abs_pos_change_limit: float,
-    price_target: float,
-    single_order_notional_limit: float,
-    order_rate_limit_per_minute: float,
-    fast_trading_groups: Optional[List[Dict]] = None,
+    max_volume: Optional[float],
+    market_volume_target: Optional[float],
+    end_time_et_iso: Optional[str],
+    abs_pos_change_limit: Optional[float],
+    price_target: Optional[float],
+    single_order_notional_limit: Optional[float],
+    order_rate_limit_per_minute: Optional[float],
+    fast_trading_price_limit: Optional[float] = None,
+    fast_trading_account_ids: Optional[List[str]] = None,
+    fast_trading_aggression_level: Optional[int] = None,
     fast_trading_test_mode: Optional[bool] = None,
 ) -> Dict:
     cmd_id = f"algo_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
@@ -545,18 +579,28 @@ def build_algo_start_command(
         "ts": iso_utc_now(),
         "trading_mode": trading_mode,
         "symbol": symbol,
-        "max_volume": max_volume,
-        "market_volume_target": market_volume_target,
-        "end_time_et": end_time_et_iso,
-        "abs_pos_change_limit": abs_pos_change_limit,
-        "price_target": price_target,
-        "single_order_notional_limit": single_order_notional_limit,
-        "order_rate_limit_per_minute": order_rate_limit_per_minute,
     }
-    if fast_trading_groups is not None:
-        cmd["fast_trading_groups"] = fast_trading_groups
-    if fast_trading_test_mode is not None:
-        cmd["fast_trading_test_mode"] = bool(fast_trading_test_mode)
+    if trading_mode in _FAST_MODES:
+        cmd.update(
+            {
+                "fast_trading_price_limit": fast_trading_price_limit,
+                "fast_trading_account_ids": list(fast_trading_account_ids or []),
+                "fast_trading_aggression_level": fast_trading_aggression_level,
+                "fast_trading_test_mode": bool(fast_trading_test_mode),
+            }
+        )
+    else:
+        cmd.update(
+            {
+                "max_volume": max_volume,
+                "market_volume_target": market_volume_target,
+                "end_time_et": end_time_et_iso,
+                "abs_pos_change_limit": abs_pos_change_limit,
+                "price_target": price_target,
+                "single_order_notional_limit": single_order_notional_limit,
+                "order_rate_limit_per_minute": order_rate_limit_per_minute,
+            }
+        )
     return cmd
 
 
@@ -589,85 +633,58 @@ def parse_fast_trading_config_payload(
     return fast_trading_config_raw, None
 
 
-def parse_fast_trading_groups(
+def parse_fast_trading_settings(
     fast_trading_config_raw: object,
     account_metas: Dict[str, AccountMeta],
     invalid_account: str,
     fast_config_required: str,
-    fast_group_required: str,
     fast_price_limit_positive: str,
-    fast_group_accounts_required: str,
+    fast_accounts_required: str,
     fast_account_duplicate: str,
-    fast_allocation_positive: str,
-    fast_allocation_total: str,
-) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    fast_aggression_level_invalid: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
     payload, err = parse_fast_trading_config_payload(fast_trading_config_raw, fast_config_required)
     if err:
         return None, err
 
-    if isinstance(payload, dict):
-        groups = payload.get("groups")
-    elif isinstance(payload, list):
-        groups = payload
-    else:
-        groups = None
-    if not isinstance(groups, list) or not groups:
-        return None, fast_group_required
+    if not isinstance(payload, dict):
+        return None, fast_config_required
 
-    normalized_groups: List[Dict] = []
-    used_accounts: set[str] = set()
+    try:
+        price_limit = safe_float(payload.get("price_limit"))
+    except (TypeError, ValueError, OverflowError):
+        price_limit = None
+    if price_limit is None or price_limit <= 0:
+        return None, fast_price_limit_positive
 
-    for idx, group in enumerate(groups, start=1):
-        if not isinstance(group, dict):
-            return None, fast_group_required
+    raw_account_ids = payload.get("account_ids")
+    if not isinstance(raw_account_ids, list) or not raw_account_ids:
+        return None, fast_accounts_required
 
-        price_limit = safe_float(group.get("price_limit"))
-        if price_limit is None or price_limit <= 0:
-            return None, fast_price_limit_positive.format(group=idx)
+    account_ids: List[str] = []
+    seen_accounts: set[str] = set()
+    for raw_account_id in raw_account_ids:
+        account_id = str(raw_account_id or "").strip()
+        if account_id not in account_metas:
+            return None, invalid_account
+        if account_id in seen_accounts:
+            return None, fast_account_duplicate.format(account=account_id)
+        seen_accounts.add(account_id)
+        account_ids.append(account_id)
 
-        accounts = group.get("accounts")
-        if not isinstance(accounts, list) or not accounts:
-            return None, fast_group_accounts_required.format(group=idx)
+    try:
+        aggression_level = safe_int(payload.get("aggression_level"))
+    except (TypeError, ValueError, OverflowError):
+        aggression_level = None
+    if aggression_level not in (1, 2, 3):
+        return None, fast_aggression_level_invalid
 
-        total_allocation = 0.0
-        normalized_accounts: List[Dict] = []
-        seen_in_group: set[str] = set()
-        for account in accounts:
-            if not isinstance(account, dict):
-                return None, fast_group_accounts_required.format(group=idx)
-
-            account_id = str(account.get("account_id") or "").strip()
-            if account_id not in account_metas:
-                return None, invalid_account
-            if account_id in used_accounts or account_id in seen_in_group:
-                return None, fast_account_duplicate.format(account=account_id)
-
-            allocation_pct = safe_float(account.get("allocation_pct"))
-            if allocation_pct is None or allocation_pct <= 0:
-                return None, fast_allocation_positive.format(group=idx)
-
-            seen_in_group.add(account_id)
-            total_allocation += allocation_pct
-            normalized_accounts.append(
-                {
-                    "account_id": account_id,
-                    "allocation_pct": round(float(allocation_pct), 6),
-                }
-            )
-
-        if total_allocation > 100.0 + 1e-9:
-            return None, fast_allocation_total.format(group=idx)
-
-        used_accounts.update(seen_in_group)
-        normalized_groups.append(
-            {
-                "group_id": idx,
-                "price_limit": float(price_limit),
-                "accounts": normalized_accounts,
-            }
-        )
-
-    return normalized_groups, None
+    return {
+        "price_limit": float(price_limit),
+        "account_ids": account_ids,
+        "aggression_level": aggression_level,
+        "test_mode": _truthy_bool(payload.get("test_mode")),
+    }, None
 
 
 def parse_fast_trading_test_mode(
@@ -702,24 +719,55 @@ def validate_algo_start_inputs(
     number_required: str,
     end_time_required: str,
     fast_config_required: str,
-    fast_group_required: str,
     fast_price_limit_positive: str,
-    fast_group_accounts_required: str,
+    fast_accounts_required: str,
     fast_account_duplicate: str,
-    fast_allocation_positive: str,
-    fast_allocation_total: str,
+    fast_aggression_level_invalid: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if trading_mode not in _ALLOWED_MODES:
         return None, invalid_mode
     if symbol not in symbols:
         return None, invalid_symbol
 
-    max_volume = safe_float(max_volume_raw)
-    mvt = safe_float(market_volume_target_raw)
-    abs_lim = safe_float(abs_pos_change_limit_raw)
-    price_target = safe_float(price_target_raw)
-    single_order_notional_limit = safe_float(single_order_notional_limit_raw)
-    order_rate_limit_per_minute = safe_float(order_rate_limit_per_minute_raw)
+    if trading_mode in _FAST_MODES:
+        fast_settings, err = parse_fast_trading_settings(
+            fast_trading_config_raw=fast_trading_config_raw,
+            account_metas=account_metas,
+            invalid_account=invalid_account,
+            fast_config_required=fast_config_required,
+            fast_price_limit_positive=fast_price_limit_positive,
+            fast_accounts_required=fast_accounts_required,
+            fast_account_duplicate=fast_account_duplicate,
+            fast_aggression_level_invalid=fast_aggression_level_invalid,
+        )
+        if err:
+            return None, err
+        assert fast_settings is not None
+        return build_algo_start_command(
+            trading_mode=trading_mode,
+            symbol=symbol,
+            max_volume=None,
+            market_volume_target=None,
+            end_time_et_iso=None,
+            abs_pos_change_limit=None,
+            price_target=None,
+            single_order_notional_limit=None,
+            order_rate_limit_per_minute=None,
+            fast_trading_price_limit=fast_settings["price_limit"],
+            fast_trading_account_ids=fast_settings["account_ids"],
+            fast_trading_aggression_level=fast_settings["aggression_level"],
+            fast_trading_test_mode=fast_settings["test_mode"],
+        ), None
+
+    try:
+        max_volume = safe_float(max_volume_raw)
+        mvt = safe_float(market_volume_target_raw)
+        abs_lim = safe_float(abs_pos_change_limit_raw)
+        price_target = safe_float(price_target_raw)
+        single_order_notional_limit = safe_float(single_order_notional_limit_raw)
+        order_rate_limit_per_minute = safe_float(order_rate_limit_per_minute_raw)
+    except (TypeError, ValueError, OverflowError):
+        return None, number_required
 
     if (
         max_volume is None
@@ -735,30 +783,6 @@ def validate_algo_start_inputs(
     if end_iso is None:
         return None, end_time_required
 
-    fast_trading_groups = None
-    fast_trading_test_mode = None
-    if trading_mode in _FAST_MODES:
-        fast_trading_groups, err = parse_fast_trading_groups(
-            fast_trading_config_raw=fast_trading_config_raw,
-            account_metas=account_metas,
-            invalid_account=invalid_account,
-            fast_config_required=fast_config_required,
-            fast_group_required=fast_group_required,
-            fast_price_limit_positive=fast_price_limit_positive,
-            fast_group_accounts_required=fast_group_accounts_required,
-            fast_account_duplicate=fast_account_duplicate,
-            fast_allocation_positive=fast_allocation_positive,
-            fast_allocation_total=fast_allocation_total,
-        )
-        if err:
-            return None, err
-        fast_trading_test_mode, err = parse_fast_trading_test_mode(
-            fast_trading_config_raw=fast_trading_config_raw,
-            fast_config_required=fast_config_required,
-        )
-        if err:
-            return None, err
-
     cmd = build_algo_start_command(
         trading_mode=trading_mode,
         symbol=symbol,
@@ -769,8 +793,6 @@ def validate_algo_start_inputs(
         price_target=price_target,
         single_order_notional_limit=single_order_notional_limit,
         order_rate_limit_per_minute=order_rate_limit_per_minute,
-        fast_trading_groups=fast_trading_groups,
-        fast_trading_test_mode=fast_trading_test_mode,
     )
     return cmd, None
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import heapq
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -453,6 +454,14 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def finite_float_or_none(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def first_item(value: Any) -> Any:
     if value is None:
         return None
@@ -770,13 +779,14 @@ class TigerBroker:
         if self._trade_client is None:
             raise RuntimeError("Tiger account reporting requires Tiger client credentials")
 
-        cash_by_currency = self._query_cash_by_currency(real_account)
+        cash_by_currency, available_cash_by_currency = self._query_cash_maps(real_account)
         usd_cash = cash_by_currency.get("USD", 0.0)
         return {
             "account_id": ui_account,
             "account_num_id": self.account_num_map.get(ui_account),
             "cash": usd_cash,
             "cash_by_currency": cash_by_currency,
+            "available_cash_by_currency": available_cash_by_currency,
             "positions": self._query_positions(real_account),
             "ts": utc_now_iso(),
             "trading_enabled": self.is_trading_enabled(ui_account),
@@ -786,12 +796,19 @@ class TigerBroker:
         return self._query_cash(account, self.currency)
 
     def _query_cash_by_currency(self, account: str) -> Dict[str, float]:
+        cash_by_currency, _ = self._query_cash_maps(account)
+        return cash_by_currency
+
+    def _query_cash_maps(self, account: str) -> Tuple[Dict[str, float], Dict[str, float]]:
         assert self._trade_client is not None
 
         cash_by_currency: Dict[str, float] = {}
+        available_cash_by_currency: Dict[str, float] = {}
         try:
             assets = self._trade_client.get_prime_assets(account=account, base_currency="USD")
-            cash_by_currency.update(self._cash_by_currency_from_prime_assets(first_item(assets)))
+            balances, available = self._cash_maps_from_prime_assets(first_item(assets))
+            cash_by_currency.update(balances)
+            available_cash_by_currency.update(available)
         except Exception:
             LOGGER.debug("Tiger get_prime_assets failed while querying cash map account=%s", account, exc_info=True)
 
@@ -800,40 +817,60 @@ class TigerBroker:
             if not currency or currency in cash_by_currency:
                 continue
             try:
-                cash_by_currency[currency] = self._query_cash(account, currency)
+                balance, available = self._query_cash_pair(account, currency)
+                cash_by_currency[currency] = balance
+                available_cash_by_currency[currency] = available
             except Exception:
                 LOGGER.debug("Tiger cash query failed account=%s currency=%s", account, currency, exc_info=True)
 
         if not cash_by_currency:
             raise RuntimeError("Unable to find cash balances in Tiger assets for account=%s" % account)
 
-        return dict(sorted(cash_by_currency.items()))
+        available_cash_by_currency = {
+            currency: available_cash_by_currency.get(currency, balance)
+            for currency, balance in cash_by_currency.items()
+        }
+
+        return (
+            dict(sorted(cash_by_currency.items())),
+            dict(sorted(available_cash_by_currency.items())),
+        )
 
     def _query_cash(self, account: str, currency: str) -> float:
+        balance, _ = self._query_cash_pair(account, currency)
+        return balance
+
+    def _query_cash_pair(self, account: str, currency: str) -> Tuple[float, float]:
         assert self._trade_client is not None
         currency = str(currency or "").strip().upper()
         if not currency:
             raise RuntimeError("Currency is required for Tiger cash query")
 
+        prime_available: Optional[float] = None
         try:
             assets = self._trade_client.get_prime_assets(account=account, base_currency=currency)
-            cash = self._cash_from_prime_assets(first_item(assets), currency)
-            if cash is not None:
-                return cash
+            balance, available = self._cash_pair_from_prime_assets(first_item(assets), currency)
+            prime_available = available
+            if balance is not None:
+                return balance, available if available is not None else balance
         except Exception:
             LOGGER.debug("Tiger get_prime_assets failed for account=%s currency=%s", account, currency, exc_info=True)
 
         assets = self._trade_client.get_assets(account=account, market_value=True)
         cash = self._cash_from_global_assets(first_item(assets), currency)
         if cash is not None:
-            return cash
+            return cash, prime_available if prime_available is not None else cash
         raise RuntimeError("Unable to find %s cash in Tiger assets for account=%s" % (currency, account))
 
-    def _cash_by_currency_from_prime_assets(self, portfolio: Any) -> Dict[str, float]:
+    def _cash_maps_from_prime_assets(
+        self,
+        portfolio: Any,
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
         if portfolio is None:
-            return {}
+            return {}, {}
 
-        out: Dict[str, float] = {}
+        balances: Dict[str, float] = {}
+        available: Dict[str, float] = {}
         segments = pick_first_attr(portfolio, ("segments",), {}) or {}
         security_segment = segments.get("S") if isinstance(segments, dict) else None
         if security_segment is None:
@@ -845,27 +882,55 @@ class TigerBroker:
                 currency = str(raw_currency or "").strip().upper()
                 if not currency:
                     continue
-                cash = pick_first_attr(currency_asset, ("cash_balance", "cash_available_for_trade"), None)
-                if cash is not None:
-                    out[currency] = as_float(cash)
-        return out
+                balance = finite_float_or_none(
+                    pick_first_attr(currency_asset, ("cash_balance",), None)
+                )
+                cash_available = finite_float_or_none(
+                    pick_first_attr(currency_asset, ("cash_available_for_trade",), None)
+                )
+                if cash_available is None:
+                    cash_available = balance
+                if balance is not None:
+                    balances[currency] = balance
+                if cash_available is not None:
+                    available[currency] = cash_available
+        return balances, available
+
+    def _cash_by_currency_from_prime_assets(self, portfolio: Any) -> Dict[str, float]:
+        balances, _ = self._cash_maps_from_prime_assets(portfolio)
+        return balances
 
     def _cash_from_prime_assets(self, portfolio: Any, currency: str) -> Optional[float]:
+        balance, _ = self._cash_pair_from_prime_assets(portfolio, currency)
+        return balance
+
+    def _cash_pair_from_prime_assets(
+        self,
+        portfolio: Any,
+        currency: str,
+    ) -> Tuple[Optional[float], Optional[float]]:
         if portfolio is None:
-            return None
+            return None, None
 
         currency = str(currency or "").strip().upper()
-        cash_by_currency = self._cash_by_currency_from_prime_assets(portfolio)
-        if currency in cash_by_currency:
-            return cash_by_currency[currency]
+        balances, available = self._cash_maps_from_prime_assets(portfolio)
+        if currency in balances:
+            return balances[currency], available.get(currency, balances[currency])
 
         segments = pick_first_attr(portfolio, ("segments",), {}) or {}
         security_segment = segments.get("S") if isinstance(segments, dict) else None
         if security_segment is None:
             security_segment = pick_first_attr(portfolio, ("summary",), None)
 
-        cash = pick_first_attr(security_segment, ("cash_balance", "cash_available_for_trade"), None)
-        return as_float(cash) if cash is not None else None
+        balance = finite_float_or_none(
+            pick_first_attr(security_segment, ("cash_balance",), None)
+        )
+        cash_available = finite_float_or_none(
+            pick_first_attr(security_segment, ("cash_available_for_trade",), None)
+        )
+        if cash_available is None:
+            cash_available = balance
+        return balance, cash_available
 
     def _cash_from_global_assets(self, portfolio: Any, currency: str) -> Optional[float]:
         if portfolio is None:
@@ -877,11 +942,13 @@ class TigerBroker:
         if market_value is not None:
             cash = pick_first_attr(market_value, ("cash_balance",), None)
             if cash is not None:
-                return as_float(cash)
+                parsed_cash = finite_float_or_none(cash)
+                if parsed_cash is not None:
+                    return parsed_cash
 
         summary = pick_first_attr(portfolio, ("summary",), portfolio)
         cash = pick_first_attr(summary, ("cash", "cash_balance", "available_funds"), None)
-        return as_float(cash) if cash is not None else None
+        return finite_float_or_none(cash) if cash is not None else None
 
     def _query_positions(self, account: str) -> List[Dict[str, Any]]:
         assert self._trade_client is not None
@@ -893,16 +960,25 @@ class TigerBroker:
             if not symbol:
                 continue
 
-            qty = as_float(pick_first_attr(position, ("position_qty", "quantity", "qty"), 0.0))
+            qty = finite_float_or_none(
+                pick_first_attr(position, ("position_qty", "quantity", "qty"), 0.0)
+            )
+            qty = qty if qty is not None else 0.0
             if qty == 0.0:
                 continue
 
             avg_price = pick_first_attr(position, ("average_cost", "average_cost_by_average", "avg_price"), None)
+            available_qty = finite_float_or_none(
+                pick_first_attr(position, ("salable_qty", "salable", "saleable"), None)
+            )
+            if available_qty is None:
+                available_qty = qty
             positions.append(
                 {
                     "symbol": str(symbol).strip().upper(),
                     "qty": qty,
-                    "avg_price": as_float(avg_price, None) if avg_price is not None else None,
+                    "avg_price": finite_float_or_none(avg_price),
+                    "available_qty": available_qty,
                 }
             )
 

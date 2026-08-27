@@ -1,4 +1,5 @@
 import json
+import math
 from typing import Any, Dict, Optional
 
 from ..models import AccountSnapshot, Position
@@ -15,6 +16,14 @@ def parse_bool(value: Any) -> bool:
 def load_json_file(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def finite_float_or_none(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def parse_snapshot_obj(obj: Dict[str, Any]) -> Optional[AccountSnapshot]:
@@ -35,6 +44,16 @@ def parse_snapshot_obj(obj: Dict[str, Any]) -> Optional[AccountSnapshot]:
                 cash_by_currency[currency] = float(raw_amount or 0.0)
         if "USD" not in cash_by_currency:
             cash_by_currency["USD"] = cash
+        raw_available_cash = obj.get("available_cash_by_currency", {}) or {}
+        available_cash_by_currency: Dict[str, float] = {}
+        if isinstance(raw_available_cash, dict):
+            for raw_currency, raw_amount in raw_available_cash.items():
+                currency = str(raw_currency or "").strip().upper()
+                if not currency:
+                    continue
+                amount = finite_float_or_none(raw_amount)
+                if amount is not None:
+                    available_cash_by_currency[currency] = amount
         ts = obj.get("ts")
         trading_enabled = parse_bool(obj.get("trading_enabled", False))
 
@@ -45,13 +64,25 @@ def parse_snapshot_obj(obj: Dict[str, Any]) -> Optional[AccountSnapshot]:
             qty = float(p.get("qty", 0.0))
             avg_price = p.get("avg_price", None)
             avg_price = float(avg_price) if avg_price is not None else None
-            positions.append(Position(symbol=symbol, qty=qty, avg_price=avg_price))
+            raw_available_qty = p.get("available_qty")
+            if raw_available_qty is None:
+                raw_available_qty = p.get("salable_qty")
+            available_qty = finite_float_or_none(raw_available_qty)
+            positions.append(
+                Position(
+                    symbol=symbol,
+                    qty=qty,
+                    avg_price=avg_price,
+                    available_qty=available_qty,
+                )
+            )
 
         return AccountSnapshot(
             account_id=account_id,
             cash=cash,
             account_num_id=account_num_id,
             cash_by_currency=cash_by_currency,
+            available_cash_by_currency=available_cash_by_currency,
             positions=positions,
             ts=ts,
             trading_enabled=trading_enabled,

@@ -34,6 +34,19 @@
     "historical_prices_csv": "../../market_data/historical_prices.csv",
     "market_insights_max_levels": 20
   },
+  "fast_trading": {
+    "aggression_levels": {
+      "1": { "book_levels": 2, "cycle_seconds": 30 },
+      "2": { "book_levels": 3, "cycle_seconds": 20 },
+      "3": { "book_levels": 5, "cycle_seconds": 10 }
+    },
+    "minimum_cycle_seconds_by_medium": {
+      "API": 3,
+      "WEB": 30,
+      "WINDOWS": 40,
+      "EMULATOR": 40
+    }
+  },
   "fallback": {
     "file": "/home/ubuntu/test-binaries/trading_ui/sample/account_fallback.json"
   }

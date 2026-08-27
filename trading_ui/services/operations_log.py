@@ -162,6 +162,13 @@ class OperationsLog:
         }
         if "fast_trading_test_mode" in command:
             out["fast_trading_test_mode"] = bool(command.get("fast_trading_test_mode"))
+        for field_name in (
+            "fast_trading_price_limit",
+            "fast_trading_account_ids",
+            "fast_trading_aggression_level",
+        ):
+            if field_name in command:
+                out[field_name] = command.get(field_name)
         return out
 
     def _holdings(self) -> Dict[str, Any]:
@@ -206,6 +213,7 @@ class OperationsLog:
             {
                 "symbol": position.symbol,
                 "qty": position.qty,
+                "available_qty": position.available_qty,
                 "avg_price": position.avg_price,
             }
             for position in sorted(snapshot.positions, key=lambda pos: str(pos.symbol))
@@ -215,6 +223,9 @@ class OperationsLog:
             "account_num_id": snapshot.account_num_id,
             "cash": snapshot.cash,
             "cash_by_currency": dict(sorted(snapshot.cash_by_currency.items())),
+            "available_cash_by_currency": dict(
+                sorted(snapshot.available_cash_by_currency.items())
+            ),
             "securities": securities,
             "ts": snapshot.ts,
             "trading_enabled": snapshot.trading_enabled,

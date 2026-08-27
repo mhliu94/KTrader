@@ -1,12 +1,14 @@
-import os
+import asyncio
+import json
 import logging
+import os
 import secrets
 from datetime import datetime, timezone
 from hmac import compare_digest
-from typing import Dict, Tuple
+from typing import AsyncIterator, Dict, Tuple
 
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 from urllib.parse import quote
 from .app_logging import configure_logging
@@ -23,6 +25,7 @@ from .templates import (
     render_account_details_page,
     render_control_panel_page,
     render_currency_conversion_page,
+    render_live_account_details_page,
     render_login_page,
     resolve_account_sort,
     render_trading_status_page,
@@ -76,12 +79,108 @@ def _filter_configured_snapshots(accounts: Dict[str, AccountSnapshot]) -> Dict[s
     return {account_id: snap for account_id, snap in accounts.items() if account_id in ACCOUNT_METAS}
 
 
+def _normalized_configured_symbols() -> list[str]:
+    symbols = []
+    seen = set()
+    for raw_symbol in SYMBOLS:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        symbols.append(symbol)
+        seen.add(symbol)
+    return symbols
+
+
+def _extract_fast_trading_config(body: Dict) -> object:
+    raw_config = body.get("fast_trading_config")
+    if raw_config is not None and not isinstance(raw_config, dict):
+        return raw_config
+
+    config = dict(raw_config or {})
+    aliases = {
+        "price_limit": ("fast_trading_price_limit", "price_limit"),
+        "account_ids": ("fast_trading_account_ids", "account_ids"),
+        "aggression_level": ("fast_trading_aggression_level", "aggression_level"),
+        "test_mode": ("fast_trading_test_mode", "test_mode"),
+    }
+    found_alias = False
+    for config_key, candidates in aliases.items():
+        if config_key in config:
+            continue
+        for candidate in candidates:
+            if candidate in body:
+                config[config_key] = body[candidate]
+                found_alias = True
+                break
+    if raw_config is None and not found_alias:
+        return None
+    return config
+
+
 def get_served_snapshots() -> Tuple[Dict, str]:
     if store.kafka_seen_any():
         return _filter_configured_snapshots(store.get_all()), "kafka"
     fallback_path = APP_CONFIG["fallback"]["file"]
     snaps = load_fallback_snapshots(fallback_path)
     return _filter_configured_snapshots(snaps), f"fallback_file:{fallback_path}"
+
+
+def _render_account_details_content(lang: str, account_sort: str, security: str) -> str:
+    accounts, src = get_served_snapshots()
+    return render_account_details_page(
+        lang=lang,
+        store=store,
+        accounts=accounts,
+        source_label=src,
+        account_metas=ACCOUNT_METAS,
+        account_details_topic=APP_CONFIG["kafka"]["account_details_topic"],
+        symbols=_normalized_configured_symbols(),
+        account_sort=account_sort,
+        security=security,
+    )
+
+
+def _account_details_sse_event(lang: str, account_sort: str, security: str, version: int) -> str:
+    payload = json.dumps(
+        {"html": _render_account_details_content(lang, account_sort, security)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"id: {version}\ndata: {payload}\n\n"
+
+
+async def _account_details_event_stream(
+    lang: str,
+    account_sort: str,
+    security: str,
+    request: Request | None = None,
+) -> AsyncIterator[str]:
+    token, version, updates = store.subscribe_updates()
+    try:
+        if request is not None and (
+            _current_user(request) is None or await request.is_disconnected()
+        ):
+            return
+        yield _account_details_sse_event(lang, account_sort, security, version)
+        while True:
+            try:
+                next_version = await asyncio.wait_for(updates.get(), timeout=15.0)
+            except TimeoutError:
+                if request is not None and (
+                    _current_user(request) is None or await request.is_disconnected()
+                ):
+                    return
+                yield ": keep-alive\n\n"
+                continue
+
+            if request is not None and (
+                _current_user(request) is None or await request.is_disconnected()
+            ):
+                return
+            version = next_version
+            yield _account_details_sse_event(lang, account_sort, security, version)
+    finally:
+        store.unsubscribe_updates(token)
 
 
 def _build_next_path(request: Request) -> str:
@@ -169,6 +268,7 @@ def on_startup() -> None:
         account_snapshots_provider=lambda: get_served_snapshots()[0],
         operations_log=OPERATIONS_LOG,
         publish_command=_publish_fast_trading_command,
+        fast_trading_settings=APP_CONFIG.get("fast_trading"),
     )
 
 
@@ -251,23 +351,14 @@ def account_details(
     lang = resolve_lang(request)
     preferred_sort = sort_by if sort_by is not None else request.cookies.get(ACCOUNT_SORT_COOKIE)
     preferred_security = security if security is not None else request.cookies.get(ACCOUNT_SECURITY_COOKIE)
+    configured_symbols = _normalized_configured_symbols()
     effective_sort, selected_security, _ = resolve_account_sort(
-        SYMBOLS,
+        configured_symbols,
         preferred_sort or ACCOUNT_SORT_NUMERIC_ID,
         preferred_security,
     )
-    accounts, src = get_served_snapshots()
-    inner = render_account_details_page(
-        lang=lang,
-        store=store,
-        accounts=accounts,
-        source_label=src,
-        account_metas=ACCOUNT_METAS,
-        account_details_topic=APP_CONFIG["kafka"]["account_details_topic"],
-        symbols=SYMBOLS,
-        account_sort=effective_sort,
-        security=selected_security,
-    )
+    account_content = _render_account_details_content(lang, effective_sort, selected_security)
+    inner = render_live_account_details_page(account_content, lang=lang, symbols=configured_symbols)
     response = HTMLResponse(render_layout(lang, "account-details", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
     secure_cookie = bool(APP_CONFIG.get("server", {}).get("ssl_enabled", False))
     response.set_cookie(
@@ -295,7 +386,13 @@ def control_panel(request: Request, ok: str | None = None, err: str | None = Non
     if gate is not None:
         return gate
     lang = resolve_lang(request)
-    inner = render_control_panel_page(lang, ACCOUNT_METAS, SYMBOLS, error=(err or ""), ok=(ok or ""))
+    inner = render_control_panel_page(
+        lang,
+        ACCOUNT_METAS,
+        _normalized_configured_symbols(),
+        error=(err or ""),
+        ok=(ok or ""),
+    )
     return HTMLResponse(render_layout(lang, "control-panel", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
 
 
@@ -696,7 +793,7 @@ def submit_algo(
     market_volume_target: str | None = Form("-1"),
     end_time_et: str | None = Form("2099-12-31T00:00"),
     abs_pos_change_limit: str | None = Form("-1"),
-    price_target: str | None = Form(...),
+    price_target: str | None = Form(None),
     single_order_notional_limit: str | None = Form("-1"),
     order_rate_limit_per_minute: str | None = Form("-1"),
     fast_trading_config: str | None = Form(None),
@@ -725,12 +822,10 @@ def submit_algo(
         number_required=t(lang, "number_required"),
         end_time_required=t(lang, "end_time_required"),
         fast_config_required=t(lang, "fast_config_required"),
-        fast_group_required=t(lang, "fast_group_required"),
         fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
-        fast_group_accounts_required=t(lang, "fast_group_accounts_required"),
+        fast_accounts_required=t(lang, "fast_accounts_required"),
         fast_account_duplicate=t(lang, "fast_account_duplicate"),
-        fast_allocation_positive=t(lang, "fast_allocation_positive"),
-        fast_allocation_total=t(lang, "fast_allocation_total"),
+        fast_aggression_level_invalid=t(lang, "fast_aggression_level_invalid"),
     )
 
     if err:
@@ -753,6 +848,171 @@ def submit_algo(
 # ---------------------------
 # APIs
 # ---------------------------
+
+@app.get("/api/account-details/stream")
+def api_account_details_stream(request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    lang = resolve_lang(request)
+    effective_sort, selected_security, _ = resolve_account_sort(
+        _normalized_configured_symbols(),
+        request.cookies.get(ACCOUNT_SORT_COOKIE) or ACCOUNT_SORT_NUMERIC_ID,
+        request.cookies.get(ACCOUNT_SECURITY_COOKIE),
+    )
+    return StreamingResponse(
+        _account_details_event_stream(lang, effective_sort, selected_security, request=request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/account-orders/quick-market")
+async def api_submit_account_quick_order(request: Request) -> JSONResponse:
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    lang = resolve_lang(request)
+    form = await request.form()
+
+    account_ids = [str(value) for value in form.getlist("account_id")]
+    if len(account_ids) != 1:
+        return JSONResponse(
+            {"ok": False, "error": t(lang, "invalid_account")},
+            status_code=400,
+        )
+
+    account_id = account_ids[0]
+    configured_symbols = _normalized_configured_symbols()
+    symbol = str(form.get("symbol", "")).strip().upper()
+    side = str(form.get("side", "BUY"))
+    dollars_raw = str(form.get("dollar_amount", "") or "").strip() or "10000"
+
+    market_last = None
+    quote_row = MD_STORE.get_for_symbols([symbol]).get(symbol)
+    if quote_row is not None and quote_row.error is None:
+        market_last = quote_row.last
+
+    try:
+        cmd, err = validate_quick_order_inputs(
+            account_id=account_id,
+            symbol=symbol,
+            side=side,
+            dollars_raw=dollars_raw,
+            market_last=market_last,
+            account_metas=ACCOUNT_METAS,
+            symbols=configured_symbols,
+            invalid_account=t(lang, "invalid_account"),
+            invalid_symbol=t(lang, "invalid_symbol"),
+            invalid_side=t(lang, "invalid_side"),
+            dollars_positive=t(lang, "dollars_positive"),
+            no_last_price=t(lang, "quick_no_last_price"),
+            dollars_too_low=t(lang, "quick_dollars_too_low"),
+        )
+    except (TypeError, ValueError, OverflowError):
+        cmd, err = None, t(lang, "dollars_positive")
+
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    if COMMANDS_PRODUCER is None or cmd is None:
+        return JSONResponse(
+            {"ok": False, "error": t(lang, "publish_failed")},
+            status_code=503,
+        )
+
+    try:
+        COMMANDS_PRODUCER.publish_order(cmd, key=account_id)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc) or t(lang, "publish_failed")},
+            status_code=500,
+        )
+
+    command_id = str(cmd.get("command_id", ""))
+    message = f"{t(lang, 'order_submitted')}. {t(lang, 'published_cmd')}={command_id}"
+    return JSONResponse(
+        {"ok": True, "message": message, "command_id": command_id},
+        status_code=200,
+    )
+
+
+@app.post("/api/account-orders/limit")
+async def api_submit_account_limit_order(request: Request) -> JSONResponse:
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    lang = resolve_lang(request)
+    form = await request.form()
+
+    account_ids = [str(value) for value in form.getlist("account_id")]
+    if len(account_ids) != 1:
+        return JSONResponse(
+            {"ok": False, "error": t(lang, "invalid_account")},
+            status_code=400,
+        )
+
+    account_id = account_ids[0]
+    configured_symbols = _normalized_configured_symbols()
+    symbol = str(form.get("symbol", "")).strip().upper()
+    side = str(form.get("side", "BUY"))
+    shares_raw = str(form.get("shares", "") or "").strip()
+    limit_price_raw = str(form.get("limit_price", "") or "").strip()
+    through_market_pct_raw = str(form.get("through_market_pct", "") or "").strip()
+
+    market_last = None
+    if not limit_price_raw:
+        quote_row = MD_STORE.get_for_symbols([symbol]).get(symbol)
+        if quote_row is not None and quote_row.error is None:
+            market_last = quote_row.last
+
+    try:
+        cmd, err = validate_limit_order_inputs(
+            account_id=account_id,
+            symbol=symbol,
+            side=side,
+            shares_raw=shares_raw,
+            limit_price_raw=limit_price_raw,
+            through_market_pct_raw=through_market_pct_raw,
+            market_last=market_last,
+            account_metas=ACCOUNT_METAS,
+            symbols=configured_symbols,
+            invalid_account=t(lang, "invalid_account"),
+            invalid_symbol=t(lang, "invalid_symbol"),
+            invalid_side=t(lang, "invalid_side"),
+            shares_positive=t(lang, "shares_positive"),
+            price_positive=t(lang, "price_positive"),
+            no_last_price=t(lang, "no_last_price"),
+        )
+    except (TypeError, ValueError, OverflowError):
+        cmd, err = None, t(lang, "price_positive")
+
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    if COMMANDS_PRODUCER is None or cmd is None:
+        return JSONResponse(
+            {"ok": False, "error": t(lang, "publish_failed")},
+            status_code=503,
+        )
+
+    try:
+        COMMANDS_PRODUCER.publish_order(cmd, key=account_id)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc) or t(lang, "publish_failed")},
+            status_code=500,
+        )
+
+    command_id = str(cmd.get("command_id", ""))
+    message = f"{t(lang, 'order_submitted')}. {t(lang, 'published_cmd')}={command_id}"
+    return JSONResponse(
+        {"ok": True, "message": message, "command_id": command_id},
+        status_code=200,
+    )
+
 
 @app.get("/api/accounts")
 def api_accounts(request: Request) -> JSONResponse:
@@ -902,15 +1162,7 @@ async def api_submit_algo(request: Request) -> JSONResponse:
     price_target_raw = None if body.get("price_target") is None else str(body.get("price_target"))
     single_order_notional_limit_raw = None if body.get("single_order_notional_limit") is None else str(body.get("single_order_notional_limit"))
     order_rate_limit_per_minute_raw = None if body.get("order_rate_limit_per_minute") is None else str(body.get("order_rate_limit_per_minute"))
-    fast_trading_config_raw = body.get("fast_trading_config")
-    if fast_trading_config_raw is None:
-        fast_trading_config_raw = body.get("fast_trading_groups")
-        if fast_trading_config_raw is not None and not isinstance(fast_trading_config_raw, dict):
-            fast_trading_config_raw = {"groups": fast_trading_config_raw}
-        if isinstance(fast_trading_config_raw, dict):
-            raw_test_mode = body.get("fast_trading_test_mode", body.get("test_mode"))
-            if raw_test_mode is not None:
-                fast_trading_config_raw = {**fast_trading_config_raw, "test_mode": raw_test_mode}
+    fast_trading_config_raw = _extract_fast_trading_config(body)
 
     cmd, err = validate_algo_start_inputs(
         trading_mode=trading_mode,
@@ -931,12 +1183,10 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         number_required=t(lang, "number_required"),
         end_time_required=t(lang, "end_time_required"),
         fast_config_required=t(lang, "fast_config_required"),
-        fast_group_required=t(lang, "fast_group_required"),
         fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
-        fast_group_accounts_required=t(lang, "fast_group_accounts_required"),
+        fast_accounts_required=t(lang, "fast_accounts_required"),
         fast_account_duplicate=t(lang, "fast_account_duplicate"),
-        fast_allocation_positive=t(lang, "fast_allocation_positive"),
-        fast_allocation_total=t(lang, "fast_allocation_total"),
+        fast_aggression_level_invalid=t(lang, "fast_aggression_level_invalid"),
     )
 
     if err:
@@ -987,8 +1237,8 @@ async def submit_algo_stop(
         if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES and FAST_TRADING_MANAGER:
             stopped_count = FAST_TRADING_MANAGER.stop_matching(
                 trading_mode=str(cmd.get("trading_mode") or ""),
+                account_ids=cmd.get("account_ids"),
             )
-            cmd.pop("account_ids", None)
         COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("trading_mode", "ALGO_STOP"))
         stopped_suffix = f" stopped={stopped_count}" if stopped_count else ""
         ok = f"{t(lang,'published_cmd')}={cmd['command_id']}{stopped_suffix}"
@@ -1044,7 +1294,7 @@ def market_data(request: Request) -> HTMLResponse:
     if gate is not None:
         return gate
     lang = resolve_lang(request)
-    inner = render_market_data_page(lang=lang, symbols=SYMBOLS)
+    inner = render_market_data_page(lang=lang, symbols=_normalized_configured_symbols())
     return HTMLResponse(render_layout(lang, "market-data", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
 
 
@@ -1055,7 +1305,11 @@ def market_insights(request: Request) -> HTMLResponse:
         return gate
     lang = resolve_lang(request)
     max_levels = int(APP_CONFIG.get("market_data", {}).get("market_insights_max_levels", 20))
-    inner = render_market_insights_page(lang=lang, symbols=SYMBOLS, max_levels=max_levels)
+    inner = render_market_insights_page(
+        lang=lang,
+        symbols=_normalized_configured_symbols(),
+        max_levels=max_levels,
+    )
     return HTMLResponse(render_layout(lang, "market-insights", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
 
 
@@ -1064,7 +1318,7 @@ async def api_market_data(request: Request) -> JSONResponse:
     user, gate = _require_auth_api(request)
     if gate is not None:
         return gate
-    rows = MD_STORE.get_for_symbols(SYMBOLS)
+    rows = MD_STORE.get_for_symbols(_normalized_configured_symbols())
     enriched_rows: Dict[str, QuoteRow] = {}
     for symbol, row in rows.items():
         prev_close = HIST_CLOSE_STORE.get_prev_close(symbol)

@@ -1,7 +1,7 @@
 import json
 import math
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, Optional, Tuple, List
 
@@ -437,124 +437,6 @@ def _parse_datetime_local_to_us_eastern_iso(dt_local: str) -> Optional[str]:
         return dt.isoformat()
     except Exception:
         return None
-
-
-def _parse_datetime_local_to_us_eastern(dt_local: str) -> Optional[datetime]:
-    s = (dt_local or "").strip()
-    if not s:
-        return None
-    try:
-        if len(s) == 16:
-            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M")
-        else:
-            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
-        return dt.replace(tzinfo=_US_EASTERN)
-    except Exception:
-        return None
-
-
-def build_delayed_market_order_command(
-    account_id: str,
-    symbol: str,
-    side: str,
-    shares: Optional[int],
-    dollar_amount: Optional[float],
-    account_metas: Dict[str, AccountMeta],
-    execute_at_iso: str,
-    delay_seconds: int,
-) -> Dict:
-    cmd = build_market_order_command(
-        account_id=account_id,
-        symbol=symbol,
-        side=side,
-        shares=shares,
-        dollar_amount=dollar_amount,
-        account_metas=account_metas,
-    )
-    cmd["type"] = "DELAYED_MARKET_ORDER"
-    cmd["execute_at"] = execute_at_iso
-    cmd["delay_seconds"] = delay_seconds
-    return cmd
-
-
-def validate_delayed_order_inputs(
-    account_id: str,
-    symbol: str,
-    side: str,
-    shares_raw: Optional[str],
-    dollars_raw: Optional[str],
-    delay_choice_raw: Optional[str],
-    execute_at_raw: Optional[str],
-    account_metas: Dict[str, AccountMeta],
-    symbols: List[str],
-    invalid_account: str,
-    invalid_symbol: str,
-    invalid_side: str,
-    both_shares_and_dollars: str,
-    neither_shares_nor_dollars: str,
-    shares_positive: str,
-    dollars_positive: str,
-    invalid_delay_choice: str,
-    future_time_required: str,
-    future_time_must_be_future: str,
-) -> Tuple[Optional[Dict], Optional[str]]:
-    base_cmd, err = validate_order_inputs(
-        account_id=account_id,
-        symbol=symbol,
-        side=side,
-        shares_raw=shares_raw,
-        dollars_raw=dollars_raw,
-        account_metas=account_metas,
-        symbols=symbols,
-        invalid_account=invalid_account,
-        invalid_symbol=invalid_symbol,
-        invalid_side=invalid_side,
-        both_shares_and_dollars=both_shares_and_dollars,
-        neither_shares_nor_dollars=neither_shares_nor_dollars,
-        shares_positive=shares_positive,
-        dollars_positive=dollars_positive,
-    )
-    if err:
-        return None, err
-
-    delay_choice = str(delay_choice_raw or "").strip().lower()
-    preset_delays = {
-        "1": 60,
-        "2": 120,
-        "5": 300,
-        "10": 600,
-    }
-
-    execute_at: Optional[datetime] = None
-    delay_seconds: Optional[int] = None
-    now_utc = datetime.now(timezone.utc)
-
-    if delay_choice in preset_delays:
-        delay_seconds = preset_delays[delay_choice]
-        execute_at = now_utc + timedelta(seconds=delay_seconds)
-    elif delay_choice == "custom":
-        execute_at_local = _parse_datetime_local_to_us_eastern(execute_at_raw or "")
-        if execute_at_local is None:
-            return None, future_time_required
-        execute_at = execute_at_local.astimezone(timezone.utc)
-        delay_seconds = int((execute_at - now_utc).total_seconds())
-        if delay_seconds <= 0:
-            return None, future_time_must_be_future
-    else:
-        return None, invalid_delay_choice
-
-    assert base_cmd is not None
-    cmd = build_delayed_market_order_command(
-        account_id=account_id,
-        symbol=symbol,
-        side=side,
-        shares=base_cmd.get("qty_shares"),
-        dollar_amount=base_cmd.get("notional_usd"),
-        account_metas=account_metas,
-        execute_at_iso=execute_at.isoformat().replace("+00:00", "Z"),
-        delay_seconds=delay_seconds,
-    )
-    return cmd, None
 
 
 def build_algo_start_command(

@@ -35,7 +35,6 @@ from .services.operations_log import OperationsLog
 from .services.orders import (
     validate_order_inputs,
     validate_quick_order_inputs,
-    validate_delayed_order_inputs,
     validate_limit_order_inputs,
     validate_cancel_open_orders_inputs,
     validate_algo_start_inputs,
@@ -730,56 +729,6 @@ async def submit_trading_status(request: Request):
     return RedirectResponse(url=f"/trading-status?ok={quote(ok)}", status_code=303)
 
 
-@app.post("/submit-delayed-order")
-def submit_delayed_order(
-    request: Request,
-    account_id: str = Form(...),
-    symbol: str = Form(...),
-    side: str = Form("BUY"),
-    shares: str | None = Form(None),
-    dollar_amount: str | None = Form(None),
-    delay_choice: str = Form(...),
-    execute_at: str | None = Form(None),
-):
-    user, gate = _require_auth_page(request)
-    if gate is not None:
-        return gate
-    lang = resolve_lang(request)
-
-    cmd, err = validate_delayed_order_inputs(
-        account_id=account_id,
-        symbol=symbol,
-        side=side,
-        shares_raw=shares,
-        dollars_raw=dollar_amount,
-        delay_choice_raw=delay_choice,
-        execute_at_raw=execute_at,
-        account_metas=ACCOUNT_METAS,
-        symbols=SYMBOLS,
-        invalid_account=t(lang, "invalid_account"),
-        invalid_symbol=t(lang, "invalid_symbol"),
-        invalid_side=t(lang, "invalid_side"),
-        both_shares_and_dollars=t(lang, "both_shares_and_dollars"),
-        neither_shares_nor_dollars=t(lang, "neither_shares_nor_dollars"),
-        shares_positive=t(lang, "shares_positive"),
-        dollars_positive=t(lang, "dollars_positive"),
-        invalid_delay_choice=t(lang, "invalid_delay_choice"),
-        future_time_required=t(lang, "future_time_required"),
-        future_time_must_be_future=t(lang, "future_time_must_be_future"),
-    )
-
-    if err:
-        return RedirectResponse(url=f"/control-panel?err={quote(err)}", status_code=303)
-
-    try:
-        assert COMMANDS_PRODUCER is not None and cmd is not None
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "DELAYED_MARKET_ORDER"))
-        ok = f"{t(lang,'published_cmd')}={cmd['command_id']}"
-        return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
-    except Exception as e:
-        return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
-
-
 # ---------------------------
 # Algo trading submit (NEW)
 # ---------------------------
@@ -1088,56 +1037,6 @@ async def api_submit_order(request: Request) -> JSONResponse:
         assert COMMANDS_PRODUCER is not None
         assert cmd is not None
         COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
-        return JSONResponse({"ok": True, "command": cmd})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-
-@app.post("/api/submit-delayed-order")
-async def api_submit_delayed_order(request: Request) -> JSONResponse:
-    user, gate = _require_auth_api(request)
-    if gate is not None:
-        return gate
-    lang = resolve_lang(request)
-    body = await request.json()
-
-    account_id = str(body.get("account_id", ""))
-    symbol = str(body.get("symbol", ""))
-    side = str(body.get("side", "BUY"))
-    shares_raw = None if body.get("shares") is None else str(body.get("shares"))
-    dollars_raw = None if body.get("dollar_amount") is None else str(body.get("dollar_amount"))
-    delay_choice_raw = None if body.get("delay_choice") is None else str(body.get("delay_choice"))
-    execute_at_raw = None if body.get("execute_at") is None else str(body.get("execute_at"))
-
-    cmd, err = validate_delayed_order_inputs(
-        account_id=account_id,
-        symbol=symbol,
-        side=side,
-        shares_raw=shares_raw,
-        dollars_raw=dollars_raw,
-        delay_choice_raw=delay_choice_raw,
-        execute_at_raw=execute_at_raw,
-        account_metas=ACCOUNT_METAS,
-        symbols=SYMBOLS,
-        invalid_account=t(lang, "invalid_account"),
-        invalid_symbol=t(lang, "invalid_symbol"),
-        invalid_side=t(lang, "invalid_side"),
-        both_shares_and_dollars=t(lang, "both_shares_and_dollars"),
-        neither_shares_nor_dollars=t(lang, "neither_shares_nor_dollars"),
-        shares_positive=t(lang, "shares_positive"),
-        dollars_positive=t(lang, "dollars_positive"),
-        invalid_delay_choice=t(lang, "invalid_delay_choice"),
-        future_time_required=t(lang, "future_time_required"),
-        future_time_must_be_future=t(lang, "future_time_must_be_future"),
-    )
-
-    if err:
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
-
-    try:
-        assert COMMANDS_PRODUCER is not None
-        assert cmd is not None
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "DELAYED_MARKET_ORDER"))
         return JSONResponse({"ok": True, "command": cmd})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)

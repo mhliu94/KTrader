@@ -268,7 +268,8 @@ def render_layout(
     .modal-actions {{ display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; margin-top:14px; }}
     .fast-account-list {{ display:flex; flex-direction:column; gap:8px; margin-top:8px; }}
     .fast-account-row {{ display:grid; grid-template-columns:auto minmax(0, 1fr); gap:8px; align-items:center; }}
-    .fast-account-label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; font-weight:600; color:#333; }}
+    .fast-account-label {{ overflow-wrap:anywhere; font-size:13px; font-weight:600; color:#333; }}
+    .fast-account-label [data-fast-account-balance] {{ display:inline-block; }}
     @media (max-width: 640px) {{
       body {{ margin:16px; }}
       .topbar {{ align-items:flex-start; gap:12px; }}
@@ -1477,6 +1478,54 @@ def render_control_panel_page(
     error: str = "",
     ok: str = "",
 ) -> str:
+    # Reuse balance/holding rules for order summaries and the E/F configuration.
+    account_balance_helpers = """
+        function usdCash(account) {
+          const balances = account.cash_by_currency || {};
+          const usdKey = Object.keys(balances).find((key) => key.trim().toUpperCase() === "USD");
+          // Legacy snapshots expose USD cash only through the cash field.
+          return usdKey === undefined ? account.cash : balances[usdKey];
+        }
+
+        function ownedShares(account, symbol) {
+          if (!symbol || !Array.isArray(account.positions)) return null;
+          let total = 0;
+          for (const position of account.positions) {
+            if (String(position.symbol || "").trim().toUpperCase() !== symbol) continue;
+            const qty = position.qty;
+            if (qty === null || qty === undefined || qty === "" || !Number.isFinite(Number(qty))) return null;
+            total += Number(qty);
+          }
+          return Number.isFinite(total) ? total : null;
+        }
+
+        function formatAccountBalance(account, selling, symbol) {
+          const value = account ? (selling ? ownedShares(account, symbol) : usdCash(account)) : null;
+          if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value))) return "—";
+          return selling
+            ? Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 })
+            : "$" + Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+    """
+    order_summary_helpers = f"""
+        {account_balance_helpers}
+
+        function renderAccountBalances(symbol) {{
+          symbol = String(symbol || "").trim().toUpperCase();
+          const side = sideInputs.find((input) => input.checked);
+          const selling = side && side.value === "SELL";
+          balanceLabelEl.textContent = selling
+            ? {json.dumps(t(lang, "selected_accounts_owned_shares"))} + (symbol ? " (" + symbol + ")" : "")
+            : {json.dumps(t(lang, "selected_accounts_usd_cash"))};
+          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
+          const parts = accountInputs.filter((input) => input.checked).map((input) => {{
+            const account = accounts.find((row) => row.account_id === input.value);
+            const label = account && account.account_num_id != null ? "#" + account.account_num_id : input.value;
+            return label + ": " + formatAccountBalance(account, selling, symbol);
+          }});
+          balanceEl.textContent = parts.length ? parts.join(", ") : "—";
+        }}
+    """
     sorted_account_ids = sorted(account_metas.keys(), key=lambda aid: account_metas[aid].num_id)
     account_opts = "\n".join(
         (
@@ -1536,12 +1585,6 @@ def render_control_panel_page(
         f"<input class='choice-input' type='radio' id='market-side-sell' name='side' value='SELL'>"
         f"<label class='choice-btn' for='market-side-sell'>{html_escape(t(lang,'sell'))}</label>"
     )
-    delayed_side_buttons = (
-        f"<input class='choice-input' type='radio' id='delayed-side-buy' name='side' value='BUY' checked>"
-        f"<label class='choice-btn' for='delayed-side-buy'>{html_escape(t(lang,'buy'))}</label>"
-        f"<input class='choice-input' type='radio' id='delayed-side-sell' name='side' value='SELL'>"
-        f"<label class='choice-btn' for='delayed-side-sell'>{html_escape(t(lang,'sell'))}</label>"
-    )
     limit_side_buttons = (
         f"<input class='choice-input' type='radio' id='limit-side-buy' name='side' value='BUY' checked>"
         f"<label class='choice-btn' for='limit-side-buy'>{html_escape(t(lang,'buy'))}</label>"
@@ -1570,18 +1613,6 @@ def render_control_panel_page(
         f"<button class='choice-btn' type='button' data-minutes='5'>{html_escape(t(lang,'plus_5m'))}</button>"
         f"<button class='choice-btn' type='button' data-minutes='10'>{html_escape(t(lang,'plus_10m'))}</button>"
     )
-    delayed_delay_buttons = (
-        f"<input class='choice-input' type='radio' id='delay-min-1' name='delay_choice' value='1' checked>"
-        f"<label class='choice-btn' for='delay-min-1'>{html_escape(t(lang,'delay_1m'))}</label>"
-        f"<input class='choice-input' type='radio' id='delay-min-2' name='delay_choice' value='2'>"
-        f"<label class='choice-btn' for='delay-min-2'>{html_escape(t(lang,'delay_2m'))}</label>"
-        f"<input class='choice-input' type='radio' id='delay-min-5' name='delay_choice' value='5'>"
-        f"<label class='choice-btn' for='delay-min-5'>{html_escape(t(lang,'delay_5m'))}</label>"
-        f"<input class='choice-input' type='radio' id='delay-min-10' name='delay_choice' value='10'>"
-        f"<label class='choice-btn' for='delay-min-10'>{html_escape(t(lang,'delay_10m'))}</label>"
-        f"<input class='choice-input' type='radio' id='delay-custom' name='delay_choice' value='custom'>"
-        f"<label class='choice-btn' for='delay-custom'>{html_escape(t(lang,'delay_custom'))}</label>"
-    )
     stop_account_buttons = "\n".join(
         (
             f"<input class='choice-input' type='checkbox' id='stop-acct-{idx}' name='account_ids' value='{html_escape(aid)}'>"
@@ -1595,7 +1626,8 @@ def render_control_panel_page(
             f"<label class='fast-account-row'>"
             f"<input type='checkbox' data-fast-account-id='{html_escape(aid)}'>"
             f"<span class='fast-account-label'>#{account_metas[aid].num_id} "
-            f"{html_escape(aid)} ({html_escape(account_metas[aid].broker)})</span>"
+            f"{html_escape(aid)} ({html_escape(account_metas[aid].broker)}) "
+            f"<b data-fast-account-balance='{html_escape(aid)}'>—</b></span>"
             f"</label>"
         )
         for aid in sorted_account_ids
@@ -1604,6 +1636,8 @@ def render_control_panel_page(
         "modeE": t(lang, "mode_e"),
         "modeF": t(lang, "mode_f"),
         "fastSelectedMode": t(lang, "fast_selected_mode"),
+        "usdCash": t(lang, "usd_cash"),
+        "ownedShares": t(lang, "owned_shares"),
         "fastBuyPriceLimit": t(lang, "fast_buy_price_limit"),
         "fastSellPriceLimit": t(lang, "fast_sell_price_limit"),
         "fastConfigRequired": t(lang, "fast_config_required"),
@@ -1619,6 +1653,7 @@ def render_control_panel_page(
           <div>
             <div class="acct" id="fast-trading-title">{html_escape(t(lang,'fast_config_title'))}</div>
             <div class="help" id="fast-trading-mode-label"></div>
+            <div class="help">{html_escape(t(lang,'symbol'))}: <b id="fast-trading-symbol">—</b></div>
           </div>
           <button class="modal-close" id="fast-trading-close" type="button" aria-label="{html_escape(t(lang,'fast_config_cancel'))}">&times;</button>
         </div>
@@ -1663,6 +1698,8 @@ def render_control_panel_page(
         const modal = document.getElementById("fast-trading-modal");
         const genericConfigEl = document.getElementById("algo-generic-constraints");
         const modeLabelEl = document.getElementById("fast-trading-mode-label");
+        const symbolEl = document.getElementById("algo_symbol");
+        const symbolLabelEl = document.getElementById("fast-trading-symbol");
         const priceLabelEl = document.getElementById("fast-price-limit-label");
         const priceLimitEl = document.getElementById("fast-price-limit");
         const errorEl = document.getElementById("fast-trading-error");
@@ -1676,6 +1713,33 @@ def render_control_panel_page(
 
         let confirmed = false;
         let lastFocused = null;
+        let accountsCache = null;
+
+        __ACCOUNT_BALANCE_HELPERS__
+
+        function renderAccountBalances() {
+          const symbol = String(symbolEl ? symbolEl.value : "").trim().toUpperCase();
+          if (symbolLabelEl) symbolLabelEl.textContent = symbol || "—";
+          const selling = selectedMode() === "F";
+          const label = selling ? labels.ownedShares + " (" + symbol + ")" : labels.usdCash;
+          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
+          modal.querySelectorAll("[data-fast-account-balance]").forEach(function(element) {
+            const accountId = element.getAttribute("data-fast-account-balance");
+            const account = accounts.find(function(row) { return row.account_id === accountId; });
+            element.textContent = "— " + label + ": " + formatAccountBalance(account, selling, symbol);
+          });
+        }
+
+        async function refreshAccountBalances() {
+          if (modal.hidden) return;
+          try {
+            const response = await fetch("/api/accounts", { cache: "no-store" });
+            if (response.ok) accountsCache = await response.json();
+          } catch (e) {
+            // Keep the last account snapshot through transient network errors.
+          }
+          renderAccountBalances();
+        }
 
         function selectedMode() {
           const selected = form.querySelector("input[name='trading_mode']:checked");
@@ -1726,6 +1790,8 @@ def render_control_panel_page(
           }
           setError("");
           modal.hidden = false;
+          renderAccountBalances();
+          refreshAccountBalances();
           document.body.classList.add("modal-open");
           priceLimitEl.focus();
         }
@@ -1756,9 +1822,16 @@ def render_control_panel_page(
           if (genericConfigEl) genericConfigEl.hidden = mode === "E" || mode === "F";
         }
         form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
-          input.addEventListener("change", updateGenericVisibility);
+          input.addEventListener("change", function() {
+            updateGenericVisibility();
+            if (!modal.hidden) renderAccountBalances();
+          });
+        });
+        if (symbolEl) symbolEl.addEventListener("change", function() {
+          if (!modal.hidden) renderAccountBalances();
         });
         updateGenericVisibility();
+        setInterval(refreshAccountBalances, 5000);
 
         if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
         if (closeBtn) closeBtn.addEventListener("click", closeModal);
@@ -1786,7 +1859,9 @@ def render_control_panel_page(
 
       })();
     </script>
-    """.replace("__FAST_LABELS__", fast_labels_json)
+    """.replace("__FAST_LABELS__", fast_labels_json).replace(
+        "__ACCOUNT_BALANCE_HELPERS__", account_balance_helpers
+    )
 
     msg = ""
     if error:
@@ -1858,68 +1933,6 @@ def render_control_panel_page(
 
       <section class="card control-panel-section">
     <div class="hdr">
-      <div class="acct">{html_escape(t(lang,'delayed_market_order'))}</div>
-      <div class="ts">—</div>
-    </div>
-
-    <form method="post" action="/submit-delayed-order">
-      <div class="row">
-        <div>
-          <label for="delayed_account_id">{html_escape(t(lang,'account'))}</label>
-          <select id="delayed_account_id" name="account_id" required>
-            {account_opts}
-          </select>
-        </div>
-        <div>
-          <label for="delayed_symbol">{html_escape(t(lang,'symbol'))}</label>
-          <input id="delayed_symbol" name="symbol" list="symbol-suggestions" placeholder="e.g. AAPL" required />
-        </div>
-      </div>
-
-      <div class="row">
-        <div>
-          <label>{html_escape(t(lang,'side'))}</label>
-          <div class="choice-grid">
-            {delayed_side_buttons}
-          </div>
-        </div>
-        <div>
-          <label>{html_escape(t(lang,'delay_when'))}</label>
-          <div class="choice-grid">
-            {delayed_delay_buttons}
-          </div>
-        </div>
-      </div>
-
-      <div class="row">
-        <div>
-          <label for="delayed_shares">{html_escape(t(lang,'shares'))}</label>
-          <input id="delayed_shares" name="shares" placeholder="e.g. 100" inputmode="numeric" />
-          <div class="help">{html_escape(t(lang,'either_or'))}</div>
-        </div>
-        <div>
-          <label for="delayed_dollar_amount">{html_escape(t(lang,'dollars'))}</label>
-          <input id="delayed_dollar_amount" name="dollar_amount" placeholder="e.g. 2500" inputmode="decimal" />
-          <div class="help">{html_escape(t(lang,'notional_hint'))}</div>
-        </div>
-      </div>
-
-      <div>
-        <label for="execute_at">{html_escape(t(lang,'delay_future_time'))}</label>
-        <input id="execute_at" name="execute_at" type="datetime-local" />
-        <div class="help">{html_escape(t(lang,'delay_future_time_help'))}</div>
-      </div>
-
-      <div class="help">
-        {html_escape(t(lang,'selected_account_cash'))}: <b id="delayed-selected-cash">—</b>
-      </div>
-
-      <button class="btn btn-blue" type="submit">{html_escape(t(lang,'submit_delayed_order'))}</button>
-    </form>
-      </section>
-
-      <section class="card control-panel-section">
-    <div class="hdr">
       <div class="acct">{html_escape(t(lang,'quick_market_order'))}</div>
       <div class="ts">-</div>
     </div>
@@ -1952,7 +1965,7 @@ def render_control_panel_page(
       </div>
 
       <div class="help">
-        {html_escape(t(lang,'quick_selected_cash'))}: <b id="quick-selected-cash">—</b>
+        <span id="quick-selected-balance-label">{html_escape(t(lang,'selected_accounts_usd_cash'))}</span>: <b id="quick-selected-balance" aria-live="polite">—</b>
         &nbsp;|&nbsp;
         {html_escape(t(lang,'quick_selected_last'))}: <b id="quick-selected-last">—</b>
       </div>
@@ -2015,7 +2028,7 @@ def render_control_panel_page(
       </div>
 
       <div class="help">
-        {html_escape(t(lang,'selected_account_cash'))}: <b id="limit-selected-cash">-</b>
+        <span id="limit-selected-balance-label">{html_escape(t(lang,'selected_accounts_usd_cash'))}</span>: <b id="limit-selected-balance" aria-live="polite">—</b>
         &nbsp;|&nbsp;
         {html_escape(t(lang,'quick_selected_last'))}: <b id="limit-selected-last">-</b>
       </div>
@@ -2199,9 +2212,7 @@ def render_control_panel_page(
         }}
 
         const marketAccountEl = document.getElementById("account_id");
-        const delayedAccountEl = document.getElementById("delayed_account_id");
         const marketCashEl = document.getElementById("market-selected-cash");
-        const delayedCashEl = document.getElementById("delayed-selected-cash");
         let accountsCache = null;
 
         function fmtMoney(x) {{
@@ -2224,9 +2235,6 @@ def render_control_panel_page(
           if (marketCashEl) {{
             marketCashEl.textContent = lookupCash(marketAccountEl ? marketAccountEl.value : "");
           }}
-          if (delayedCashEl) {{
-            delayedCashEl.textContent = lookupCash(delayedAccountEl ? delayedAccountEl.value : "");
-          }}
         }}
 
         async function refreshSelectedAccountCash() {{
@@ -2242,7 +2250,6 @@ def render_control_panel_page(
         }}
 
         if (marketAccountEl) marketAccountEl.addEventListener("change", renderSelectedAccountCash);
-        if (delayedAccountEl) delayedAccountEl.addEventListener("change", renderSelectedAccountCash);
 
         refreshSelectedAccountCash();
         setInterval(refreshSelectedAccountCash, 5000);
@@ -2251,23 +2258,17 @@ def render_control_panel_page(
 
     <script>
       (function(){{
-        const cashEl = document.getElementById("quick-selected-cash");
+        const balanceEl = document.getElementById("quick-selected-balance");
+        const balanceLabelEl = document.getElementById("quick-selected-balance-label");
         const lastEl = document.getElementById("quick-selected-last");
         const quickForm = document.querySelector("form[action='/submit-quick-order']");
         const accountInputs = quickForm ? Array.from(quickForm.querySelectorAll("input[name='account_ids']")) : [];
         const symbolInputs = quickForm ? Array.from(quickForm.querySelectorAll("input[name='symbol']")) : [];
+        const sideInputs = quickForm ? Array.from(quickForm.querySelectorAll("input[name='side']")) : [];
         let accountsCache = null;
         let marketCache = null;
 
-        function fmtMoney(x) {{
-          if (x === null || x === undefined) return "—";
-          const n = Number(x);
-          if (!isFinite(n)) return "—";
-          return "$" + n.toLocaleString(undefined, {{
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-          }});
-        }}
+        {order_summary_helpers}
 
         function fmtPrice(x) {{
           if (x === null || x === undefined) return "—";
@@ -2279,25 +2280,14 @@ def render_control_panel_page(
           }});
         }}
 
-        function selectedAccountId() {{
-          const checked = accountInputs.find((el) => el.checked);
-          return checked ? checked.value : "";
-        }}
-
         function selectedSymbol() {{
           const checked = symbolInputs.find((el) => el.checked);
           return checked ? checked.value : "";
         }}
 
         function renderQuickSummary() {{
-          const accountId = selectedAccountId();
           const symbol = selectedSymbol();
-
-          if (cashEl) {{
-            const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
-            const account = accounts.find((row) => row.account_id === accountId);
-            cashEl.textContent = account ? fmtMoney(account.cash) : "—";
-          }}
+          renderAccountBalances(symbol);
 
           if (lastEl) {{
             const rows = marketCache && marketCache.rows ? marketCache.rows : {{}};
@@ -2326,7 +2316,9 @@ def render_control_panel_page(
 
         accountInputs.forEach((el) => el.addEventListener("change", renderQuickSummary));
         symbolInputs.forEach((el) => el.addEventListener("change", renderQuickSummary));
+        sideInputs.forEach((el) => el.addEventListener("change", renderQuickSummary));
 
+        renderQuickSummary();
         refreshQuickSummary();
         setInterval(refreshQuickSummary, 5000);
       }})();
@@ -2335,7 +2327,8 @@ def render_control_panel_page(
     <script>
       (function(){{
         const limitForm = document.getElementById("limit-order-form");
-        const cashEl = document.getElementById("limit-selected-cash");
+        const balanceEl = document.getElementById("limit-selected-balance");
+        const balanceLabelEl = document.getElementById("limit-selected-balance-label");
         const lastEl = document.getElementById("limit-selected-last");
         const symbolEl = document.getElementById("limit_symbol");
         const sharesEl = document.getElementById("limit_shares");
@@ -2347,6 +2340,8 @@ def render_control_panel_page(
         const sideStorageKey = "trading_ui.limit_order.side";
         let accountsCache = null;
         let marketCache = null;
+
+        {order_summary_helpers}
 
         function storageGet(key) {{
           try {{
@@ -2435,13 +2430,6 @@ def render_control_panel_page(
           }});
         }}
 
-        function fmtMoney(x) {{
-          if (x === null || x === undefined) return "-";
-          const n = Number(x);
-          if (!isFinite(n)) return "-";
-          return "$" + n.toLocaleString(undefined, {{ minimumFractionDigits: 2, maximumFractionDigits: 2 }});
-        }}
-
         function fmtPrice(x) {{
           if (x === null || x === undefined) return "-";
           const n = Number(x);
@@ -2450,16 +2438,7 @@ def render_control_panel_page(
         }}
 
         function renderLimitSummary() {{
-          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
-          const selected = accountInputs.filter((el) => el.checked).map((el) => el.value);
-          if (cashEl) {{
-            const parts = selected.map((accountId) => {{
-              const account = accounts.find((row) => row.account_id === accountId);
-              const label = account && account.account_num_id ? "#" + account.account_num_id : accountId;
-              return label + " " + (account ? fmtMoney(account.cash) : "-");
-            }});
-            cashEl.textContent = parts.length ? parts.join(", ") : "-";
-          }}
+          renderAccountBalances(symbolEl ? symbolEl.value : "");
           if (lastEl) {{
             const rows = marketCache && marketCache.rows ? marketCache.rows : {{}};
             const row = rows[symbolEl ? symbolEl.value : ""] || null;
@@ -2485,7 +2464,10 @@ def render_control_panel_page(
           persistLimitAccounts();
           renderLimitSummary();
         }}));
-        sideInputs.forEach((el) => el.addEventListener("change", persistLimitSide));
+        sideInputs.forEach((el) => el.addEventListener("change", function() {{
+          persistLimitSide();
+          renderLimitSummary();
+        }}));
         shareButtons.forEach((button) => {{
           button.addEventListener("click", function() {{
             if (!sharesEl) return;
@@ -2508,6 +2490,7 @@ def render_control_panel_page(
           persistLimitSide();
         }});
         syncShareButtons();
+        renderLimitSummary();
         refreshLimitSummary();
         setInterval(refreshLimitSummary, 5000);
       }})();

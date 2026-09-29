@@ -183,7 +183,9 @@ class AlgoOrderValidationTests(unittest.TestCase):
             "fast_price_limit_positive": "price limit positive",
             "fast_accounts_required": "accounts required",
             "fast_account_duplicate": "duplicate {account}",
-            "fast_aggression_level_invalid": "invalid aggression",
+            "fast_book_levels_invalid": "invalid levels",
+            "fast_target_percentage_invalid": "invalid percentage",
+            "fast_cycle_seconds_invalid": "invalid cycle",
         }
         values.update(overrides)
         return validate_algo_start_inputs(**values)
@@ -193,7 +195,9 @@ class AlgoOrderValidationTests(unittest.TestCase):
             fast_config={
                 "price_limit": "123.45",
                 "account_ids": ["A", "B"],
-                "aggression_level": "2",
+                "book_levels": "2",
+                "target_percentage": "70",
+                "cycle_seconds": "15",
                 "test_mode": "true",
             }
         )
@@ -202,7 +206,10 @@ class AlgoOrderValidationTests(unittest.TestCase):
         assert cmd is not None
         self.assertEqual(cmd["fast_trading_price_limit"], 123.45)
         self.assertEqual(cmd["fast_trading_account_ids"], ["A", "B"])
-        self.assertEqual(cmd["fast_trading_aggression_level"], 2)
+        self.assertEqual(cmd["fast_trading_book_levels"], 2)
+        self.assertEqual(cmd["fast_trading_target_percentage"], 70)
+        self.assertEqual(cmd["fast_trading_cycle_seconds"], 15)
+        self.assertNotIn("fast_trading_aggression_level", cmd)
         self.assertTrue(cmd["fast_trading_test_mode"])
         self.assertNotIn("end_time_et", cmd)
         self.assertNotIn("max_volume", cmd)
@@ -211,16 +218,19 @@ class AlgoOrderValidationTests(unittest.TestCase):
     def test_fast_sell_mode_accepts_json_configuration(self):
         cmd, err = self._validate(
             mode="F",
-            fast_config='{"price_limit": 98.5, "account_ids": ["B"], "aggression_level": 3}',
+            fast_config='{"price_limit": 98.5, "account_ids": ["B"], "book_levels": 5, "target_percentage": 10, "cycle_seconds": 60}',
         )
 
         self.assertIsNone(err)
         assert cmd is not None
         self.assertEqual(cmd["trading_mode"], "F")
         self.assertEqual(cmd["fast_trading_price_limit"], 98.5)
+        self.assertEqual(cmd["fast_trading_book_levels"], 5)
+        self.assertEqual(cmd["fast_trading_target_percentage"], 10)
+        self.assertEqual(cmd["fast_trading_cycle_seconds"], 60)
         self.assertFalse(cmd["fast_trading_test_mode"])
 
-    def test_fast_settings_reject_invalid_price_accounts_and_aggression(self):
+    def test_fast_settings_reject_invalid_price_accounts_and_controls(self):
         common = {
             "account_metas": metas("A"),
             "invalid_account": "invalid account",
@@ -228,20 +238,65 @@ class AlgoOrderValidationTests(unittest.TestCase):
             "fast_price_limit_positive": "bad price",
             "fast_accounts_required": "accounts required",
             "fast_account_duplicate": "duplicate {account}",
-            "fast_aggression_level_invalid": "bad aggression",
+            "fast_book_levels_invalid": "bad levels",
+            "fast_target_percentage_invalid": "bad percentage",
+            "fast_cycle_seconds_invalid": "bad cycle",
         }
-        cases = (
-            ({"price_limit": 0, "account_ids": ["A"], "aggression_level": 1}, "bad price"),
-            ({"price_limit": 10, "account_ids": [], "aggression_level": 1}, "accounts required"),
-            ({"price_limit": 10, "account_ids": ["A", "A"], "aggression_level": 1}, "duplicate A"),
-            ({"price_limit": 10, "account_ids": ["A"], "aggression_level": 4}, "bad aggression"),
-        )
+        valid = {"price_limit": 10, "account_ids": ["A"], "book_levels": 2,
+                 "target_percentage": 50, "cycle_seconds": 15}
+        cases = [
+            ({**valid, "price_limit": 0}, "bad price"),
+            ({**valid, "account_ids": []}, "accounts required"),
+            ({**valid, "account_ids": ["A", "A"]}, "duplicate A"),
+            ({"price_limit": 10, "account_ids": ["A"], "aggression_level": 1}, "bad levels"),
+        ]
+        for field, invalid_values, error in (
+            ("book_levels", (0, 6, 1.5), "bad levels"),
+            ("target_percentage", (0, 5, 25, 110, 10.5), "bad percentage"),
+            ("cycle_seconds", (0, 1, 20, 90, 5.5), "bad cycle"),
+        ):
+            cases.append(({key: value for key, value in valid.items() if key != field}, error))
+            for value in (*invalid_values, None, "", "bad", True, False, [], {}, "NaN", "Infinity"):
+                cases.append(({**valid, field: value}, error))
 
         for payload, expected_error in cases:
             with self.subTest(payload=payload):
                 settings, err = parse_fast_trading_settings(payload, **common)
                 self.assertIsNone(settings)
                 self.assertEqual(err, expected_error)
+
+    def test_fast_modes_accept_every_offered_control_value(self):
+        valid = {"price_limit": 10, "account_ids": ["A"], "book_levels": 2,
+                 "target_percentage": 100, "cycle_seconds": 30}
+        for field, choices in (
+            ("book_levels", range(1, 6)),
+            ("target_percentage", range(10, 101, 10)),
+            ("cycle_seconds", (5, 10, 15, 30, 60)),
+        ):
+            for mode in ("E", "F"):
+                for value in choices:
+                    with self.subTest(mode=mode, field=field, value=value):
+                        command, error = self._validate(mode=mode, fast_config={**valid, field: value})
+                        self.assertIsNone(error)
+                        self.assertEqual(command[f"fast_trading_{field}"], value)
+
+    def test_modes_a_through_d_accept_generic_inputs_without_fast_configuration(self):
+        for mode in ("A", "B", "C", "D"):
+            with self.subTest(mode=mode):
+                command, error = self._validate(
+                    mode=mode,
+                    max_volume_raw="-1",
+                    market_volume_target_raw="-1",
+                    abs_pos_change_limit_raw="-1",
+                    price_target_raw="100",
+                    single_order_notional_limit_raw="-1",
+                    order_rate_limit_per_minute_raw="-1",
+                    end_time_et_raw="2099-12-31T00:00",
+                )
+                self.assertIsNone(error)
+                self.assertEqual(command["trading_mode"], mode)
+                self.assertEqual(command["price_target"], 100)
+                self.assertFalse(any(key.startswith("fast_trading_") for key in command))
 
     def test_modes_a_through_d_still_require_generic_inputs(self):
         cmd, err = self._validate(mode="A", fast_config=None)

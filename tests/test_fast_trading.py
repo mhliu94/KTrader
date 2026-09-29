@@ -1,10 +1,12 @@
 import unittest
 import threading
 import time
+from unittest.mock import Mock
 
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
 from trading_ui.services.fast_trading import (
     FastTradingStrategyManager,
+    _FastStrategy,
     build_fast_trading_cycle_commands,
 )
 from trading_ui.services.market_data import BookLevel, MarketDataStore, OrderBookSnapshot
@@ -18,12 +20,12 @@ DEFAULT_MINIMUM_CYCLE_SECONDS = {
 }
 
 
-def fast_trading_settings(*, cycle_seconds=0.01):
+def fast_trading_settings():
     return {
         "aggression_levels": {
-            1: {"book_levels": 2, "cycle_seconds": cycle_seconds},
-            2: {"book_levels": 3, "cycle_seconds": cycle_seconds},
-            3: {"book_levels": 5, "cycle_seconds": cycle_seconds},
+            1: {"book_levels": 2, "cycle_seconds": 30},
+            2: {"book_levels": 3, "cycle_seconds": 20},
+            3: {"book_levels": 5, "cycle_seconds": 10},
         },
         "minimum_cycle_seconds_by_medium": {
             "API": 0.001,
@@ -34,14 +36,16 @@ def fast_trading_settings(*, cycle_seconds=0.01):
     }
 
 
-def strategy_command(*, aggression_level=1):
+def strategy_command(*, book_levels=2, target_percentage=100, cycle_seconds=5):
     return {
         "command_id": "fast-session-test",
         "trading_mode": "E",
         "symbol": "AAPL",
         "fast_trading_price_limit": 10,
         "fast_trading_account_ids": ["A"],
-        "fast_trading_aggression_level": aggression_level,
+        "fast_trading_book_levels": book_levels,
+        "fast_trading_target_percentage": target_percentage,
+        "fast_trading_cycle_seconds": cycle_seconds,
     }
 
 
@@ -53,6 +57,30 @@ class RecordingMarketDataStore(MarketDataStore):
     def get_book(self, symbol, depth_limit=20):
         self.get_book_times.append(time.monotonic())
         return super().get_book(symbol, depth_limit=depth_limit)
+
+
+class SimulatedCycleClock:
+    def __init__(self):
+        self.now = 0.0
+        self.waits = []
+
+    def monotonic(self):
+        return self.now
+
+    def run_strategy(self, manager, command, *, max_cycles=25):
+        def wait(seconds):
+            self.waits.append(seconds)
+            self.now += seconds
+            return len(self.waits) >= max_cycles
+
+        stop_event = Mock(spec=threading.Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.side_effect = wait
+        key = manager._strategy_key(command["trading_mode"], command["symbol"])
+        strategy = _FastStrategy(key=key, command=command, stop_event=stop_event)
+        manager._strategies[key] = strategy
+        manager._run_strategy(strategy)
+        return strategy
 
 
 def metas(*account_ids):
@@ -112,6 +140,7 @@ def build_cycle(
     price_limit,
     account_ids,
     book_levels,
+    target_percentage=100,
     account_metas=None,
     account_snapshots=None,
     last_actions=None,
@@ -125,6 +154,7 @@ def build_cycle(
         price_limit=price_limit,
         account_ids=account_ids,
         book_levels=book_levels,
+        target_percentage=target_percentage,
         account_metas=account_metas or metas(*account_ids),
         account_snapshots=account_snapshots,
         minimum_cycle_seconds_by_medium=DEFAULT_MINIMUM_CYCLE_SECONDS,
@@ -276,6 +306,92 @@ class FastTradingCycleTests(unittest.TestCase):
         self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A", "B", "C"])
         self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [333, 333, 333])
         self.assertEqual(result.allocated_quantity, 999)
+
+    def test_percentage_targets_only_selected_levels_within_price_limit(self):
+        for mode, prices in (("E", (8, 9, 11, 12)), ("F", (12, 11, 9, 8))):
+            with self.subTest(mode=mode):
+                levels = [
+                    BookLevel(price=price, quantity=quantity)
+                    for price, quantity in zip(prices, (501, 508, 1000, 2000))
+                ]
+                result = build_cycle(
+                    mode=mode,
+                    book=OrderBookSnapshot(
+                        symbol="AAPL",
+                        bids=levels if mode == "F" else [],
+                        asks=levels if mode == "E" else [],
+                    ),
+                    price_limit=10,
+                    account_ids=["A", "B", "C"],
+                    book_levels=3,
+                    target_percentage=30,
+                )
+
+                self.assertEqual(result.total_resting_qty, 1009)
+                self.assertEqual(result.target_quantity, 302)
+                self.assertEqual(result.limit_price, 10)
+                self.assertEqual(result.allocated_quantity, 300)
+                self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [100] * 3)
+                for command in result.commands:
+                    self.assertEqual(command["fast_trading_target_percentage"], 30)
+                    self.assertEqual(command["fast_trading_target_qty"], 302)
+                    self.assertEqual(command["type"], "LIMIT_ORDER_FOK")
+
+    def test_target_percentage_is_applied_before_rounding_whole_shares(self):
+        result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL", bids=[], asks=[BookLevel(price=10, quantity=333.9)],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=1,
+            target_percentage=30,
+        )
+
+        self.assertEqual(result.target_quantity, 100)
+        self.assertEqual(result.commands[0]["qty_shares"], 100)
+
+    def test_percentage_target_keeps_minimum_share_rule(self):
+        result = build_cycle(
+            mode="E",
+            book=OrderBookSnapshot(
+                symbol="AAPL", bids=[], asks=[BookLevel(price=10, quantity=999)],
+            ),
+            price_limit=10,
+            account_ids=["A"],
+            book_levels=1,
+            target_percentage=10,
+        )
+
+        self.assertEqual(result.target_quantity, 99)
+        self.assertEqual(result.commands, [])
+        self.assertEqual(result.reason, "per_account_quantity_below_minimum")
+        self.assertFalse(result.capacity_noop)
+
+    def test_capacity_is_evaluated_against_percentage_target(self):
+        for mode in ("E", "F"):
+            with self.subTest(mode=mode):
+                levels = [BookLevel(price=10, quantity=1000)]
+                result = build_cycle(
+                    mode=mode,
+                    book=OrderBookSnapshot(
+                        symbol="AAPL",
+                        bids=levels if mode == "F" else [],
+                        asks=levels if mode == "E" else [],
+                    ),
+                    price_limit=10,
+                    account_ids=["A"],
+                    book_levels=1,
+                    target_percentage=20,
+                    account_snapshots=snapshots(
+                        A={"cash_by_currency": {"USD": 2000}, "positions": [("AAPL", 200)]},
+                    ),
+                )
+
+                self.assertEqual(result.target_quantity, 200)
+                self.assertEqual(result.commands[0]["qty_shares"], 200)
+                self.assertFalse(result.capacity_noop)
 
     def test_buy_capacity_exclusion_is_iterative_and_redistributes_evenly(self):
         book = OrderBookSnapshot(
@@ -745,7 +861,7 @@ class FastTradingManagerTests(unittest.TestCase):
         self.assertEqual(sell_result.reason, "no_accounts_off_cooldown")
         self.assertEqual(sell_result.commands, [])
 
-    def test_manager_uses_configured_book_depth_for_each_aggression_level(self):
+    def test_manager_uses_each_selected_book_depth_and_target_percentage(self):
         book = OrderBookSnapshot(
             symbol="AAPL",
             bids=[],
@@ -759,8 +875,8 @@ class FastTradingManagerTests(unittest.TestCase):
             ],
         )
 
-        for aggression_level, expected_quantity in ((1, 200), (2, 300), (3, 500)):
-            with self.subTest(aggression_level=aggression_level):
+        for book_levels in range(1, 6):
+            with self.subTest(book_levels=book_levels):
                 store = MarketDataStore()
                 store.upsert_book(book)
                 manager = FastTradingStrategyManager(
@@ -770,35 +886,110 @@ class FastTradingManagerTests(unittest.TestCase):
                     fast_trading_settings=fast_trading_settings(),
                 )
 
-                result = manager.run_cycle(strategy_command(aggression_level=aggression_level))
+                result = manager.run_cycle(strategy_command(book_levels=book_levels))
 
-                self.assertEqual(result.total_resting_qty, expected_quantity)
+                self.assertEqual(result.total_resting_qty, book_levels * 100)
+                self.assertEqual(result.commands[0]["fast_trading_book_levels"], book_levels)
+                self.assertNotIn("fast_trading_aggression_level", result.commands[0])
 
-    def test_strategy_cycles_at_configured_aggression_interval_even_for_skips(self):
-        store = RecordingMarketDataStore()
-        settings = fast_trading_settings(cycle_seconds=0.04)
+        for percentage in range(10, 101, 10):
+            with self.subTest(percentage=percentage):
+                store = MarketDataStore()
+                store.upsert_book(OrderBookSnapshot(
+                    symbol="AAPL", bids=[], asks=[BookLevel(price=10, quantity=1000)],
+                ))
+                manager = FastTradingStrategyManager(
+                    market_data_store=store,
+                    account_metas_provider=lambda: metas("A"),
+                    publish_command=lambda command, key: None,
+                )
+
+                result = manager.run_cycle(strategy_command(target_percentage=percentage))
+
+                self.assertEqual(result.commands[0]["qty_shares"], percentage * 10)
+                self.assertEqual(result.commands[0]["fast_trading_target_percentage"], percentage)
+
+    def test_manager_rejects_missing_or_invalid_controls_before_starting_or_publishing(self):
+        publish = Mock()
+        manager = FastTradingStrategyManager(
+            market_data_store=MarketDataStore(),
+            account_metas_provider=lambda: metas("A"),
+            publish_command=publish,
+        )
+        invalid_values = {
+            "fast_trading_book_levels": [None, "", 0, 6, 1.5, True],
+            "fast_trading_target_percentage": [None, "", 0, 15, 110, True],
+            "fast_trading_cycle_seconds": [None, "", 0, 1, 20, 120, True],
+        }
+        for field, values in invalid_values.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    command = strategy_command()
+                    if value is None:
+                        command.pop(field)
+                        command["fast_trading_aggression_level"] = 1
+                    else:
+                        command[field] = value
+                    with self.assertRaises(ValueError):
+                        manager.start_strategy(command)
+                    with self.assertRaises(ValueError):
+                        manager.run_cycle(command)
+                    self.assertEqual(manager._strategies, {})
+        publish.assert_not_called()
+
+    def test_test_mode_uses_selected_target_and_keeps_cooldown_without_publishing(self):
+        store = MarketDataStore()
+        store.upsert_book(OrderBookSnapshot(
+            symbol="AAPL", bids=[], asks=[BookLevel(price=10, quantity=1000)],
+        ))
+        publish = Mock()
         manager = FastTradingStrategyManager(
             market_data_store=store,
             account_metas_provider=lambda: metas("A"),
-            publish_command=lambda command, key: None,
-            fast_trading_settings=settings,
+            publish_command=publish,
         )
+        command = {**strategy_command(target_percentage=20, cycle_seconds=15), "fast_trading_test_mode": True}
 
-        try:
-            key = manager.start_strategy(strategy_command(aggression_level=2))
-            deadline = time.monotonic() + 1.0
-            while len(store.get_book_times) < 3 and time.monotonic() < deadline:
-                time.sleep(0.005)
+        result = manager.run_cycle(command)
+        next_result = manager.run_cycle(command)
 
-            self.assertGreaterEqual(len(store.get_book_times), 3)
-            self.assertIn(key, manager._strategies)
-            gaps = [
-                later - earlier
-                for earlier, later in zip(store.get_book_times[:2], store.get_book_times[1:3])
-            ]
-            self.assertTrue(all(gap >= 0.025 for gap in gaps), gaps)
-        finally:
-            manager.stop_all()
+        self.assertEqual(result.commands[0]["qty_shares"], 200)
+        self.assertEqual(result.commands[0]["fast_trading_cycle_seconds"], 15)
+        self.assertTrue(result.commands[0]["fast_trading_test_mode"])
+        self.assertEqual(next_result.reason, "no_accounts_off_cooldown")
+        publish.assert_not_called()
+
+    def test_strategy_observes_each_minimum_interval_and_longer_processing_even_for_skips(self):
+        for interval in (5, 10, 15, 30, 60):
+            for processing_seconds in (2, 65):
+                with self.subTest(interval=interval, processing_seconds=processing_seconds):
+                    clock = SimulatedCycleClock()
+                    store = RecordingMarketDataStore()
+                    manager = FastTradingStrategyManager(
+                        market_data_store=store,
+                        account_metas_provider=lambda: metas("A"),
+                        publish_command=lambda command, key: None,
+                        fast_trading_settings=fast_trading_settings(),
+                        monotonic=clock.monotonic,
+                    )
+                    cycle_starts = []
+                    original_run_cycle = manager.run_cycle
+
+                    def run_cycle(command):
+                        cycle_starts.append(clock.now)
+                        result = original_run_cycle(command)
+                        clock.now += processing_seconds
+                        return result
+
+                    manager.run_cycle = run_cycle
+                    strategy = clock.run_strategy(
+                        manager, strategy_command(cycle_seconds=interval), max_cycles=3,
+                    )
+
+                    self.assertEqual(strategy.cycles, 3)
+                    self.assertEqual(strategy.last_reason, "no data yet")
+                    self.assertEqual(clock.waits, [max(0, interval - processing_seconds)] * 3)
+                    self.assertEqual(cycle_starts, [0, max(interval, processing_seconds), max(interval, processing_seconds) * 2])
 
     def test_ten_capacity_noops_auto_stop_and_commands_reset_the_counter(self):
         store = MarketDataStore()
@@ -818,48 +1009,43 @@ class FastTradingManagerTests(unittest.TestCase):
             return snapshots(A={"cash_by_currency": {"USD": cash}})
 
         published = []
+        clock = SimulatedCycleClock()
         manager = FastTradingStrategyManager(
             market_data_store=store,
             account_metas_provider=lambda: metas("A"),
             account_snapshots_provider=provide_snapshots,
             publish_command=lambda command, key: published.append((key, command)),
-            fast_trading_settings=fast_trading_settings(cycle_seconds=0.01),
+            fast_trading_settings=fast_trading_settings(),
+            monotonic=clock.monotonic,
         )
 
-        try:
-            key = manager.start_strategy(strategy_command())
-            deadline = time.monotonic() + 2.0
-            while key in manager._strategies and time.monotonic() < deadline:
-                time.sleep(0.005)
+        strategy = clock.run_strategy(manager, strategy_command())
 
-            self.assertNotIn(key, manager._strategies)
-            self.assertGreaterEqual(provider_calls, 20)
-            self.assertEqual(len(published), 1)
-        finally:
-            manager.stop_all()
+        self.assertNotIn(strategy.key, manager._strategies)
+        self.assertEqual(provider_calls, 20)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(strategy.last_reason, "10 consecutive purchasing-power no-ops")
 
     def test_non_capacity_skips_do_not_auto_stop(self):
         store = RecordingMarketDataStore()
+        clock = SimulatedCycleClock()
         manager = FastTradingStrategyManager(
             market_data_store=store,
             account_metas_provider=lambda: metas("A"),
             publish_command=lambda command, key: None,
-            fast_trading_settings=fast_trading_settings(cycle_seconds=0.01),
+            fast_trading_settings=fast_trading_settings(),
+            monotonic=clock.monotonic,
         )
 
-        try:
-            key = manager.start_strategy(strategy_command())
-            deadline = time.monotonic() + 1.0
-            while len(store.get_book_times) < 12 and time.monotonic() < deadline:
-                time.sleep(0.005)
+        strategy = clock.run_strategy(manager, strategy_command(), max_cycles=12)
 
-            self.assertGreaterEqual(len(store.get_book_times), 12)
-            self.assertIn(key, manager._strategies)
-        finally:
-            manager.stop_all()
+        self.assertEqual(len(store.get_book_times), 12)
+        self.assertEqual(strategy.consecutive_capacity_noops, 0)
+        self.assertEqual(strategy.last_reason, "no data yet")
 
     def test_missing_snapshots_do_not_auto_stop(self):
         store = RecordingMarketDataStore()
+        clock = SimulatedCycleClock()
         store.upsert_book(
             OrderBookSnapshot(
                 symbol="AAPL",
@@ -872,19 +1058,15 @@ class FastTradingManagerTests(unittest.TestCase):
             account_metas_provider=lambda: metas("A"),
             account_snapshots_provider=lambda: {},
             publish_command=lambda command, key: None,
-            fast_trading_settings=fast_trading_settings(cycle_seconds=0.01),
+            fast_trading_settings=fast_trading_settings(),
+            monotonic=clock.monotonic,
         )
 
-        try:
-            key = manager.start_strategy(strategy_command())
-            deadline = time.monotonic() + 1.0
-            while len(store.get_book_times) < 12 and time.monotonic() < deadline:
-                time.sleep(0.005)
+        strategy = clock.run_strategy(manager, strategy_command(), max_cycles=12)
 
-            self.assertGreaterEqual(len(store.get_book_times), 12)
-            self.assertIn(key, manager._strategies)
-        finally:
-            manager.stop_all()
+        self.assertEqual(len(store.get_book_times), 12)
+        self.assertEqual(strategy.consecutive_capacity_noops, 0)
+        self.assertEqual(strategy.last_reason, "account_snapshots_unavailable")
 
 
 if __name__ == "__main__":

@@ -165,7 +165,9 @@ class OperationsLog:
         for field_name in (
             "fast_trading_price_limit",
             "fast_trading_account_ids",
-            "fast_trading_aggression_level",
+            "fast_trading_book_levels",
+            "fast_trading_target_percentage",
+            "fast_trading_cycle_seconds",
         ):
             if field_name in command:
                 out[field_name] = command.get(field_name)

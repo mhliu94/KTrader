@@ -1632,6 +1632,27 @@ def render_control_panel_page(
         )
         for aid in sorted_account_ids
     )
+    fast_book_level_buttons = "\n".join(
+        (
+            f'<input class="choice-input" type="radio" id="fast-book-levels-{level}" name="fast_book_levels" value="{level}" required>'
+            f'<label class="choice-btn" for="fast-book-levels-{level}">{level}</label>'
+        )
+        for level in range(1, 6)
+    )
+    fast_target_percentage_buttons = "\n".join(
+        (
+            f'<input class="choice-input" type="radio" id="fast-target-percentage-{percentage}" name="fast_target_percentage" value="{percentage}" required>'
+            f'<label class="choice-btn" for="fast-target-percentage-{percentage}">{percentage}%</label>'
+        )
+        for percentage in range(10, 101, 10)
+    )
+    fast_cycle_seconds_buttons = "\n".join(
+        (
+            f'<input class="choice-input" type="radio" id="fast-cycle-seconds-{seconds}" name="fast_cycle_seconds" value="{seconds}" required>'
+            f'<label class="choice-btn" for="fast-cycle-seconds-{seconds}">{seconds}</label>'
+        )
+        for seconds in (5, 10, 15, 30, 60)
+    )
     fast_labels = {
         "modeE": t(lang, "mode_e"),
         "modeF": t(lang, "mode_f"),
@@ -1643,7 +1664,9 @@ def render_control_panel_page(
         "fastConfigRequired": t(lang, "fast_config_required"),
         "fastPriceLimitPositive": t(lang, "fast_price_limit_positive"),
         "fastAccountsRequired": t(lang, "fast_accounts_required"),
-        "fastAggressionLevelInvalid": t(lang, "fast_aggression_level_invalid"),
+        "fastBookLevelsInvalid": t(lang, "fast_book_levels_invalid"),
+        "fastTargetPercentageInvalid": t(lang, "fast_target_percentage_invalid"),
+        "fastCycleSecondsInvalid": t(lang, "fast_cycle_seconds_invalid"),
     }
     fast_labels_json = json.dumps(fast_labels).replace("<", "\\u003c")
     fast_trading_modal = f"""
@@ -1668,21 +1691,30 @@ def render_control_panel_page(
           </div>
         </div>
         <div style="margin-top:12px;">
-          <label>{html_escape(t(lang,'fast_aggression_level'))}</label>
-          <div class="choice-grid">
-            <input class="choice-input" type="radio" id="fast-aggression-1" name="fast_aggression_level" value="1" checked>
-            <label class="choice-btn" for="fast-aggression-1">{html_escape(t(lang,'fast_aggression_1'))}</label>
-            <input class="choice-input" type="radio" id="fast-aggression-2" name="fast_aggression_level" value="2">
-            <label class="choice-btn" for="fast-aggression-2">{html_escape(t(lang,'fast_aggression_2'))}</label>
-            <input class="choice-input" type="radio" id="fast-aggression-3" name="fast_aggression_level" value="3">
-            <label class="choice-btn" for="fast-aggression-3">{html_escape(t(lang,'fast_aggression_3'))}</label>
+          <label id="fast-book-levels-label">{html_escape(t(lang,'fast_book_levels'))}</label>
+          <div class="choice-grid" role="radiogroup" aria-labelledby="fast-book-levels-label" aria-required="true">
+            {fast_book_level_buttons}
           </div>
+        </div>
+        <div style="margin-top:12px;">
+          <label id="fast-target-percentage-label">{html_escape(t(lang,'fast_target_percentage'))}</label>
+          <div class="choice-grid" role="radiogroup" aria-labelledby="fast-target-percentage-label" aria-describedby="fast-target-percentage-help" aria-required="true">
+            {fast_target_percentage_buttons}
+          </div>
+          <div class="help" id="fast-target-percentage-help">{html_escape(t(lang,'fast_target_percentage_help'))}</div>
+        </div>
+        <div style="margin-top:12px;">
+          <label id="fast-cycle-seconds-label">{html_escape(t(lang,'fast_cycle_seconds'))}</label>
+          <div class="choice-grid" role="radiogroup" aria-labelledby="fast-cycle-seconds-label" aria-describedby="fast-cycle-seconds-help" aria-required="true">
+            {fast_cycle_seconds_buttons}
+          </div>
+          <div class="help" id="fast-cycle-seconds-help">{html_escape(t(lang,'fast_cycle_seconds_help'))}</div>
         </div>
         <label class="fast-account-row" style="margin-top:12px;">
           <input type="checkbox" id="fast-test-mode">
           <span class="fast-account-label">{html_escape(t(lang,'fast_test_mode'))}</span>
         </label>
-        <div class="warn" id="fast-trading-error" style="margin-top:10px;"></div>
+        <div class="warn" id="fast-trading-error" role="alert" style="margin-top:10px;"></div>
         <div class="modal-actions">
           <button class="btn" id="fast-cancel" type="button" style="background:#64748b;">{html_escape(t(lang,'fast_config_cancel'))}</button>
           <button class="btn btn-green" id="fast-submit-config" type="button">{html_escape(t(lang,'fast_config_submit'))}</button>
@@ -1765,10 +1797,20 @@ def render_control_panel_page(
             .map(function(input) { return input.getAttribute("data-fast-account-id") || ""; })
             .filter(Boolean);
           if (!accountIds.length) return { ok: false, error: labels.fastAccountsRequired };
-          const aggressionEl = modal.querySelector("input[name='fast_aggression_level']:checked");
-          const aggressionLevel = aggressionEl ? Number(aggressionEl.value) : 0;
-          if (![1, 2, 3].includes(aggressionLevel)) {
-            return { ok: false, error: labels.fastAggressionLevelInvalid };
+          const bookLevelsEl = modal.querySelector("input[name='fast_book_levels']:checked");
+          const bookLevels = bookLevelsEl ? Number(bookLevelsEl.value) : 0;
+          if (![1, 2, 3, 4, 5].includes(bookLevels)) {
+            return { ok: false, error: labels.fastBookLevelsInvalid };
+          }
+          const targetPercentageEl = modal.querySelector("input[name='fast_target_percentage']:checked");
+          const targetPercentage = targetPercentageEl ? Number(targetPercentageEl.value) : 0;
+          if (![10, 20, 30, 40, 50, 60, 70, 80, 90, 100].includes(targetPercentage)) {
+            return { ok: false, error: labels.fastTargetPercentageInvalid };
+          }
+          const cycleSecondsEl = modal.querySelector("input[name='fast_cycle_seconds']:checked");
+          const cycleSeconds = cycleSecondsEl ? Number(cycleSecondsEl.value) : 0;
+          if (![5, 10, 15, 30, 60].includes(cycleSeconds)) {
+            return { ok: false, error: labels.fastCycleSecondsInvalid };
           }
 
           return {
@@ -1776,7 +1818,9 @@ def render_control_panel_page(
             payload: {
               price_limit: priceLimit,
               account_ids: accountIds,
-              aggression_level: aggressionLevel,
+              book_levels: bookLevels,
+              target_percentage: targetPercentage,
+              cycle_seconds: cycleSeconds,
               test_mode: Boolean(testModeEl && testModeEl.checked)
             }
           };

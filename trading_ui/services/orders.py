@@ -451,7 +451,9 @@ def build_algo_start_command(
     order_rate_limit_per_minute: Optional[float],
     fast_trading_price_limit: Optional[float] = None,
     fast_trading_account_ids: Optional[List[str]] = None,
-    fast_trading_aggression_level: Optional[int] = None,
+    fast_trading_book_levels: Optional[int] = None,
+    fast_trading_target_percentage: Optional[int] = None,
+    fast_trading_cycle_seconds: Optional[int] = None,
     fast_trading_test_mode: Optional[bool] = None,
 ) -> Dict:
     cmd_id = f"algo_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
@@ -467,7 +469,9 @@ def build_algo_start_command(
             {
                 "fast_trading_price_limit": fast_trading_price_limit,
                 "fast_trading_account_ids": list(fast_trading_account_ids or []),
-                "fast_trading_aggression_level": fast_trading_aggression_level,
+                "fast_trading_book_levels": fast_trading_book_levels,
+                "fast_trading_target_percentage": fast_trading_target_percentage,
+                "fast_trading_cycle_seconds": fast_trading_cycle_seconds,
                 "fast_trading_test_mode": bool(fast_trading_test_mode),
             }
         )
@@ -523,7 +527,9 @@ def parse_fast_trading_settings(
     fast_price_limit_positive: str,
     fast_accounts_required: str,
     fast_account_duplicate: str,
-    fast_aggression_level_invalid: str,
+    fast_book_levels_invalid: str,
+    fast_target_percentage_invalid: str,
+    fast_cycle_seconds_invalid: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     payload, err = parse_fast_trading_config_payload(fast_trading_config_raw, fast_config_required)
     if err:
@@ -554,17 +560,24 @@ def parse_fast_trading_settings(
         seen_accounts.add(account_id)
         account_ids.append(account_id)
 
-    try:
-        aggression_level = safe_int(payload.get("aggression_level"))
-    except (TypeError, ValueError, OverflowError):
-        aggression_level = None
-    if aggression_level not in (1, 2, 3):
-        return None, fast_aggression_level_invalid
+    selections: Dict[str, int] = {}
+    for field, choices, error in (
+        ("book_levels", (1, 2, 3, 4, 5), fast_book_levels_invalid),
+        ("target_percentage", tuple(range(10, 101, 10)), fast_target_percentage_invalid),
+        ("cycle_seconds", (5, 10, 15, 30, 60), fast_cycle_seconds_invalid),
+    ):
+        try:
+            value = safe_float(payload.get(field))
+        except (TypeError, ValueError, OverflowError):
+            value = None
+        if value not in choices:
+            return None, error
+        selections[field] = int(value)
 
     return {
         "price_limit": float(price_limit),
         "account_ids": account_ids,
-        "aggression_level": aggression_level,
+        **selections,
         "test_mode": _truthy_bool(payload.get("test_mode")),
     }, None
 
@@ -604,7 +617,9 @@ def validate_algo_start_inputs(
     fast_price_limit_positive: str,
     fast_accounts_required: str,
     fast_account_duplicate: str,
-    fast_aggression_level_invalid: str,
+    fast_book_levels_invalid: str,
+    fast_target_percentage_invalid: str,
+    fast_cycle_seconds_invalid: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if trading_mode not in _ALLOWED_MODES:
         return None, invalid_mode
@@ -620,7 +635,9 @@ def validate_algo_start_inputs(
             fast_price_limit_positive=fast_price_limit_positive,
             fast_accounts_required=fast_accounts_required,
             fast_account_duplicate=fast_account_duplicate,
-            fast_aggression_level_invalid=fast_aggression_level_invalid,
+            fast_book_levels_invalid=fast_book_levels_invalid,
+            fast_target_percentage_invalid=fast_target_percentage_invalid,
+            fast_cycle_seconds_invalid=fast_cycle_seconds_invalid,
         )
         if err:
             return None, err
@@ -637,7 +654,9 @@ def validate_algo_start_inputs(
             order_rate_limit_per_minute=None,
             fast_trading_price_limit=fast_settings["price_limit"],
             fast_trading_account_ids=fast_settings["account_ids"],
-            fast_trading_aggression_level=fast_settings["aggression_level"],
+            fast_trading_book_levels=fast_settings["book_levels"],
+            fast_trading_target_percentage=fast_settings["target_percentage"],
+            fast_trading_cycle_seconds=fast_settings["cycle_seconds"],
             fast_trading_test_mode=fast_settings["test_mode"],
         ), None
 

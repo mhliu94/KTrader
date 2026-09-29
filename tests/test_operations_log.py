@@ -132,7 +132,9 @@ class OperationsLogTests(unittest.TestCase):
                 "symbol": "AAPL",
                 "fast_trading_price_limit": 100,
                 "fast_trading_account_ids": ["A"],
-                "fast_trading_aggression_level": 1,
+                "fast_trading_book_levels": 4,
+                "fast_trading_target_percentage": 70,
+                "fast_trading_cycle_seconds": 15,
             }
 
             try:
@@ -145,7 +147,11 @@ class OperationsLogTests(unittest.TestCase):
             self.assertEqual([event["event"] for event in events], ["algo_trading_started", "algo_trading_ended"])
             self.assertEqual(events[0]["session"]["fast_trading_price_limit"], 100)
             self.assertEqual(events[0]["session"]["fast_trading_account_ids"], ["A"])
-            self.assertEqual(events[0]["session"]["fast_trading_aggression_level"], 1)
+            for event in events:
+                self.assertEqual(event["session"]["fast_trading_book_levels"], 4)
+                self.assertEqual(event["session"]["fast_trading_target_percentage"], 70)
+                self.assertEqual(event["session"]["fast_trading_cycle_seconds"], 15)
+                self.assertNotIn("fast_trading_aggression_level", event["session"])
             self.assertEqual(events[0]["holdings"]["accounts"][0]["cash"], 1000)
             self.assertEqual(events[1]["holdings"]["accounts"][0]["cash"], 900)
             self.assertEqual(events[1]["details"]["reason"], "Manual stop")

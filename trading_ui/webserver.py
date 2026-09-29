@@ -98,7 +98,9 @@ def _extract_fast_trading_config(body: Dict) -> object:
     aliases = {
         "price_limit": ("fast_trading_price_limit", "price_limit"),
         "account_ids": ("fast_trading_account_ids", "account_ids"),
-        "aggression_level": ("fast_trading_aggression_level", "aggression_level"),
+        "book_levels": ("fast_trading_book_levels", "book_levels"),
+        "target_percentage": ("fast_trading_target_percentage", "target_percentage"),
+        "cycle_seconds": ("fast_trading_cycle_seconds", "cycle_seconds"),
         "test_mode": ("fast_trading_test_mode", "test_mode"),
     }
     found_alias = False
@@ -769,7 +771,9 @@ def submit_algo(
         fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
         fast_accounts_required=t(lang, "fast_accounts_required"),
         fast_account_duplicate=t(lang, "fast_account_duplicate"),
-        fast_aggression_level_invalid=t(lang, "fast_aggression_level_invalid"),
+        fast_book_levels_invalid=t(lang, "fast_book_levels_invalid"),
+        fast_target_percentage_invalid=t(lang, "fast_target_percentage_invalid"),
+        fast_cycle_seconds_invalid=t(lang, "fast_cycle_seconds_invalid"),
     )
 
     if err:
@@ -1080,7 +1084,9 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
         fast_accounts_required=t(lang, "fast_accounts_required"),
         fast_account_duplicate=t(lang, "fast_account_duplicate"),
-        fast_aggression_level_invalid=t(lang, "fast_aggression_level_invalid"),
+        fast_book_levels_invalid=t(lang, "fast_book_levels_invalid"),
+        fast_target_percentage_invalid=t(lang, "fast_target_percentage_invalid"),
+        fast_cycle_seconds_invalid=t(lang, "fast_cycle_seconds_invalid"),
     )
 
     if err:

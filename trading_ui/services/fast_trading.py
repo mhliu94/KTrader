@@ -17,8 +17,13 @@ LOGGER = logging.getLogger("trading-ui.fast-trading")
 FAST_TRADING_MODES = {"E", "F"}
 FAST_MIN_EXECUTABLE_SHARES = 100
 FAST_MAX_BOOK_LEVELS = 20
+FAST_TRADING_BOOK_LEVEL_CHOICES = (1, 2, 3, 4, 5)
+FAST_TRADING_TARGET_PERCENTAGE_CHOICES = tuple(range(10, 101, 10))
+FAST_TRADING_CYCLE_SECONDS_CHOICES = (5, 10, 15, 30, 60)
 FAST_MAX_CONSECUTIVE_CAPACITY_NOOPS = 10
 FAST_TRADING_DEFAULT_SETTINGS: Dict[str, Any] = {
+    # Retained for existing application config compatibility. E/F commands
+    # select book depth, target percentage, and cycle time explicitly.
     "aggression_levels": {
         1: {"book_levels": 2, "cycle_seconds": 30.0},
         2: {"book_levels": 3, "cycle_seconds": 20.0},
@@ -55,7 +60,9 @@ class FastTradingCycleResult:
     resting_side: str
     order_side: str
     book_levels: int
+    target_percentage: int
     total_resting_qty: int = 0
+    target_quantity: int = 0
     limit_price: Optional[float] = None
     per_account_qty: int = 0
     allocated_quantity: int = 0
@@ -111,6 +118,13 @@ def _positive_int(value: Any, label: str) -> int:
         raise ValueError(f"{label} must be a positive integer") from None
     if parsed <= 0 or str(value).strip() not in {str(parsed), f"{parsed}.0"}:
         raise ValueError(f"{label} must be a positive integer")
+    return parsed
+
+
+def _selected_int(value: Any, choices: Sequence[int], label: str) -> int:
+    parsed = _positive_int(value, label)
+    if parsed not in choices:
+        raise ValueError(f"{label} must be one of {', '.join(map(str, choices))}")
     return parsed
 
 
@@ -248,7 +262,7 @@ def _book_quantity_and_limit(
     levels: Sequence[BookLevel],
     price_limit: float,
     book_levels: int,
-) -> tuple[int, Optional[float], str]:
+) -> tuple[float, Optional[float], str]:
     top_levels = _ordered_top_levels(levels, mode, book_levels)
     if not top_levels:
         return 0, None, "no_resting_orders"
@@ -269,7 +283,7 @@ def _book_quantity_and_limit(
     total_qty = int(math.floor(total))
     if total_qty <= 0:
         return 0, float(execution_limit), "no_resting_orders_within_price_limit"
-    return total_qty, float(execution_limit), ""
+    return total, float(execution_limit), ""
 
 
 def _cooldown_eligible_accounts(
@@ -343,6 +357,7 @@ def build_fast_trading_cycle_commands(
     account_ids: Sequence[str],
     book_levels: int,
     account_metas: Mapping[str, AccountMeta],
+    target_percentage: int,
     account_snapshots: Optional[Mapping[str, AccountSnapshot]] = None,
     minimum_cycle_seconds_by_medium: Optional[Mapping[str, float]] = None,
     last_action_monotonic_by_account: Optional[Mapping[str, float]] = None,
@@ -356,9 +371,12 @@ def build_fast_trading_cycle_commands(
     if not clean_symbol:
         raise ValueError("symbol is required")
     clean_price_limit = _positive_float(price_limit, "fast trading price limit")
-    clean_book_levels = _positive_int(book_levels, "fast trading book levels")
-    if clean_book_levels > FAST_MAX_BOOK_LEVELS:
-        raise ValueError(f"fast trading book levels must be at most {FAST_MAX_BOOK_LEVELS}")
+    clean_book_levels = _selected_int(
+        book_levels, FAST_TRADING_BOOK_LEVEL_CHOICES, "fast trading book levels",
+    )
+    clean_target_percentage = _selected_int(
+        target_percentage, FAST_TRADING_TARGET_PERCENTAGE_CHOICES, "fast trading target percentage",
+    )
     clean_account_ids = _deduplicated_account_ids(account_ids)
     if not clean_account_ids:
         raise ValueError("fast trading account_ids must be non-empty")
@@ -374,19 +392,22 @@ def build_fast_trading_cycle_commands(
         resting_side=resting_side,
         order_side=order_side,
         book_levels=clean_book_levels,
+        target_percentage=clean_target_percentage,
     )
     if book.error:
         result.reason = str(book.error)
         return result
 
     levels = list(book.asks if mode == "E" else book.bids)
-    total_qty, execution_limit, book_reason = _book_quantity_and_limit(
+    total_resting_quantity, execution_limit, book_reason = _book_quantity_and_limit(
         mode=mode,
         levels=levels,
         price_limit=clean_price_limit,
         book_levels=clean_book_levels,
     )
+    total_qty = int(math.floor(total_resting_quantity))
     result.total_resting_qty = total_qty
+    result.target_quantity = int(math.floor(total_resting_quantity * clean_target_percentage / 100))
     result.limit_price = execution_limit
     if book_reason:
         result.reason = book_reason
@@ -428,7 +449,7 @@ def build_fast_trading_cycle_commands(
             return result
 
     allocations, capacity_noop, allocation_reason = _even_capacity_allocation(
-        total_qty=total_qty,
+        total_qty=result.target_quantity,
         account_ids=allocation_account_ids,
         mode=mode,
         symbol=clean_symbol,
@@ -464,6 +485,8 @@ def build_fast_trading_cycle_commands(
                 "algo_cycle_id": cycle_id,
                 "fast_trading_resting_side": resting_side,
                 "fast_trading_total_resting_qty": total_qty,
+                "fast_trading_target_percentage": clean_target_percentage,
+                "fast_trading_target_qty": result.target_quantity,
                 "fast_trading_book_levels": clean_book_levels,
                 "fast_trading_price_limit": clean_price_limit,
             }
@@ -513,7 +536,7 @@ class FastTradingStrategyManager:
     def _validated_strategy_values(
         self,
         command: Mapping[str, Any],
-    ) -> tuple[str, str, float, List[str], int, FastTradingAggressionSettings]:
+    ) -> tuple[str, str, float, List[str], int, int, int]:
         mode = str(command.get("trading_mode") or "").strip().upper()
         symbol = str(command.get("symbol") or "").strip().upper()
         if mode not in FAST_TRADING_MODES:
@@ -527,17 +550,25 @@ class FastTradingStrategyManager:
         account_ids = _deduplicated_account_ids(raw_accounts)
         if not account_ids:
             raise ValueError("fast trading strategy requires account ids")
-        aggression_level = _positive_int(
-            command.get("fast_trading_aggression_level"),
-            "fast trading aggression level",
+        book_levels = _selected_int(
+            command.get("fast_trading_book_levels"),
+            FAST_TRADING_BOOK_LEVEL_CHOICES,
+            "fast trading book levels",
         )
-        aggression = self._settings.aggression_levels.get(aggression_level)
-        if aggression is None:
-            raise ValueError("fast trading aggression level must be 1, 2, or 3")
-        return mode, symbol, price_limit, account_ids, aggression_level, aggression
+        target_percentage = _selected_int(
+            command.get("fast_trading_target_percentage"),
+            FAST_TRADING_TARGET_PERCENTAGE_CHOICES,
+            "fast trading target percentage",
+        )
+        cycle_seconds = _selected_int(
+            command.get("fast_trading_cycle_seconds"),
+            FAST_TRADING_CYCLE_SECONDS_CHOICES,
+            "fast trading cycle seconds",
+        )
+        return mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds
 
     def start_strategy(self, start_command: Dict[str, Any]) -> str:
-        mode, symbol, _, _, aggression_level, aggression = self._validated_strategy_values(start_command)
+        mode, symbol, _, _, book_levels, target_percentage, cycle_seconds = self._validated_strategy_values(start_command)
         strategy_command = dict(start_command)
         key = self._strategy_key(mode, symbol)
         self.stop_strategy(mode, symbol)
@@ -560,15 +591,15 @@ class FastTradingStrategyManager:
         self._record_strategy_started(strategy)
         thread.start()
         LOGGER.info(
-            "Algo trading started successfully mode=%s symbol=%s key=%s command_id=%s aggression=%s "
-            "book_levels=%s cycle_seconds=%s test_mode=%s",
+            "Algo trading started successfully mode=%s symbol=%s key=%s command_id=%s "
+            "book_levels=%s target_percentage=%s cycle_seconds=%s test_mode=%s",
             mode,
             symbol,
             key,
             strategy_command.get("command_id"),
-            aggression_level,
-            aggression.book_levels,
-            aggression.cycle_seconds,
+            book_levels,
+            target_percentage,
+            cycle_seconds,
             _truthy_bool(strategy_command.get("fast_trading_test_mode")),
         )
         return key
@@ -658,7 +689,7 @@ class FastTradingStrategyManager:
 
     def _run_strategy(self, strategy: _FastStrategy) -> None:
         try:
-            _, _, _, _, _, aggression = self._validated_strategy_values(strategy.command)
+            _, _, _, _, _, _, cycle_seconds = self._validated_strategy_values(strategy.command)
             while not strategy.stop_event.is_set():
                 cycle_start = self._monotonic()
                 result = self.run_cycle(strategy.command)
@@ -691,7 +722,7 @@ class FastTradingStrategyManager:
                     break
 
                 elapsed = self._monotonic() - cycle_start
-                if strategy.stop_event.wait(max(0.0, aggression.cycle_seconds - elapsed)):
+                if strategy.stop_event.wait(max(0.0, cycle_seconds - elapsed)):
                     break
         except Exception:
             strategy.last_reason = "Strategy error"
@@ -712,8 +743,8 @@ class FastTradingStrategyManager:
             )
 
     def run_cycle(self, command: Dict[str, Any]) -> FastTradingCycleResult:
-        mode, symbol, price_limit, account_ids, aggression_level, aggression = self._validated_strategy_values(command)
-        book = self._market_data_store.get_book(symbol, depth_limit=aggression.book_levels)
+        mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds = self._validated_strategy_values(command)
+        book = self._market_data_store.get_book(symbol, depth_limit=book_levels)
         account_metas = self._account_metas_provider()
         account_snapshots = (
             self._account_snapshots_provider()
@@ -735,7 +766,8 @@ class FastTradingStrategyManager:
                 book=book,
                 price_limit=price_limit,
                 account_ids=account_ids,
-                book_levels=aggression.book_levels,
+                book_levels=book_levels,
+                target_percentage=target_percentage,
                 account_metas=account_metas,
                 account_snapshots=account_snapshots,
                 minimum_cycle_seconds_by_medium=self._settings.minimum_cycle_seconds_by_medium,
@@ -752,8 +784,7 @@ class FastTradingStrategyManager:
         test_mode = _truthy_bool(command.get("fast_trading_test_mode"))
         try:
             for cmd in result.commands:
-                cmd["fast_trading_aggression_level"] = aggression_level
-                cmd["fast_trading_cycle_seconds"] = aggression.cycle_seconds
+                cmd["fast_trading_cycle_seconds"] = cycle_seconds
                 account_id = str(cmd.get("account_id") or "").strip()
                 key = account_id or "LIMIT_ORDER_FOK"
                 if test_mode:
@@ -778,14 +809,15 @@ class FastTradingStrategyManager:
                 self._inflight_account_ids.difference_update(reserved_account_ids)
 
         LOGGER.info(
-            "Fast trading cycle mode=%s symbol=%s resting_side=%s aggression=%s book_levels=%s "
-            "total_qty=%s allocated_qty=%s price=%s commands=%s capacity_noop=%s reason=%s",
+            "Fast trading cycle mode=%s symbol=%s resting_side=%s book_levels=%s target_percentage=%s "
+            "total_qty=%s target_qty=%s allocated_qty=%s price=%s commands=%s capacity_noop=%s reason=%s",
             result.trading_mode,
             result.symbol,
             result.resting_side,
-            aggression_level,
-            aggression.book_levels,
+            book_levels,
+            target_percentage,
             result.total_resting_qty,
+            result.target_quantity,
             result.allocated_quantity,
             result.limit_price,
             len(result.commands),

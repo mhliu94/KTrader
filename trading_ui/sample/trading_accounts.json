@@ -21,13 +21,15 @@
       "hidden": true
     },
     {
-      "ip_address": "45.32.153.180",
+      "ip_address": "45.76.93.115",
       "machine_alias": "Vultr-BareMetal-DE",
+      "operating_system": "linux",
       "numeric_id": 3,
       "string_id": "GIGA-HWK",
       "owner_type": "individual",
       "broker": "GigaMoney",
-      "trading_medium": "EMULATOR"
+      "trading_medium": "EMULATOR",
+      "monitor": true
     },
     {
       "ip_address": "172.105.216.196",
@@ -105,13 +107,15 @@
       "trading_medium": "WINDOWS"
     },
     {
-      "ip_address": "192.248.191.248",
+      "ip_address": "199.247.3.33",
       "machine_alias": "Vultr-BareMetal-DE2",
+      "operating_system": "linux",
       "numeric_id": 12,
       "string_id": "GIGA-DENGLEI",
       "owner_type": "individual",
       "broker": "GigaMoney",
-      "trading_medium": "EMULATOR"
+      "trading_medium": "EMULATOR",
+      "monitor": true
     },
     {
       "ip_address": "15.235.43.53",
@@ -145,20 +149,24 @@
     {
       "ip_address": "37.59.185.97",
       "machine_alias": "OVH-BareMetal-FR1",
+      "operating_system": "linux",
       "numeric_id": 16,
       "string_id": "GIGA-WJY",
       "owner_type": "individual",
       "broker": "GigaMoney",
-      "trading_medium": "EMULATOR"
+      "trading_medium": "EMULATOR",
+      "monitor": true
     },
     {
       "ip_address": "37.59.185.183",
       "machine_alias": "OVH-BareMetal-FR2",
+      "operating_system": "linux",
       "numeric_id": 17,
       "string_id": "GIGA-YSY",
       "owner_type": "individual",
       "broker": "GigaMoney",
-      "trading_medium": "EMULATOR"
+      "trading_medium": "EMULATOR",
+      "monitor": true
     },
     {
       "ip_address": "57.128.235.101",

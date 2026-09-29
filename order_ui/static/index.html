@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orders · KTrader</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="KTrader Orders"><span class="brand-icon">K</span>KTrader <span class="brand-section">/ Orders</span></a>
+    <div id="session" hidden><span id="username"></span><button id="logout" class="quiet" type="button">Sign out</button></div>
+  </header>
+  <main>
+    <section id="login" class="login-card" hidden>
+      <p class="eyebrow">ORDER MONITOR</p><h1>Your trading day,<br>in one place.</h1>
+      <p class="muted">Sign in with your KTrader credentials to follow today's orders.</p>
+      <form id="login-form">
+        <label>Username<input id="login-username" autocomplete="username" required maxlength="256"></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" required maxlength="4096"></label>
+        <p id="login-error" class="error" role="alert"></p>
+        <button id="login-submit" class="primary" type="submit">Sign in</button>
+      </form>
+    </section>
+    <p id="loading" role="status">Connecting to your order dashboard…</p>
+    <section id="dashboard" hidden>
+      <div class="page-heading"><div><p class="eyebrow">ORDER MONITOR</p><h1>Today's orders</h1><p id="day" class="muted"></p></div><span id="feed-status" class="feed" role="status">Connecting</span></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div class="metrics">
+        <div><span>All orders</span><strong id="total">0</strong></div>
+        <div><span>Working</span><strong id="working">0</strong></div>
+        <div><span>Filled</span><strong id="filled">0</strong></div>
+        <div><span>Canceled / rejected / expired</span><strong id="closed">0</strong></div>
+      </div>
+      <section class="orders-panel" aria-label="Orders">
+        <div class="filters">
+          <label>Account<select id="account"><option value="">All accounts</option></select></label>
+          <label>Status<select id="status"><option value="">All statuses</option></select></label>
+          <label class="search">Search<input id="search" type="search" placeholder="Symbol, order ID or command ID" aria-label="Search orders"></label>
+        </div>
+        <div class="table-meta"><span id="count">0 orders</span><span id="refreshed">Waiting for data</span></div>
+        <div class="table-scroll">
+          <table><caption class="sr-only">Today's orders, newest update first</caption><thead><tr>
+            <th scope="col">Updated</th><th scope="col">Account</th><th scope="col">Order</th><th scope="col">Symbol / side</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col" class="number">Filled / quantity</th><th scope="col" class="number">Limit / stop</th><th scope="col" class="number">Avg. fill</th><th scope="col">Details</th>
+          </tr></thead><tbody id="orders"></tbody></table>
+        </div>
+        <div id="empty" class="empty" hidden><strong id="empty-title">No orders today</strong><p id="empty-detail">New orders will appear here automatically.</p></div>
+      </section>
+      <footer><span>Read-only order status · Latest updates first</span><span id="refresh-note"></span></footer>
+    </section>
+  </main>
+</body>
+</html>

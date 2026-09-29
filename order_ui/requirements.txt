@@ -1,0 +1,5 @@
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+confluent-kafka>=2.6,<3
+jsonschema[format]>=4.23,<5
+tzdata>=2025.1

@@ -1,0 +1,18 @@
+{
+  "order_ui": {
+    "timezone": "America/New_York",
+    "refresh_interval_seconds": 2,
+    "server": {
+      "host": "127.0.0.1",
+      "port": 8030,
+      "ssl_certfile": "",
+      "ssl_keyfile": ""
+    },
+    "kafka": {
+      "topic": "order-status",
+      "group_id": "order-dashboard",
+      "poll_timeout_sec": 1.0,
+      "client_config": {}
+    }
+  }
+}

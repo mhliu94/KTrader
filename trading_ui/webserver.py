@@ -30,7 +30,6 @@ from .templates import (
     resolve_account_sort,
     render_trading_status_page,
 )
-from .services.fallback import load_fallback_snapshots
 from .services.operations_log import OperationsLog
 from .services.orders import (
     validate_order_inputs,
@@ -117,11 +116,7 @@ def _extract_fast_trading_config(body: Dict) -> object:
 
 
 def get_served_snapshots() -> Tuple[Dict, str]:
-    if store.kafka_seen_any():
-        return _filter_configured_snapshots(store.get_all()), "kafka"
-    fallback_path = APP_CONFIG["fallback"]["file"]
-    snaps = load_fallback_snapshots(fallback_path)
-    return _filter_configured_snapshots(snaps), f"fallback_file:{fallback_path}"
+    return _filter_configured_snapshots(store.get_all()), "kafka"
 
 
 def _render_account_details_content(lang: str, account_sort: str, security: str) -> str:

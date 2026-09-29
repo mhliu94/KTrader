@@ -31,7 +31,6 @@ class AccountLiveUpdateTests(unittest.TestCase):
         }
         webserver.SYMBOLS = ["TSLA"]
         webserver.APP_CONFIG = {
-            "fallback": {"file": "/does/not/matter.json"},
             "kafka": {"account_details_topic": "account-details"},
         }
         webserver.SESSIONS = {"token": "trader"}
@@ -42,6 +41,21 @@ class AccountLiveUpdateTests(unittest.TestCase):
         webserver.SYMBOLS = self._saved["SYMBOLS"]
         webserver.APP_CONFIG = self._saved["APP_CONFIG"]
         webserver.SESSIONS = self._saved["SESSIONS"]
+
+    def test_waits_for_live_data_without_loading_sample_balances(self):
+        accounts, source = webserver.get_served_snapshots()
+        self.assertEqual(accounts, {})
+        self.assertEqual(source, "kafka")
+        html = webserver._render_account_details_content("en", ACCOUNT_SORT_NUMERIC_ID, "TSLA")
+        self.assertIn("#1 - A", html)
+        self.assertIn("Some accounts have no snapshot yet", html)
+
+        webserver.store.upsert(AccountSnapshot(account_id="A", cash=250))
+        webserver.store.upsert(AccountSnapshot(account_id="UNCONFIGURED", cash=999))
+        accounts, source = webserver.get_served_snapshots()
+        self.assertEqual(set(accounts), {"A"})
+        self.assertEqual(accounts["A"].cash, 250)
+        self.assertEqual(source, "kafka")
 
     def test_store_update_emits_fresh_account_details_event(self):
         async def exercise_stream() -> tuple[dict, dict]:

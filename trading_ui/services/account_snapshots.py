@@ -1,4 +1,5 @@
-import json
+"""Parse live account snapshots received from Kafka."""
+
 import math
 from typing import Any, Dict, Optional
 
@@ -11,11 +12,6 @@ def parse_bool(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
-def load_json_file(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 def finite_float_or_none(value: Any) -> Optional[float]:
@@ -89,28 +85,3 @@ def parse_snapshot_obj(obj: Dict[str, Any]) -> Optional[AccountSnapshot]:
         )
     except Exception:
         return None
-
-
-def load_fallback_snapshots(fallback_path: str) -> Dict[str, AccountSnapshot]:
-    """
-    Fallback file format:
-    {
-      "asof": "...",
-      "accounts": [
-        { "account_id": "...", "cash": ..., "positions": [...] },
-        ...
-      ]
-    }
-    """
-    try:
-        data = load_json_file(fallback_path)
-        accounts = data.get("accounts", []) or []
-        out: Dict[str, AccountSnapshot] = {}
-        for a in accounts:
-            snap = parse_snapshot_obj(a)
-            if snap is not None:
-                snap.trading_enabled = False
-                out[snap.account_id] = snap
-        return out
-    except Exception:
-        return {}

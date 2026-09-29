@@ -167,11 +167,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
     if "symbols" not in cfg or not isinstance(cfg["symbols"], list) or not cfg["symbols"]:
         raise ValueError("Config missing non-empty 'symbols' list.")
 
-    cfg.setdefault("fallback", {})
-    if "file" not in cfg["fallback"]:
-        raise ValueError("Config missing fallback.file (path to JSON fallback snapshots).")
-    cfg["fallback"]["file"] = _resolve_path(str(cfg["fallback"]["file"]))
-
     cfg.setdefault("kafka", {})
     cfg["kafka"].setdefault("bootstrap_servers", os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"))
     cfg["kafka"].setdefault(

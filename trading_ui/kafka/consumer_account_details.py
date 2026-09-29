@@ -8,7 +8,7 @@ from confluent_kafka import Consumer, KafkaError
 
 from ..store import AccountStore
 from ..models import AccountMeta, AccountSnapshot
-from ..services.fallback import parse_snapshot_obj
+from ..services.account_snapshots import parse_snapshot_obj
 
 LOGGER = logging.getLogger(__name__)
 

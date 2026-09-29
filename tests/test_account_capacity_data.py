@@ -4,7 +4,7 @@ import unittest
 
 from trading_server.tiger import TigerBroker
 from trading_ui.models import AccountSnapshot, Position
-from trading_ui.services.fallback import parse_snapshot_obj
+from trading_ui.services.account_snapshots import parse_snapshot_obj
 from trading_ui.services.operations_log import OperationsLog
 
 
@@ -32,7 +32,7 @@ class AccountCapacityModelTests(unittest.TestCase):
         self.assertEqual(payload["positions"][0]["qty"], 150)
         self.assertEqual(payload["positions"][0]["available_qty"], 120)
 
-    def test_fallback_parser_reads_capacity_fields_and_preserves_missing_values(self):
+    def test_live_snapshot_parser_reads_capacity_fields_and_preserves_missing_values(self):
         snapshot = parse_snapshot_obj(
             {
                 "account_id": "A",

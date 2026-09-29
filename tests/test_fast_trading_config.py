@@ -12,7 +12,6 @@ class FastTradingConfigTests(unittest.TestCase):
         config = {
             "accounts": [{"id": "unused-by-load-config"}],
             "symbols": ["AAPL"],
-            "fallback": {"file": "fallback.json"},
             "auth": {
                 "users": {
                     "admin": {"password": "admin-password"},

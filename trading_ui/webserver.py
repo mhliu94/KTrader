@@ -456,7 +456,6 @@ def submit_order(
         shares_raw=shares,
         dollars_raw=dollar_amount,
         account_metas=ACCOUNT_METAS,
-        symbols=SYMBOLS,
         invalid_account=t(lang, "invalid_account"),
         invalid_symbol=t(lang, "invalid_symbol"),
         invalid_side=t(lang, "invalid_side"),
@@ -488,7 +487,7 @@ async def submit_quick_order(request: Request):
     form = await request.form()
 
     account_ids = [str(x) for x in form.getlist("account_ids")]
-    symbol = str(form.get("symbol", ""))
+    symbol = str(form.get("symbol", "")).strip().upper()
     side = str(form.get("side", "BUY"))
     dollars_raw = str(form.get("dollar_amount", "") or "").strip()
     if not dollars_raw:
@@ -512,7 +511,6 @@ async def submit_quick_order(request: Request):
             dollars_raw=dollars_raw,
             market_last=market_last,
             account_metas=ACCOUNT_METAS,
-            symbols=SYMBOLS,
             invalid_account=t(lang, "invalid_account"),
             invalid_symbol=t(lang, "invalid_symbol"),
             invalid_side=t(lang, "invalid_side"),
@@ -545,7 +543,7 @@ async def submit_limit_order(request: Request):
     form = await request.form()
 
     account_ids = [str(x) for x in form.getlist("account_ids")]
-    symbol = str(form.get("symbol", ""))
+    symbol = str(form.get("symbol", "")).strip().upper()
     side = str(form.get("side", "BUY"))
     shares_raw = str(form.get("shares", "") or "").strip()
     limit_price_raw = str(form.get("limit_price", "") or "").strip()
@@ -572,7 +570,6 @@ async def submit_limit_order(request: Request):
             through_market_pct_raw=through_market_pct_raw,
             market_last=market_last,
             account_metas=ACCOUNT_METAS,
-            symbols=SYMBOLS,
             invalid_account=t(lang, "invalid_account"),
             invalid_symbol=t(lang, "invalid_symbol"),
             invalid_side=t(lang, "invalid_side"),
@@ -627,9 +624,7 @@ async def submit_cancel_open_orders(request: Request):
             account_id=account_id,
             symbol=symbol or None,
             account_metas=ACCOUNT_METAS,
-            symbols=SYMBOLS,
             invalid_account=t(lang, "invalid_account"),
-            invalid_symbol=t(lang, "invalid_symbol"),
         )
         if err:
             return RedirectResponse(url=f"/control-panel?err={quote(err)}", status_code=303)
@@ -760,7 +755,6 @@ def submit_algo(
         single_order_notional_limit_raw=single_order_notional_limit,
         order_rate_limit_per_minute_raw=order_rate_limit_per_minute,
         fast_trading_config_raw=fast_trading_config,
-        symbols=SYMBOLS,
         account_metas=ACCOUNT_METAS,
         invalid_mode=t(lang, "invalid_mode"),
         invalid_symbol=t(lang, "invalid_symbol"),
@@ -835,34 +829,28 @@ async def api_submit_account_quick_order(request: Request) -> JSONResponse:
         )
 
     account_id = account_ids[0]
-    configured_symbols = _normalized_configured_symbols()
     symbol = str(form.get("symbol", "")).strip().upper()
     side = str(form.get("side", "BUY"))
-    dollars_raw = str(form.get("dollar_amount", "") or "").strip() or "10000"
-
-    market_last = None
-    quote_row = MD_STORE.get_for_symbols([symbol]).get(symbol)
-    if quote_row is not None and quote_row.error is None:
-        market_last = quote_row.last
+    shares_raw = str(form.get("shares", "") or "").strip()
 
     try:
-        cmd, err = validate_quick_order_inputs(
+        cmd, err = validate_order_inputs(
             account_id=account_id,
             symbol=symbol,
             side=side,
-            dollars_raw=dollars_raw,
-            market_last=market_last,
+            shares_raw=shares_raw,
+            dollars_raw=None,
             account_metas=ACCOUNT_METAS,
-            symbols=configured_symbols,
             invalid_account=t(lang, "invalid_account"),
             invalid_symbol=t(lang, "invalid_symbol"),
             invalid_side=t(lang, "invalid_side"),
+            both_shares_and_dollars=t(lang, "shares_positive"),
+            neither_shares_nor_dollars=t(lang, "shares_positive"),
+            shares_positive=t(lang, "shares_positive"),
             dollars_positive=t(lang, "dollars_positive"),
-            no_last_price=t(lang, "quick_no_last_price"),
-            dollars_too_low=t(lang, "quick_dollars_too_low"),
         )
     except (TypeError, ValueError, OverflowError):
-        cmd, err = None, t(lang, "dollars_positive")
+        cmd, err = None, t(lang, "shares_positive")
 
     if err:
         return JSONResponse({"ok": False, "error": err}, status_code=400)
@@ -904,7 +892,6 @@ async def api_submit_account_limit_order(request: Request) -> JSONResponse:
         )
 
     account_id = account_ids[0]
-    configured_symbols = _normalized_configured_symbols()
     symbol = str(form.get("symbol", "")).strip().upper()
     side = str(form.get("side", "BUY"))
     shares_raw = str(form.get("shares", "") or "").strip()
@@ -927,7 +914,6 @@ async def api_submit_account_limit_order(request: Request) -> JSONResponse:
             through_market_pct_raw=through_market_pct_raw,
             market_last=market_last,
             account_metas=ACCOUNT_METAS,
-            symbols=configured_symbols,
             invalid_account=t(lang, "invalid_account"),
             invalid_symbol=t(lang, "invalid_symbol"),
             invalid_side=t(lang, "invalid_side"),
@@ -1019,7 +1005,6 @@ async def api_submit_order(request: Request) -> JSONResponse:
         shares_raw=shares_raw,
         dollars_raw=dollars_raw,
         account_metas=ACCOUNT_METAS,
-        symbols=SYMBOLS,
         invalid_account=t(lang, "invalid_account"),
         invalid_symbol=t(lang, "invalid_symbol"),
         invalid_side=t(lang, "invalid_side"),
@@ -1073,7 +1058,6 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         single_order_notional_limit_raw=single_order_notional_limit_raw,
         order_rate_limit_per_minute_raw=order_rate_limit_per_minute_raw,
         fast_trading_config_raw=fast_trading_config_raw,
-        symbols=SYMBOLS,
         account_metas=ACCOUNT_METAS,
         invalid_mode=t(lang, "invalid_mode"),
         invalid_symbol=t(lang, "invalid_symbol"),
@@ -1214,11 +1198,13 @@ def market_insights(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/market-data")
-async def api_market_data(request: Request) -> JSONResponse:
+async def api_market_data(request: Request, symbol: str | None = None) -> JSONResponse:
     user, gate = _require_auth_api(request)
     if gate is not None:
         return gate
-    rows = MD_STORE.get_for_symbols(_normalized_configured_symbols())
+    clean_symbol = str(symbol or "").strip().upper()
+    requested_symbols = [clean_symbol] if clean_symbol else _normalized_configured_symbols()
+    rows = MD_STORE.get_for_symbols(requested_symbols)
     enriched_rows: Dict[str, QuoteRow] = {}
     for symbol, row in rows.items():
         prev_close = HIST_CLOSE_STORE.get_prev_close(symbol)
@@ -1269,8 +1255,8 @@ async def api_market_insights(request: Request, symbol: str, depth: int = 20) ->
         return gate
 
     clean_symbol = str(symbol).strip().upper()
-    if clean_symbol not in SYMBOLS:
-        return JSONResponse({"ok": False, "error": "Unknown symbol"}, status_code=404)
+    if not clean_symbol:
+        return JSONResponse({"ok": False, "error": t(resolve_lang(request), "invalid_symbol")}, status_code=400)
 
     max_levels = int(APP_CONFIG.get("market_data", {}).get("market_insights_max_levels", 20))
     requested_depth = max(1, min(int(depth), max_levels))

@@ -88,9 +88,14 @@ class AccountOrderRenderingTests(unittest.TestCase):
         self.assertIn('action="/api/account-orders/limit"', html)
         self.assertEqual(html.count('name="account_id"'), 2)
         self.assertNotIn('name="account_ids"', html)
-        self.assertIn("name='symbol' value='AAPL' checked", html)
-        self.assertEqual(html.count("name='symbol' value='MSFT'"), 1)
-        self.assertIn('id="account-limit-symbol" name="symbol"', html)
+        self.assertIn('id="account-quick-shares" name="shares"', html)
+        self.assertNotIn('id="account-quick-dollar-amount"', html)
+        self.assertIn('<input id="account-quick-symbol" name="symbol"', html)
+        self.assertIn('<input id="account-limit-symbol" name="symbol"', html)
+        self.assertNotIn("account-order-symbol-suggestions", html)
+        self.assertEqual(html.count("data-account-order-symbol='AAPL' aria-pressed='true'"), 2)
+        self.assertEqual(html.count("data-account-order-symbol='MSFT' aria-pressed='false'"), 2)
+        self.assertEqual(html.count('value="" autocomplete="off"'), 2)
         self.assertIn("data-account-limit-shares='3000'", html)
         self.assertIn("data-account-limit-shares='50000'", html)
         self.assertIn('name="through_market_pct" value="20"', html)
@@ -99,6 +104,16 @@ class AccountOrderRenderingTests(unittest.TestCase):
         self.assertIn('controls.forEach(function(control) { control.disabled = true; })', html)
         self.assertIn('form.dataset.contextVersion !== contextVersion', html)
         self.assertIn('const closeButton = modal.querySelector(".modal-close")', html)
+
+    def test_symbol_inputs_remain_editable_without_configured_buttons(self):
+        html = render_live_account_details_page("", lang="en", symbols=[])
+
+        self.assertIn('<input id="account-quick-symbol" name="symbol"', html)
+        self.assertIn('<input id="account-limit-symbol" name="symbol"', html)
+        self.assertEqual(html.count('value="" autocomplete="off"'), 2)
+        self.assertNotIn("data-account-order-symbol=", html)
+        self.assertIn('aria-describedby="account-quick-symbol-help" required', html)
+        self.assertIn('aria-describedby="account-limit-symbol-help" required', html)
 
 
 class AccountOrderEndpointTests(unittest.TestCase):
@@ -138,7 +153,7 @@ class AccountOrderEndpointTests(unittest.TestCase):
                 "account_id": "A",
                 "symbol": "AAPL",
                 "side": "BUY",
-                "dollar_amount": "1050",
+                "shares": "1",
             },
         )
 
@@ -149,43 +164,112 @@ class AccountOrderEndpointTests(unittest.TestCase):
         self.assertEqual(key, "A")
         self.assertEqual(command["type"], "MARKET_ORDER")
         self.assertEqual(command["account_id"], "A")
-        self.assertEqual(command["qty_shares"], 10)
+        self.assertEqual(command["qty_shares"], 1)
         self.assertNotIn("notional_usd", command)
 
-    def test_quick_market_order_uses_ten_thousand_dollar_default(self):
+    def test_quick_market_order_requires_a_share_quantity(self):
         response = self.client.post(
             "/api/account-orders/quick-market",
             data={
                 "account_id": "B",
                 "symbol": "MSFT",
                 "side": "SELL",
-                "dollar_amount": "",
+                "shares": "",
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        command, key = self.published()[0]
-        self.assertEqual(key, "B")
-        self.assertEqual(command["account_id"], "B")
-        self.assertEqual(command["side"], "SELL")
-        self.assertEqual(command["qty_shares"], 40)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.published(), [])
 
-    def test_quick_market_normalizes_configured_symbol_case(self):
-        webserver.SYMBOLS = [" aapl "]
+    def test_custom_symbol_orders_do_not_require_configuration_or_quotes(self):
+        for configured_symbols in (["AAPL", "MSFT"], []):
+            webserver.SYMBOLS = configured_symbols
+            for kind in ("quick-market", "limit"):
+                with self.subTest(symbols=configured_symbols, kind=kind):
+                    count = len(self.published())
+                    response = self.client.post(
+                        f"/api/account-orders/{kind}",
+                        data={
+                            "account_id": "A",
+                            "symbol": " nvda ",
+                            "side": "BUY",
+                            "shares": "10",
+                            "limit_price": "123.45",
+                        },
+                    )
 
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(len(self.published()), count + 1)
+                    command, key = self.published()[-1]
+                    self.assertEqual(key, "A")
+                    self.assertEqual(command["symbol"], "NVDA")
+                    self.assertEqual(command["qty_shares"], 10)
+                    if kind == "limit":
+                        self.assertEqual(command["limit_price"], 123.45)
+
+    def test_order_endpoints_reject_blank_symbols(self):
+        for kind in ("quick-market", "limit"):
+            for symbol in (None, "", "   "):
+                with self.subTest(kind=kind, symbol=symbol):
+                    data = {
+                        "account_id": "A",
+                        "side": "BUY",
+                        "shares": "10",
+                        "limit_price": "123.45",
+                    }
+                    if symbol is not None:
+                        data["symbol"] = symbol
+                    response = self.client.post(f"/api/account-orders/{kind}", data=data)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["error"], "Symbol is required.")
+        self.assertEqual(self.published(), [])
+
+    def test_custom_symbol_through_market_order_uses_available_quote(self):
+        webserver.MD_STORE = FakeMarketDataStore({"NVDA": 100.0})
         response = self.client.post(
-            "/api/account-orders/quick-market",
+            "/api/account-orders/limit",
             data={
                 "account_id": "A",
-                "symbol": "AAPL",
-                "side": "BUY",
-                "dollar_amount": "1000",
+                "symbol": " nvda ",
+                "side": "SELL",
+                "shares": "100",
+                "through_market_pct": "5",
             },
         )
 
         self.assertEqual(response.status_code, 200)
         command, _ = self.published()[0]
-        self.assertEqual(command["symbol"], "AAPL")
+        self.assertEqual(command["symbol"], "NVDA")
+        self.assertEqual(command["limit_price"], 95.0)
+
+    def test_custom_symbol_through_market_order_still_requires_a_quote(self):
+        response = self.client.post(
+            "/api/account-orders/limit",
+            data={
+                "account_id": "A",
+                "symbol": "NVDA",
+                "side": "BUY",
+                "shares": "100",
+                "through_market_pct": "5",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.published(), [])
+
+    def test_custom_symbol_quote_is_available_for_order_summary(self):
+        webserver.MD_STORE = FakeMarketDataStore({"NVDA": 100.0})
+        response = self.client.get("/api/market-data", params={"symbol": " nvda "})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()["rows"]), {"NVDA"})
+        self.assertEqual(response.json()["rows"]["NVDA"]["last"], 100.0)
+
+    def test_default_quote_request_keeps_configured_symbols(self):
+        response = self.client.get("/api/market-data")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()["rows"]), {"AAPL", "MSFT"})
 
     def test_quick_market_rejects_duplicate_or_unconfigured_accounts(self):
         duplicate = self.client.post(
@@ -194,7 +278,7 @@ class AccountOrderEndpointTests(unittest.TestCase):
                 "account_id": ["A", "B"],
                 "symbol": "AAPL",
                 "side": "BUY",
-                "dollar_amount": "1000",
+                "shares": "1",
             },
         )
         hidden = self.client.post(
@@ -203,7 +287,7 @@ class AccountOrderEndpointTests(unittest.TestCase):
                 "account_id": "HIDDEN",
                 "symbol": "AAPL",
                 "side": "BUY",
-                "dollar_amount": "1000",
+                "shares": "1",
             },
         )
 
@@ -301,7 +385,7 @@ class AccountOrderEndpointTests(unittest.TestCase):
                 "account_id": "A",
                 "symbol": "AAPL",
                 "side": "BUY",
-                "dollar_amount": "NaN",
+                "shares": "not-an-integer",
             },
         )
         limit = self.client.post(

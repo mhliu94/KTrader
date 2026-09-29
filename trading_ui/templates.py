@@ -700,18 +700,13 @@ def render_account_details_page(
 
 def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
     configured_symbols = sorted(_configured_securities(symbols))
-    quick_symbol_buttons = "".join(
-        (
-            f"<input class='choice-input' type='radio' id='account-quick-symbol-{idx}' "
-            f"name='symbol' value='{html_escape(symbol)}'{' checked' if idx == 1 else ''}>"
-            f"<label class='choice-btn' for='account-quick-symbol-{idx}'>{html_escape(symbol)}</label>"
-        )
-        for idx, symbol in enumerate(configured_symbols, start=1)
+    symbol_buttons = "".join(
+        f"<button class='choice-btn{' active' if idx == 0 else ''}' type='button' "
+        f"data-account-order-symbol='{html_escape(symbol)}' "
+        f"aria-pressed='{'true' if idx == 0 else 'false'}'>{html_escape(symbol)}</button>"
+        for idx, symbol in enumerate(configured_symbols)
     )
-    limit_symbol_options = "".join(
-        f"<option value='{html_escape(symbol)}'>{html_escape(symbol)}</option>"
-        for symbol in configured_symbols
-    )
+    symbol_required = "" if configured_symbols else " required"
     limit_share_buttons = "".join(
         f"<button class='choice-btn' type='button' data-account-limit-shares='{shares}'>{shares}</button>"
         for shares in (3000, 5000, 10000, 20000, 30000, 50000)
@@ -735,8 +730,12 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
               data-failure-message="{html_escape(t(lang, 'publish_failed'))}">
           <input type="hidden" name="account_id" value="">
           <div>
-            <label>{html_escape(t(lang, 'quick_symbol'))}</label>
-            <div class="choice-grid">{quick_symbol_buttons}</div>
+            <label for="account-quick-symbol">{html_escape(t(lang, 'quick_symbol'))}</label>
+            <div class="choice-grid" role="group" aria-label="{html_escape(t(lang, 'symbol'))}"
+                 style="margin:8px 0;">{symbol_buttons}</div>
+            <input id="account-quick-symbol" name="symbol" value="" autocomplete="off" spellcheck="false"
+                   aria-describedby="account-quick-symbol-help"{symbol_required}>
+            <div class="help" id="account-quick-symbol-help">{html_escape(t(lang, 'account_order_symbol_help'))}</div>
           </div>
           <div>
             <label>{html_escape(t(lang, 'quick_side'))}</label>
@@ -748,8 +747,8 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
             </div>
           </div>
           <div>
-            <label for="account-quick-dollar-amount">{html_escape(t(lang, 'quick_dollars'))}</label>
-            <input id="account-quick-dollar-amount" name="dollar_amount" placeholder="10000" inputmode="decimal">
+            <label for="account-quick-shares">{html_escape(t(lang, 'shares'))}</label>
+            <input id="account-quick-shares" name="shares" placeholder="e.g. 100" inputmode="numeric" required>
           </div>
           <div class="help">
             {html_escape(t(lang, 'quick_selected_cash'))}: <b data-account-order-cash>—</b>
@@ -788,7 +787,11 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
           <div class="row">
             <div>
               <label for="account-limit-symbol">{html_escape(t(lang, 'limit_symbol'))}</label>
-              <select id="account-limit-symbol" name="symbol" required>{limit_symbol_options}</select>
+              <div class="choice-grid" role="group" aria-label="{html_escape(t(lang, 'symbol'))}"
+                   style="margin:8px 0;">{symbol_buttons}</div>
+              <input id="account-limit-symbol" name="symbol" value="" autocomplete="off" spellcheck="false"
+                     aria-describedby="account-limit-symbol-help"{symbol_required}>
+              <div class="help" id="account-limit-symbol-help">{html_escape(t(lang, 'account_order_symbol_help'))}</div>
             </div>
             <div>
               <label>{html_escape(t(lang, 'limit_side'))}</label>
@@ -891,10 +894,20 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
         }
 
         function selectedSymbol(modal) {
-          const checked = modal.querySelector("input[name='symbol']:checked");
-          if (checked) return checked.value;
-          const select = modal.querySelector("select[name='symbol']");
-          return select ? select.value : "";
+          const button = modal.querySelector("[data-account-order-symbol][aria-pressed='true']");
+          if (button) return button.dataset.accountOrderSymbol;
+          const input = modal.querySelector("input[name='symbol']");
+          return input ? input.value.trim().toUpperCase() : "";
+        }
+
+        function selectSymbolButton(modal, symbol) {
+          modal.querySelectorAll("[data-account-order-symbol]").forEach(function(button) {
+            const selected = button.dataset.accountOrderSymbol === symbol;
+            button.classList.toggle("active", selected);
+            button.setAttribute("aria-pressed", String(selected));
+          });
+          const input = modal.querySelector("input[name='symbol']");
+          if (input) input.required = !symbol;
         }
 
         function renderSummary(modal) {
@@ -915,9 +928,11 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
         function refreshSummary() {
           if (!activeModal) return Promise.resolve();
           if (summaryRequest) return summaryRequest;
+          const symbol = selectedSymbol(activeModal);
+          const marketUrl = "/api/market-data" + (symbol ? "?symbol=" + encodeURIComponent(symbol) : "");
           summaryRequest = Promise.all([
             fetch("/api/accounts", { cache: "no-store", credentials: "same-origin" }),
-            fetch("/api/market-data", { cache: "no-store", credentials: "same-origin" })
+            fetch(marketUrl, { cache: "no-store", credentials: "same-origin" })
           ]).then(async function(responses) {
             if (responses[0].ok) accountsCache = await responses[0].json();
             if (responses[1].ok) marketCache = await responses[1].json();
@@ -926,6 +941,7 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
           }).finally(function() {
             summaryRequest = null;
             renderSummary(activeModal);
+            if (activeModal && selectedSymbol(activeModal) !== symbol) return refreshSummary();
           });
           return summaryRequest;
         }
@@ -945,6 +961,8 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
           if (!form) return;
           Array.from(form.elements).forEach(function(control) { control.disabled = false; });
           form.reset();
+          const defaultSymbolButton = modal.querySelector("[data-account-order-symbol]");
+          selectSymbolButton(modal, defaultSymbolButton ? defaultSymbolButton.dataset.accountOrderSymbol : "");
           form.dataset.contextVersion = String(nextContextVersion++);
           const accountInput = form.querySelector("input[name='account_id']");
           if (accountInput) accountInput.value = accountId;
@@ -986,6 +1004,7 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
           if (!modal) return;
           const contextVersion = form.dataset.contextVersion || "";
           const formData = new FormData(form);
+          formData.set("symbol", selectedSymbol(modal));
           const controls = Array.from(form.elements);
           const message = modal.querySelector("[data-account-order-message]");
           controls.forEach(function(control) { control.disabled = true; });
@@ -1032,6 +1051,14 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
             closeModal();
             return;
           }
+          const symbolButton = event.target.closest("[data-account-order-symbol]");
+          if (symbolButton && activeModal && activeModal.contains(symbolButton)) {
+            const symbol = symbolButton.getAttribute("aria-pressed") === "true" ? "" : symbolButton.dataset.accountOrderSymbol;
+            selectSymbolButton(activeModal, symbol);
+            renderSummary(activeModal);
+            refreshSummary();
+            return;
+          }
           const sharesButton = event.target.closest("[data-account-limit-shares]");
           if (sharesButton && activeModal === limitModal) {
             const shares = limitModal.querySelector("input[name='shares']");
@@ -1047,6 +1074,9 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
 
         root.addEventListener("input", function(event) {
           if (!(event.target instanceof Element)) return;
+          if (activeModal && event.target.matches("[name='symbol']")) {
+            renderSummary(activeModal);
+          }
           if (event.target.matches("#account-limit-shares")) {
             const current = event.target.value.trim();
             limitModal.querySelectorAll("[data-account-limit-shares]").forEach(function(button) {
@@ -1058,6 +1088,7 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
         root.addEventListener("change", function(event) {
           if (activeModal && event.target instanceof Element && event.target.matches("[name='symbol']")) {
             renderSummary(activeModal);
+            refreshSummary();
           }
         });
 

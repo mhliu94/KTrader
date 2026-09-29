@@ -84,7 +84,6 @@ def validate_order_inputs(
     shares_raw: Optional[str],
     dollars_raw: Optional[str],
     account_metas: Dict[str, AccountMeta],
-    symbols: List[str],
     # localized strings injected
     invalid_account: str,
     invalid_symbol: str,
@@ -96,7 +95,8 @@ def validate_order_inputs(
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if account_id not in account_metas:
         return None, invalid_account
-    if symbol not in symbols:
+    symbol = str(symbol or "").strip().upper()
+    if not symbol:
         return None, invalid_symbol
     if side not in ("BUY", "SELL"):
         return None, invalid_side
@@ -131,7 +131,6 @@ def validate_quick_order_inputs(
     dollars_raw: Optional[str],
     market_last: Optional[float],
     account_metas: Dict[str, AccountMeta],
-    symbols: List[str],
     invalid_account: str,
     invalid_symbol: str,
     invalid_side: str,
@@ -141,7 +140,8 @@ def validate_quick_order_inputs(
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if account_id not in account_metas:
         return None, invalid_account
-    if symbol not in symbols:
+    symbol = str(symbol or "").strip().upper()
+    if not symbol:
         return None, invalid_symbol
     if side not in ("BUY", "SELL"):
         return None, invalid_side
@@ -222,7 +222,6 @@ def validate_limit_order_inputs(
     through_market_pct_raw: Optional[str],
     market_last: Optional[float],
     account_metas: Dict[str, AccountMeta],
-    symbols: List[str],
     invalid_account: str,
     invalid_symbol: str,
     invalid_side: str,
@@ -232,7 +231,8 @@ def validate_limit_order_inputs(
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if account_id not in account_metas:
         return None, invalid_account
-    if symbol not in symbols:
+    symbol = str(symbol or "").strip().upper()
+    if not symbol:
         return None, invalid_symbol
     if side not in ("BUY", "SELL"):
         return None, invalid_side
@@ -299,18 +299,12 @@ def validate_cancel_open_orders_inputs(
     account_id: str,
     symbol: Optional[str],
     account_metas: Dict[str, AccountMeta],
-    symbols: List[str],
     invalid_account: str,
-    invalid_symbol: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if account_id not in account_metas:
         return None, invalid_account
 
     clean_symbol = str(symbol or "").strip().upper()
-    known_symbols = {str(s).strip().upper() for s in symbols}
-    if clean_symbol and clean_symbol not in known_symbols:
-        return None, invalid_symbol
-
     return build_cancel_open_orders_command(account_id, account_metas, clean_symbol or None), None
 
 
@@ -605,7 +599,6 @@ def validate_algo_start_inputs(
     single_order_notional_limit_raw: Optional[str],
     order_rate_limit_per_minute_raw: Optional[str],
     fast_trading_config_raw: object,
-    symbols: List[str],
     account_metas: Dict[str, AccountMeta],
     # localized strings injected
     invalid_mode: str,
@@ -623,7 +616,8 @@ def validate_algo_start_inputs(
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if trading_mode not in _ALLOWED_MODES:
         return None, invalid_mode
-    if symbol not in symbols:
+    symbol = str(symbol or "").strip().upper()
+    if not symbol:
         return None, invalid_symbol
 
     if trading_mode in _FAST_MODES:

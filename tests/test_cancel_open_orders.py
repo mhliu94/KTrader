@@ -43,11 +43,9 @@ class CancelOpenOrdersValidationTests(unittest.TestCase):
     def test_builds_symbol_scoped_cancel_command(self):
         cmd, err = validate_cancel_open_orders_inputs(
             account_id="A",
-            symbol="aapl",
+            symbol=" nvda ",
             account_metas=metas(),
-            symbols=["AAPL", "MSFT"],
             invalid_account="invalid account",
-            invalid_symbol="invalid symbol",
         )
 
         self.assertIsNone(err)
@@ -55,7 +53,7 @@ class CancelOpenOrdersValidationTests(unittest.TestCase):
         assert cmd is not None
         self.assertEqual(cmd["type"], "CANCEL_OPEN_ORDERS")
         self.assertEqual(cmd["account_id"], "A")
-        self.assertEqual(cmd["symbol"], "AAPL")
+        self.assertEqual(cmd["symbol"], "NVDA")
         self.assertEqual(cmd["broker"], "Tiger")
         self.assertEqual(cmd["broker_id"], "TG-A")
 
@@ -64,9 +62,7 @@ class CancelOpenOrdersValidationTests(unittest.TestCase):
             account_id="A",
             symbol="",
             account_metas=metas(),
-            symbols=["AAPL", "MSFT"],
             invalid_account="invalid account",
-            invalid_symbol="invalid symbol",
         )
 
         self.assertIsNone(err)
@@ -111,7 +107,7 @@ class CancelOpenOrdersUiTests(unittest.TestCase):
 
         response = client.post(
             "/submit-cancel-open-orders",
-            data={"account_ids": ["A", "B"], "symbol": "aapl"},
+            data={"account_ids": ["A", "B"], "symbol": " nvda "},
             follow_redirects=False,
         )
 
@@ -122,7 +118,7 @@ class CancelOpenOrdersUiTests(unittest.TestCase):
         self.assertEqual([key for _, key in producer.published], ["A", "B"])
         self.assertEqual([cmd["account_id"] for cmd, _ in producer.published], ["A", "B"])
         self.assertTrue(all(cmd["type"] == "CANCEL_OPEN_ORDERS" for cmd, _ in producer.published))
-        self.assertTrue(all(cmd["symbol"] == "AAPL" for cmd, _ in producer.published))
+        self.assertTrue(all(cmd["symbol"] == "NVDA" for cmd, _ in producer.published))
 
     def test_submit_expands_all_servers_and_all_symbols(self):
         client = TestClient(webserver.app)

@@ -1,4 +1,9 @@
 import unittest
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+import trading_ui.webserver as webserver
 
 from trading_ui.services.market_data import (
     BookLevel,
@@ -72,6 +77,23 @@ class MarketDataBookTests(unittest.TestCase):
         self.assertIsNotNone(row)
         assert row is not None
         self.assertEqual(row.last, 103)
+
+
+class MarketInsightsSymbolTests(unittest.TestCase):
+    def test_custom_symbol_can_fetch_book_without_being_configured(self):
+        store = MarketDataStore()
+        store.upsert_book(OrderBookSnapshot(symbol="NVDA", bids=[BookLevel(price=100, quantity=10)], asks=[]))
+        with patch.multiple(webserver, MD_STORE=store, SYMBOLS=["AAPL"], SESSIONS={"token": "trader"}):
+            client = TestClient(webserver.app)
+            try:
+                client.cookies.set("auth_token", "token")
+                response = client.get("/api/market-insights", params={"symbol": " nvda "})
+            finally:
+                client.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["symbol"], "NVDA")
+        self.assertEqual(response.json()["bids"][0]["price"], 100)
 
 
 if __name__ == "__main__":

@@ -27,12 +27,11 @@ class QuickOrderValidationTests(unittest.TestCase):
     def test_floors_dollar_amount_to_whole_shares(self):
         cmd, err = validate_quick_order_inputs(
             account_id="A",
-            symbol="AAPL",
+            symbol=" nvda ",
             side="BUY",
             dollars_raw="10000",
             market_last=123.45,
             account_metas=metas("A"),
-            symbols=["AAPL"],
             invalid_account="invalid account",
             invalid_symbol="invalid symbol",
             invalid_side="invalid side",
@@ -44,6 +43,7 @@ class QuickOrderValidationTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertIsNotNone(cmd)
         assert cmd is not None
+        self.assertEqual(cmd["symbol"], "NVDA")
         self.assertEqual(cmd["qty_shares"], 81)
         self.assertNotIn("notional_usd", cmd)
 
@@ -55,7 +55,6 @@ class QuickOrderValidationTests(unittest.TestCase):
             dollars_raw="10",
             market_last=123.45,
             account_metas=metas("A"),
-            symbols=["AAPL"],
             invalid_account="invalid account",
             invalid_symbol="invalid symbol",
             invalid_side="invalid side",
@@ -75,7 +74,6 @@ class QuickOrderValidationTests(unittest.TestCase):
             dollars_raw="10000",
             market_last=float("nan"),
             account_metas=metas("A"),
-            symbols=["AAPL"],
             invalid_account="invalid account",
             invalid_symbol="invalid symbol",
             invalid_side="invalid side",
@@ -95,7 +93,6 @@ class QuickOrderValidationTests(unittest.TestCase):
             shares_raw="not-shares",
             dollars_raw="1000",
             account_metas=metas("A"),
-            symbols=["AAPL"],
             invalid_account="invalid account",
             invalid_symbol="invalid symbol",
             invalid_side="invalid side",
@@ -117,7 +114,6 @@ class QuickOrderValidationTests(unittest.TestCase):
             "limit_price_raw": "",
             "through_market_pct_raw": "5",
             "account_metas": metas("A"),
-            "symbols": ["AAPL"],
             "invalid_account": "invalid account",
             "invalid_symbol": "invalid symbol",
             "invalid_side": "invalid side",
@@ -172,7 +168,6 @@ class AlgoOrderValidationTests(unittest.TestCase):
             "single_order_notional_limit_raw": None,
             "order_rate_limit_per_minute_raw": None,
             "fast_trading_config_raw": fast_config,
-            "symbols": ["AAPL"],
             "account_metas": metas("A", "B"),
             "invalid_mode": "invalid mode",
             "invalid_symbol": "invalid symbol",
@@ -214,6 +209,21 @@ class AlgoOrderValidationTests(unittest.TestCase):
         self.assertNotIn("end_time_et", cmd)
         self.assertNotIn("max_volume", cmd)
         self.assertNotIn("price_target", cmd)
+
+    def test_algo_order_normalizes_custom_symbols_and_rejects_blank_symbols(self):
+        for symbol, expected in ((" nvda ", "NVDA"), (" brk.b ", "BRK.B"), ("   ", None)):
+            with self.subTest(symbol=symbol):
+                cmd, err = self._validate(
+                    symbol=symbol,
+                    fast_config={"price_limit": 100, "account_ids": ["A"],
+                                 "book_levels": 1, "target_percentage": 100, "cycle_seconds": 30},
+                )
+                if expected is None:
+                    self.assertIsNone(cmd)
+                    self.assertEqual(err, "invalid symbol")
+                else:
+                    self.assertIsNone(err)
+                    self.assertEqual(cmd["symbol"], expected)
 
     def test_fast_sell_mode_accepts_json_configuration(self):
         cmd, err = self._validate(

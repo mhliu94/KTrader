@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KTrader · Configurator</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div id="login-screen" class="login-screen">
+    <form id="login-form" class="login-card">
+      <div class="brand-mark">K</div>
+      <p class="eyebrow">KTRADER / CONFIGURATOR</p>
+      <h1>A place for every setting.</h1>
+      <p class="muted">Sign in with the admin credentials from your trading configuration.</p>
+      <label>Username<input name="username" autocomplete="username" value="admin" required></label>
+      <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="error" role="alert"></p>
+      <button class="primary" type="submit">Open configurator <span aria-hidden="true">→</span></button>
+    </form>
+  </div>
+  <div id="workspace" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">K</span><span>KTrader<small>CONFIGURATOR</small></span></div>
+      <p class="nav-label">CONFIGURATION</p>
+      <nav aria-label="Configuration files">
+        <button class="nav-item active" data-tab="config"><span>01</span>Trading settings</button>
+        <button class="nav-item" data-tab="accounts"><span>02</span>Trading accounts</button>
+      </nav>
+      <div class="sidebar-note"><span class="status-dot"></span> File editor<p>Saved settings take effect after the affected services restart.</p></div>
+      <button id="logout" class="quiet">Sign out</button>
+    </aside>
+    <main>
+      <header class="topbar"><span>Workspace <span class="muted">/</span> <span id="breadcrumb">Trading settings</span></span><span class="admin-badge">ADMIN</span></header>
+      <div class="page">
+        <div class="page-heading"><div><p class="eyebrow">KTRADER CONFIGURATION</p><h1 id="page-title">Trading settings</h1><p id="page-description" class="muted"></p></div><span id="change-status" class="status-pill">Saved</span></div>
+        <div class="file-bar"><span class="file-label">EDITING</span><code id="file-path"></code></div>
+        <div class="toolbar"><div class="segmented" role="group" aria-label="Editor mode"><button id="form-mode" class="selected" aria-pressed="true">Form editor</button><button id="json-mode" aria-pressed="false">JSON editor</button></div><button id="reload" class="quiet">Reload files</button></div>
+        <div id="notice" class="notice" role="status" hidden></div>
+        <form id="editor-form"><div id="form-editor"></div></form>
+        <div id="json-editor" hidden><label for="raw-json">Complete document</label><p class="muted">Edit any field, including additional broker settings. Values are validated before saving.</p><textarea id="raw-json" spellcheck="false" aria-describedby="json-error"></textarea><p id="json-error" class="error" role="alert"></p></div>
+      </div>
+      <footer class="save-bar"><div><strong id="save-summary">All changes saved</strong><small>Each save keeps a backup of the previous file.</small></div><div class="save-actions"><button id="discard" class="secondary">Discard changes</button><button id="save" class="primary">Save settings</button></div></footer>
+    </main>
+  </div>
+  <dialog id="confirm-dialog"><h2 id="confirm-title"></h2><p id="confirm-message" class="muted"></p><div class="dialog-actions"><button id="confirm-cancel" class="secondary">Cancel</button><button id="confirm-ok" class="primary">Continue</button></div></dialog>
+</body>
+</html>

@@ -30,6 +30,7 @@ dist/
 nohup.out
 *.pid
 *.sock
+*.configurator.lock
 
 # Local application state and generated data
 *_state.json

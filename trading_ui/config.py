@@ -286,15 +286,25 @@ def _load_account_entries(cfg: Dict[str, Any]) -> tuple[List[Dict[str, Any]], bo
 
 
 def load_account_metas(cfg: Dict[str, Any]) -> Dict[str, AccountMeta]:
-    metas: Dict[str, AccountMeta] = {}
     accounts, require_static_fields = _load_account_entries(cfg)
+    return parse_account_metas(accounts, require_static_fields=require_static_fields)
+
+
+def parse_account_metas(
+    accounts: List[Dict[str, Any]], *, require_static_fields: bool = True,
+    include_hidden: bool = False,
+) -> Dict[str, AccountMeta]:
+    """Validate account entries without reading a file; optionally include hidden accounts."""
+    if not isinstance(accounts, list) or not accounts:
+        raise ValueError("Trading accounts must contain a non-empty accounts list.")
+    metas: Dict[str, AccountMeta] = {}
 
     seen_num_ids: set[int] = set()
     seen_string_ids: set[str] = set()
     for idx, a in enumerate(accounts, start=1):
         if not isinstance(a, dict):
             raise ValueError(f"Account entry #{idx} must be an object.")
-        if _account_field(a, "hidden", "Hidden") is True:
+        if not include_hidden and _account_field(a, "hidden", "Hidden") is True:
             continue
 
         raw_string_id = _account_field(a, "string_id", "id", "account_id")

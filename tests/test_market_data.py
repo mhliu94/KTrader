@@ -1,3 +1,4 @@
+import re
 import unittest
 from unittest.mock import patch
 
@@ -80,6 +81,53 @@ class MarketDataBookTests(unittest.TestCase):
 
 
 class MarketInsightsSymbolTests(unittest.TestCase):
+    def test_page_lists_all_received_books_and_configured_symbols(self):
+        store = MarketDataStore()
+        for symbol in ("NVDA", "MSFT", "AAPL"):
+            store.upsert_book(OrderBookSnapshot(symbol=symbol))
+        with patch.multiple(
+            webserver, MD_STORE=store, SYMBOLS=[" nvda ", "NVDA", "TSLA", ""],
+            SESSIONS={"token": "trader"},
+        ):
+            client = TestClient(webserver.app)
+            try:
+                client.cookies.set("auth_token", "token")
+                for lang in ("en", "zh"):
+                    with self.subTest(lang=lang):
+                        response = client.get("/market-insights", params={"lang": lang})
+                        self.assertEqual(response.status_code, 200)
+                        select = re.search(r'<select id="mi-symbol">(.*?)</select>', response.text, re.S)
+                        self.assertIsNotNone(select)
+                        self.assertEqual(
+                            re.findall(r'<option value="([^"]+)"', select.group(1)),
+                            ["AAPL", "MSFT", "NVDA", "TSLA"],
+                        )
+            finally:
+                client.close()
+
+    def test_poll_discovers_new_symbols_even_when_selected_book_has_no_data(self):
+        store = MarketDataStore()
+        with patch.multiple(webserver, MD_STORE=store, SYMBOLS=["TSLA"], SESSIONS={"token": "trader"}):
+            client = TestClient(webserver.app)
+            try:
+                client.cookies.set("auth_token", "token")
+                before = client.get("/api/market-insights", params={"symbol": "TSLA"})
+                self.assertEqual(before.status_code, 200)
+                self.assertEqual(before.json()["symbols"], ["TSLA"])
+
+                store.upsert_book(OrderBookSnapshot(symbol="NVDA", bids=[BookLevel(price=100, quantity=10)]))
+                store.upsert_book(OrderBookSnapshot(symbol="AAPL"))
+                after = client.get("/api/market-insights", params={"symbol": "TSLA"})
+                self.assertEqual(after.status_code, 200)
+                self.assertEqual(after.json()["symbols"], ["AAPL", "NVDA", "TSLA"])
+                self.assertEqual(after.json()["error"], "no data yet")
+
+                discovered = client.get("/api/market-insights", params={"symbol": "NVDA"})
+                self.assertEqual(discovered.status_code, 200)
+                self.assertEqual(discovered.json()["bids"][0]["price"], 100)
+            finally:
+                client.close()
+
     def test_custom_symbol_can_fetch_book_without_being_configured(self):
         store = MarketDataStore()
         store.upsert_book(OrderBookSnapshot(symbol="NVDA", bids=[BookLevel(price=100, quantity=10)], asks=[]))

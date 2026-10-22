@@ -37,11 +37,11 @@ from .services.orders import (
     validate_limit_order_inputs,
     validate_cancel_open_orders_inputs,
     validate_algo_start_inputs,
-    validate_algo_stop_inputs,
+    build_algo_stop_command,
     validate_currency_conversion_inputs,
     validate_trading_status_inputs,
 )
-from .services.fast_trading import FAST_TRADING_MODES, FastTradingStrategyManager
+from .services.fast_trading import FastTradingStrategyManager
 from .kafka.consumer_account_details import AccountDetailsConsumer
 from .kafka.consumer_market_data import PriceBookConsumer
 from .kafka.producer_trading_commands import TradingCommandsProducer
@@ -87,6 +87,10 @@ def _normalized_configured_symbols() -> list[str]:
         symbols.append(symbol)
         seen.add(symbol)
     return symbols
+
+
+def _market_insights_symbols() -> list[str]:
+    return sorted(set(_normalized_configured_symbols()) | set(MD_STORE.get_book_symbols()))
 
 
 def _extract_fast_trading_config(body: Dict) -> object:
@@ -730,13 +734,6 @@ def submit_algo(
     request: Request,
     trading_mode: str = Form(...),
     symbol: str = Form(...),
-    max_volume: str | None = Form("-1"),
-    market_volume_target: str | None = Form("-1"),
-    end_time_et: str | None = Form("2099-12-31T00:00"),
-    abs_pos_change_limit: str | None = Form("-1"),
-    price_target: str | None = Form(None),
-    single_order_notional_limit: str | None = Form("-1"),
-    order_rate_limit_per_minute: str | None = Form("-1"),
     fast_trading_config: str | None = Form(None),
 ):
     user, gate = _require_auth_page(request)
@@ -747,20 +744,11 @@ def submit_algo(
     cmd, err = validate_algo_start_inputs(
         trading_mode=trading_mode,
         symbol=symbol,
-        max_volume_raw=max_volume,
-        market_volume_target_raw=market_volume_target,
-        end_time_et_raw=end_time_et,
-        abs_pos_change_limit_raw=abs_pos_change_limit,
-        price_target_raw=price_target,
-        single_order_notional_limit_raw=single_order_notional_limit,
-        order_rate_limit_per_minute_raw=order_rate_limit_per_minute,
         fast_trading_config_raw=fast_trading_config,
         account_metas=ACCOUNT_METAS,
         invalid_mode=t(lang, "invalid_mode"),
         invalid_symbol=t(lang, "invalid_symbol"),
         invalid_account=t(lang, "invalid_account"),
-        number_required=t(lang, "number_required"),
-        end_time_required=t(lang, "end_time_required"),
         fast_config_required=t(lang, "fast_config_required"),
         fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
         fast_accounts_required=t(lang, "fast_accounts_required"),
@@ -775,13 +763,9 @@ def submit_algo(
 
     try:
         assert COMMANDS_PRODUCER is not None and cmd is not None
-        if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES:
-            assert FAST_TRADING_MANAGER is not None
-            strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
-            ok = f"{t(lang,'algo_submitted')} {strategy_key}. {t(lang,'published_cmd')}={cmd['command_id']}"
-        else:
-            COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("symbol", "ALGO"))
-            ok = f"{t(lang,'published_cmd')}={cmd['command_id']}"
+        assert FAST_TRADING_MANAGER is not None
+        strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
+        ok = f"{t(lang,'algo_submitted')} {strategy_key}. {t(lang,'published_cmd')}={cmd['command_id']}"
         return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
@@ -1037,33 +1021,16 @@ async def api_submit_algo(request: Request) -> JSONResponse:
     trading_mode = str(body.get("trading_mode", ""))
     symbol = str(body.get("symbol", ""))
 
-    max_volume_raw = None if body.get("max_volume") is None else str(body.get("max_volume"))
-    mvt_raw = None if body.get("market_volume_target") is None else str(body.get("market_volume_target"))
-    raw_end_time = body.get("end_time_et", body.get("end_time_bjt"))
-    end_time_raw = None if raw_end_time is None else str(raw_end_time)
-    abs_lim_raw = None if body.get("abs_pos_change_limit") is None else str(body.get("abs_pos_change_limit"))
-    price_target_raw = None if body.get("price_target") is None else str(body.get("price_target"))
-    single_order_notional_limit_raw = None if body.get("single_order_notional_limit") is None else str(body.get("single_order_notional_limit"))
-    order_rate_limit_per_minute_raw = None if body.get("order_rate_limit_per_minute") is None else str(body.get("order_rate_limit_per_minute"))
     fast_trading_config_raw = _extract_fast_trading_config(body)
 
     cmd, err = validate_algo_start_inputs(
         trading_mode=trading_mode,
         symbol=symbol,
-        max_volume_raw=max_volume_raw,
-        market_volume_target_raw=mvt_raw,
-        end_time_et_raw=end_time_raw,
-        abs_pos_change_limit_raw=abs_lim_raw,
-        price_target_raw=price_target_raw,
-        single_order_notional_limit_raw=single_order_notional_limit_raw,
-        order_rate_limit_per_minute_raw=order_rate_limit_per_minute_raw,
         fast_trading_config_raw=fast_trading_config_raw,
         account_metas=ACCOUNT_METAS,
         invalid_mode=t(lang, "invalid_mode"),
         invalid_symbol=t(lang, "invalid_symbol"),
         invalid_account=t(lang, "invalid_account"),
-        number_required=t(lang, "number_required"),
-        end_time_required=t(lang, "end_time_required"),
         fast_config_required=t(lang, "fast_config_required"),
         fast_price_limit_positive=t(lang, "fast_price_limit_positive"),
         fast_accounts_required=t(lang, "fast_accounts_required"),
@@ -1079,56 +1046,43 @@ async def api_submit_algo(request: Request) -> JSONResponse:
     try:
         assert COMMANDS_PRODUCER is not None
         assert cmd is not None
-        if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES:
-            assert FAST_TRADING_MANAGER is not None
-            strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
-            return JSONResponse({"ok": True, "command": cmd, "strategy_key": strategy_key})
-
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("symbol", "ALGO"))
-        return JSONResponse({"ok": True, "command": cmd})
+        assert FAST_TRADING_MANAGER is not None
+        strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
+        return JSONResponse({"ok": True, "command": cmd, "strategy_key": strategy_key})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/submit-algo-stop")
-async def submit_algo_stop(
+def submit_algo_stop(
     request: Request,
-    trading_mode: str = Form(...),
     reason: str | None = Form(None),
 ):
     user, gate = _require_auth_page(request)
     if gate is not None:
         return gate
     lang = resolve_lang(request)
-    form = await request.form()
-    account_ids = [str(x) for x in form.getlist("account_ids")]
-
-    cmd, err = validate_algo_stop_inputs(
-        trading_mode=trading_mode,
-        account_ids=account_ids,
-        reason_raw=reason,
-        account_metas=ACCOUNT_METAS,
-        invalid_mode=t(lang, "invalid_mode"),
-        invalid_account=t(lang, "invalid_account"),
-    )
-
-    if err:
-        return RedirectResponse(url=f"/control-panel?err={quote(err)}", status_code=303)
-
+    # Scope comes from the server, never from submitted mode/account fields.
+    # Stop local strategies first even if Kafka is unavailable.
     try:
-        assert COMMANDS_PRODUCER is not None and cmd is not None
-        stopped_count = 0
-        if str(cmd.get("trading_mode") or "").strip().upper() in FAST_TRADING_MODES and FAST_TRADING_MANAGER:
-            stopped_count = FAST_TRADING_MANAGER.stop_matching(
-                trading_mode=str(cmd.get("trading_mode") or ""),
-                account_ids=cmd.get("account_ids"),
-            )
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("trading_mode", "ALGO_STOP"))
-        stopped_suffix = f" stopped={stopped_count}" if stopped_count else ""
-        ok = f"{t(lang,'published_cmd')}={cmd['command_id']}{stopped_suffix}"
-        return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
+        if FAST_TRADING_MANAGER is None:
+            raise RuntimeError(t(lang, "algo_stop_unavailable"))
+        stopped_count = FAST_TRADING_MANAGER.stop_all()
     except Exception as e:
         return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
+
+    ok = t(lang, "algo_stop_submitted").format(count=stopped_count)
+    cmd = build_algo_stop_command(reason=reason)
+    try:
+        if COMMANDS_PRODUCER is None:
+            raise RuntimeError(t(lang, "algo_stop_notification_failed"))
+        COMMANDS_PRODUCER.publish_order(cmd, key="ALGO_STOP")
+    except Exception:
+        LOGGER.exception("All local algorithm strategies stopped, but stop notification failed")
+        err = t(lang, "algo_stop_notification_failed")
+        return RedirectResponse(url=f"/control-panel?ok={quote(ok)}&err={quote(err)}", status_code=303)
+    ok += f" {t(lang,'published_cmd')}={cmd['command_id']}"
+    return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
 
 
 @app.get("/submit-algo")
@@ -1191,7 +1145,7 @@ def market_insights(request: Request) -> HTMLResponse:
     max_levels = int(APP_CONFIG.get("market_data", {}).get("market_insights_max_levels", 20))
     inner = render_market_insights_page(
         lang=lang,
-        symbols=_normalized_configured_symbols(),
+        symbols=_market_insights_symbols(),
         max_levels=max_levels,
     )
     return HTMLResponse(render_layout(lang, "market-insights", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
@@ -1265,6 +1219,7 @@ async def api_market_insights(request: Request, symbol: str, depth: int = 20) ->
     return JSONResponse(
         {
             "symbol": book.symbol,
+            "symbols": _market_insights_symbols(),
             "depth_limit": book.depth_limit,
             "asof_epoch": book.asof_epoch,
             "error": book.error,

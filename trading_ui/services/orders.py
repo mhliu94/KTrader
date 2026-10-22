@@ -2,7 +2,6 @@ import json
 import math
 import time
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from typing import Dict, Optional, Tuple, List
 
 from ..models import AccountMeta
@@ -408,41 +407,12 @@ def validate_trading_status_inputs(
 # Algo trading (new)
 # ---------------------------
 
-_ALLOWED_MODES = ("A", "B", "C", "D", "E", "F")
 _FAST_MODES = ("E", "F")
-_US_EASTERN = ZoneInfo("America/New_York")
-
-
-def _parse_datetime_local_to_us_eastern_iso(dt_local: str) -> Optional[str]:
-    """
-    Input from <input type="datetime-local"> like: "2099-12-31T00:00"
-    Interpret as US Eastern Time and emit ISO8601 with offset.
-    """
-    s = (dt_local or "").strip()
-    if not s:
-        return None
-    # Accept both "YYYY-MM-DDTHH:MM" and "YYYY-MM-DDTHH:MM:SS"
-    try:
-        if len(s) == 16:
-            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M")
-        else:
-            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
-        dt = dt.replace(tzinfo=_US_EASTERN)
-        return dt.isoformat()
-    except Exception:
-        return None
 
 
 def build_algo_start_command(
     trading_mode: str,
     symbol: str,
-    max_volume: Optional[float],
-    market_volume_target: Optional[float],
-    end_time_et_iso: Optional[str],
-    abs_pos_change_limit: Optional[float],
-    price_target: Optional[float],
-    single_order_notional_limit: Optional[float],
-    order_rate_limit_per_minute: Optional[float],
     fast_trading_price_limit: Optional[float] = None,
     fast_trading_account_ids: Optional[List[str]] = None,
     fast_trading_book_levels: Optional[int] = None,
@@ -450,6 +420,8 @@ def build_algo_start_command(
     fast_trading_cycle_seconds: Optional[int] = None,
     fast_trading_test_mode: Optional[bool] = None,
 ) -> Dict:
+    if trading_mode not in _FAST_MODES:
+        raise ValueError("Algorithmic trading mode must be E or F.")
     cmd_id = f"algo_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
     cmd: Dict = {
         "type": "START_ALGO_TRADING",
@@ -457,30 +429,13 @@ def build_algo_start_command(
         "ts": iso_utc_now(),
         "trading_mode": trading_mode,
         "symbol": symbol,
+        "fast_trading_price_limit": fast_trading_price_limit,
+        "fast_trading_account_ids": list(fast_trading_account_ids or []),
+        "fast_trading_book_levels": fast_trading_book_levels,
+        "fast_trading_target_percentage": fast_trading_target_percentage,
+        "fast_trading_cycle_seconds": fast_trading_cycle_seconds,
+        "fast_trading_test_mode": bool(fast_trading_test_mode),
     }
-    if trading_mode in _FAST_MODES:
-        cmd.update(
-            {
-                "fast_trading_price_limit": fast_trading_price_limit,
-                "fast_trading_account_ids": list(fast_trading_account_ids or []),
-                "fast_trading_book_levels": fast_trading_book_levels,
-                "fast_trading_target_percentage": fast_trading_target_percentage,
-                "fast_trading_cycle_seconds": fast_trading_cycle_seconds,
-                "fast_trading_test_mode": bool(fast_trading_test_mode),
-            }
-        )
-    else:
-        cmd.update(
-            {
-                "max_volume": max_volume,
-                "market_volume_target": market_volume_target,
-                "end_time_et": end_time_et_iso,
-                "abs_pos_change_limit": abs_pos_change_limit,
-                "price_target": price_target,
-                "single_order_notional_limit": single_order_notional_limit,
-                "order_rate_limit_per_minute": order_rate_limit_per_minute,
-            }
-        )
     return cmd
 
 
@@ -591,21 +546,12 @@ def parse_fast_trading_test_mode(
 def validate_algo_start_inputs(
     trading_mode: str,
     symbol: str,
-    max_volume_raw: Optional[str],
-    market_volume_target_raw: Optional[str],
-    end_time_et_raw: Optional[str],
-    abs_pos_change_limit_raw: Optional[str],
-    price_target_raw: Optional[str],
-    single_order_notional_limit_raw: Optional[str],
-    order_rate_limit_per_minute_raw: Optional[str],
     fast_trading_config_raw: object,
     account_metas: Dict[str, AccountMeta],
     # localized strings injected
     invalid_mode: str,
     invalid_symbol: str,
     invalid_account: str,
-    number_required: str,
-    end_time_required: str,
     fast_config_required: str,
     fast_price_limit_positive: str,
     fast_accounts_required: str,
@@ -614,127 +560,49 @@ def validate_algo_start_inputs(
     fast_target_percentage_invalid: str,
     fast_cycle_seconds_invalid: str,
 ) -> Tuple[Optional[Dict], Optional[str]]:
-    if trading_mode not in _ALLOWED_MODES:
+    if trading_mode not in _FAST_MODES:
         return None, invalid_mode
     symbol = str(symbol or "").strip().upper()
     if not symbol:
         return None, invalid_symbol
 
-    if trading_mode in _FAST_MODES:
-        fast_settings, err = parse_fast_trading_settings(
-            fast_trading_config_raw=fast_trading_config_raw,
-            account_metas=account_metas,
-            invalid_account=invalid_account,
-            fast_config_required=fast_config_required,
-            fast_price_limit_positive=fast_price_limit_positive,
-            fast_accounts_required=fast_accounts_required,
-            fast_account_duplicate=fast_account_duplicate,
-            fast_book_levels_invalid=fast_book_levels_invalid,
-            fast_target_percentage_invalid=fast_target_percentage_invalid,
-            fast_cycle_seconds_invalid=fast_cycle_seconds_invalid,
-        )
-        if err:
-            return None, err
-        assert fast_settings is not None
-        return build_algo_start_command(
-            trading_mode=trading_mode,
-            symbol=symbol,
-            max_volume=None,
-            market_volume_target=None,
-            end_time_et_iso=None,
-            abs_pos_change_limit=None,
-            price_target=None,
-            single_order_notional_limit=None,
-            order_rate_limit_per_minute=None,
-            fast_trading_price_limit=fast_settings["price_limit"],
-            fast_trading_account_ids=fast_settings["account_ids"],
-            fast_trading_book_levels=fast_settings["book_levels"],
-            fast_trading_target_percentage=fast_settings["target_percentage"],
-            fast_trading_cycle_seconds=fast_settings["cycle_seconds"],
-            fast_trading_test_mode=fast_settings["test_mode"],
-        ), None
-
-    try:
-        max_volume = safe_float(max_volume_raw)
-        mvt = safe_float(market_volume_target_raw)
-        abs_lim = safe_float(abs_pos_change_limit_raw)
-        price_target = safe_float(price_target_raw)
-        single_order_notional_limit = safe_float(single_order_notional_limit_raw)
-        order_rate_limit_per_minute = safe_float(order_rate_limit_per_minute_raw)
-    except (TypeError, ValueError, OverflowError):
-        return None, number_required
-
-    if (
-        max_volume is None
-        or mvt is None
-        or abs_lim is None
-        or price_target is None
-        or single_order_notional_limit is None
-        or order_rate_limit_per_minute is None
-    ):
-        return None, number_required
-
-    end_iso = _parse_datetime_local_to_us_eastern_iso(end_time_et_raw or "")
-    if end_iso is None:
-        return None, end_time_required
-
-    cmd = build_algo_start_command(
+    fast_settings, err = parse_fast_trading_settings(
+        fast_trading_config_raw=fast_trading_config_raw,
+        account_metas=account_metas,
+        invalid_account=invalid_account,
+        fast_config_required=fast_config_required,
+        fast_price_limit_positive=fast_price_limit_positive,
+        fast_accounts_required=fast_accounts_required,
+        fast_account_duplicate=fast_account_duplicate,
+        fast_book_levels_invalid=fast_book_levels_invalid,
+        fast_target_percentage_invalid=fast_target_percentage_invalid,
+        fast_cycle_seconds_invalid=fast_cycle_seconds_invalid,
+    )
+    if err:
+        return None, err
+    assert fast_settings is not None
+    return build_algo_start_command(
         trading_mode=trading_mode,
         symbol=symbol,
-        max_volume=max_volume,
-        market_volume_target=mvt,
-        end_time_et_iso=end_iso,
-        abs_pos_change_limit=abs_lim,
-        price_target=price_target,
-        single_order_notional_limit=single_order_notional_limit,
-        order_rate_limit_per_minute=order_rate_limit_per_minute,
-    )
-    return cmd, None
+        fast_trading_price_limit=fast_settings["price_limit"],
+        fast_trading_account_ids=fast_settings["account_ids"],
+        fast_trading_book_levels=fast_settings["book_levels"],
+        fast_trading_target_percentage=fast_settings["target_percentage"],
+        fast_trading_cycle_seconds=fast_settings["cycle_seconds"],
+        fast_trading_test_mode=fast_settings["test_mode"],
+    ), None
 
 
-def build_algo_stop_command(
-    trading_mode: str,
-    account_ids: List[str],
-    reason: str | None,
-) -> Dict:
+def build_algo_stop_command(reason: str | None = None) -> Dict:
+    """An unfiltered stop notification for all modes, symbols, and accounts."""
     cmd_id = f"algo_stop_{iso_utc_now()}_{int(time.time() * 1_000_000)}"
     cmd: Dict = {
         "type": "STOP_ALGO_TRADING",
         "command_id": cmd_id,
         "ts": iso_utc_now(),
-        "trading_mode": trading_mode,
+        "scope": "ALL",
     }
-    if account_ids:
-        cmd["account_ids"] = account_ids
+    reason = (reason or "").strip()
     if reason:
         cmd["reason"] = reason
     return cmd
-
-
-def validate_algo_stop_inputs(
-    trading_mode: str,
-    account_ids: List[str],
-    reason_raw: Optional[str],
-    account_metas: Dict[str, AccountMeta],
-    invalid_mode: str,
-    invalid_account: str,
-) -> Tuple[Optional[Dict], Optional[str]]:
-    if trading_mode not in _ALLOWED_MODES:
-        return None, invalid_mode
-
-    clean_account_ids: List[str] = []
-    seen: set[str] = set()
-    for account_id in account_ids:
-        clean_id = str(account_id).strip()
-        if not clean_id:
-            continue
-        if clean_id not in account_metas:
-            return None, invalid_account
-        if clean_id in seen:
-            continue
-        seen.add(clean_id)
-        clean_account_ids.append(clean_id)
-
-    reason = (reason_raw or "").strip()
-    cmd = build_algo_stop_command(trading_mode=trading_mode, account_ids=clean_account_ids, reason=reason or None)
-    return cmd, None

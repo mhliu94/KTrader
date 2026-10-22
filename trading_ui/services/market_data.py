@@ -203,6 +203,10 @@ class MarketDataStore:
         with self._lock:
             self._books[book.symbol] = book
 
+    def get_book_symbols(self) -> list[str]:
+        with self._lock:
+            return list(self._books)
+
     def get_for_symbols(self, symbols: list[str]) -> Dict[str, QuoteRow]:
         with self._lock:
             out: Dict[str, QuoteRow] = {}

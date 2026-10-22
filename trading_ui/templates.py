@@ -1638,20 +1638,6 @@ def render_control_panel_page(
         f"<input class='choice-input' type='radio' id='limit-through-20' name='through_market_pct' value='20'>"
         f"<label class='choice-btn' for='limit-through-20'>20%</label>"
     )
-    algo_end_time_buttons = (
-        f"<button class='choice-btn' type='button' data-minutes='1'>{html_escape(t(lang,'plus_1m'))}</button>"
-        f"<button class='choice-btn' type='button' data-minutes='2'>{html_escape(t(lang,'plus_2m'))}</button>"
-        f"<button class='choice-btn' type='button' data-minutes='5'>{html_escape(t(lang,'plus_5m'))}</button>"
-        f"<button class='choice-btn' type='button' data-minutes='10'>{html_escape(t(lang,'plus_10m'))}</button>"
-    )
-    stop_account_buttons = "\n".join(
-        (
-            f"<input class='choice-input' type='checkbox' id='stop-acct-{idx}' name='account_ids' value='{html_escape(aid)}'>"
-            f"<label class='choice-btn' for='stop-acct-{idx}'>#{account_metas[aid].num_id}</label>"
-        )
-        for idx, aid in enumerate(sorted_account_ids, start=1)
-    )
-
     fast_account_buttons = "\n".join(
         (
             f"<label class='fast-account-row'>"
@@ -1759,7 +1745,6 @@ def render_control_panel_page(
         const form = document.getElementById("algo-form");
         const configEl = document.getElementById("fast_trading_config");
         const modal = document.getElementById("fast-trading-modal");
-        const genericConfigEl = document.getElementById("algo-generic-constraints");
         const modeLabelEl = document.getElementById("fast-trading-mode-label");
         const symbolEl = document.getElementById("algo_symbol");
         const symbolLabelEl = document.getElementById("fast-trading-symbol");
@@ -1880,10 +1865,6 @@ def render_control_panel_page(
 
         form.addEventListener("submit", function(event) {
           const mode = selectedMode();
-          if (mode !== "E" && mode !== "F") {
-            configEl.value = "";
-            return;
-          }
           if (confirmed) {
             confirmed = false;
             return;
@@ -1892,20 +1873,14 @@ def render_control_panel_page(
           openModal(mode);
         });
 
-        function updateGenericVisibility() {
-          const mode = selectedMode();
-          if (genericConfigEl) genericConfigEl.hidden = mode === "E" || mode === "F";
-        }
         form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
           input.addEventListener("change", function() {
-            updateGenericVisibility();
             if (!modal.hidden) renderAccountBalances();
           });
         });
         if (symbolEl) symbolEl.addEventListener("change", function() {
           if (!modal.hidden) renderAccountBalances();
         });
-        updateGenericVisibility();
         setInterval(refreshAccountBalances, 5000);
 
         if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
@@ -1944,7 +1919,6 @@ def render_control_panel_page(
     elif ok:
         msg = f"<div class='help'>{html_escape(ok)}</div>"
 
-    default_end_time = "2099-12-31T00:00"
 
     # IMPORTANT:
     # - Separate forms, not nested
@@ -2124,15 +2098,7 @@ def render_control_panel_page(
         <div>
           <label>{html_escape(t(lang,'trading_mode'))}</label>
           <div class="choice-grid">
-            <input class="choice-input" type="radio" id="algo-mode-a" name="trading_mode" value="A" checked>
-            <label class="choice-btn" for="algo-mode-a">{html_escape(t(lang,'mode_a'))}</label>
-            <input class="choice-input" type="radio" id="algo-mode-b" name="trading_mode" value="B">
-            <label class="choice-btn" for="algo-mode-b">{html_escape(t(lang,'mode_b'))}</label>
-            <input class="choice-input" type="radio" id="algo-mode-c" name="trading_mode" value="C">
-            <label class="choice-btn" for="algo-mode-c">{html_escape(t(lang,'mode_c'))}</label>
-            <input class="choice-input" type="radio" id="algo-mode-d" name="trading_mode" value="D">
-            <label class="choice-btn" for="algo-mode-d">{html_escape(t(lang,'mode_d'))}</label>
-            <input class="choice-input" type="radio" id="algo-mode-e" name="trading_mode" value="E">
+            <input class="choice-input" type="radio" id="algo-mode-e" name="trading_mode" value="E" checked>
             <label class="choice-btn" for="algo-mode-e">{html_escape(t(lang,'mode_e'))}</label>
             <input class="choice-input" type="radio" id="algo-mode-f" name="trading_mode" value="F">
             <label class="choice-btn" for="algo-mode-f">{html_escape(t(lang,'mode_f'))}</label>
@@ -2144,51 +2110,6 @@ def render_control_panel_page(
             {symbol_opts}
           </select>
         </div>
-      </div>
-
-      <div id="algo-generic-constraints">
-      <div class="row">
-        <div>
-          <label for="max_volume">{html_escape(t(lang,'max_volume'))}</label>
-          <input id="max_volume" name="max_volume" value="-1" inputmode="decimal" />
-        </div>
-        <div>
-          <label for="mkt_vol_target">{html_escape(t(lang,'mkt_vol_target'))}</label>
-          <input id="mkt_vol_target" name="market_volume_target" value="-1" inputmode="decimal" />
-        </div>
-      </div>
-
-      <div class="row">
-        <div>
-          <label for="end_time_et">{html_escape(t(lang,'end_time_et'))}</label>
-          <input id="end_time_et" name="end_time_et" type="datetime-local" value="{default_end_time}" />
-          <div class="help">{html_escape(t(lang,'algo_end_quick'))}</div>
-          <div class="choice-grid" id="algo-end-time-quick">
-            {algo_end_time_buttons}
-          </div>
-          <div class="help">America/New_York</div>
-        </div>
-        <div>
-          <label for="abs_pos_change_limit">{html_escape(t(lang,'abs_pos_change_limit'))}</label>
-          <input id="abs_pos_change_limit" name="abs_pos_change_limit" value="-1" inputmode="decimal" />
-        </div>
-      </div>
-
-      <div>
-        <label for="price_target">{html_escape(t(lang,'price_target'))}</label>
-        <input id="price_target" name="price_target" value="0" inputmode="decimal" />
-      </div>
-
-      <div class="row">
-        <div>
-          <label for="single_order_notional_limit">{html_escape(t(lang,'single_order_notional_limit'))}</label>
-          <input id="single_order_notional_limit" name="single_order_notional_limit" value="-1" inputmode="decimal" />
-        </div>
-        <div>
-          <label for="order_rate_limit_per_minute">{html_escape(t(lang,'order_rate_limit_per_minute'))}</label>
-          <input id="order_rate_limit_per_minute" name="order_rate_limit_per_minute" value="-1" inputmode="decimal" />
-        </div>
-      </div>
       </div>
 
       <button class="btn btn-green" type="submit">{html_escape(t(lang,'algo_submit'))}</button>
@@ -2204,36 +2125,11 @@ def render_control_panel_page(
     </div>
 
     <form method="post" action="/submit-algo-stop">
-      <div class="row">
-        <div>
-          <label>{html_escape(t(lang,'trading_mode'))}</label>
-          <div class="choice-grid">
-            <input class="choice-input" type="radio" id="stop-mode-a" name="trading_mode" value="A" checked>
-            <label class="choice-btn" for="stop-mode-a">A</label>
-            <input class="choice-input" type="radio" id="stop-mode-b" name="trading_mode" value="B">
-            <label class="choice-btn" for="stop-mode-b">B</label>
-            <input class="choice-input" type="radio" id="stop-mode-c" name="trading_mode" value="C">
-            <label class="choice-btn" for="stop-mode-c">C</label>
-            <input class="choice-input" type="radio" id="stop-mode-d" name="trading_mode" value="D">
-            <label class="choice-btn" for="stop-mode-d">D</label>
-            <input class="choice-input" type="radio" id="stop-mode-e" name="trading_mode" value="E">
-            <label class="choice-btn" for="stop-mode-e">E</label>
-            <input class="choice-input" type="radio" id="stop-mode-f" name="trading_mode" value="F">
-            <label class="choice-btn" for="stop-mode-f">F</label>
-          </div>
-        </div>
-        <div>
-          <label>{html_escape(t(lang,'algo_stop_accounts'))}</label>
-          <div class="choice-grid">
-            {stop_account_buttons}
-          </div>
-          <div class="help">{html_escape(t(lang,'algo_stop_accounts_help'))}</div>
-        </div>
-      </div>
+      <p class="help">{html_escape(t(lang,'algo_stop_help'))}</p>
 
       <div>
         <label for="stop_reason">{html_escape(t(lang,'stop_reason'))}</label>
-        <input id="stop_reason" name="reason" placeholder="e.g. risk limit hit" />
+        <input id="stop_reason" name="reason" placeholder="{html_escape(t(lang,'stop_reason_placeholder'))}" />
       </div>
 
       <button class="btn btn-red" type="submit">{html_escape(t(lang,'algo_stop'))}</button>
@@ -2573,41 +2469,6 @@ def render_control_panel_page(
 
     {fast_trading_script}
 
-    <script>
-      (function(){{
-        const quickWrap = document.getElementById("algo-end-time-quick");
-        const endTimeEl = document.getElementById("end_time_et");
-        if (!quickWrap || !endTimeEl) return;
-
-        function pad(value) {{
-          return String(value).padStart(2, "0");
-        }}
-
-        function toDatetimeLocalValue(date) {{
-          return (
-            date.getFullYear() + "-" +
-            pad(date.getMonth() + 1) + "-" +
-            pad(date.getDate()) + "T" +
-            pad(date.getHours()) + ":" +
-            pad(date.getMinutes())
-          );
-        }}
-
-        quickWrap.addEventListener("click", function(event) {{
-          const target = event.target;
-          if (!(target instanceof HTMLElement)) return;
-          const minutesRaw = target.getAttribute("data-minutes");
-          if (!minutesRaw) return;
-          const minutes = Number(minutesRaw);
-          if (!isFinite(minutes)) return;
-
-          const next = new Date();
-          next.setSeconds(0, 0);
-          next.setMinutes(next.getMinutes() + minutes);
-          endTimeEl.value = toDatetimeLocalValue(next);
-        }});
-      }})();
-    </script>
   <datalist id="symbol-suggestions">
     {symbol_opts}
   </datalist>
@@ -2841,6 +2702,20 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
     let lastBookKey = "";
     let pollInFlight = false;
 
+    function syncSymbols(symbols) {{
+      if (!symbolEl || !Array.isArray(symbols)) return;
+      const current = Array.from(symbolEl.options, option => option.value);
+      if (JSON.stringify(current) === JSON.stringify(symbols)) return;
+      const selected = symbolEl.value;
+      symbolEl.replaceChildren(...symbols.map(symbol => {{
+        const option = document.createElement("option");
+        option.value = symbol;
+        option.textContent = symbol;
+        return option;
+      }}));
+      if (symbols.includes(selected)) symbolEl.value = selected;
+    }}
+
     function fmtNum(x, digits) {{
       if (x === null || x === undefined) return "—";
       const n = Number(x);
@@ -2876,7 +2751,7 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
         tr.innerHTML =
           "<td style='text-align:right'>" + fmtNum(row.price, 4) + "</td>" +
           "<td style='text-align:right'>" + fmtNum(row.quantity, 2) + "</td>" +
-          "<td style='text-align:right'>" + fmtNum(cumulativeQty, 2) + "</td>" +
+          "<td style='text-align:right'>" + fmtInt(cumulativeQty) + "</td>" +
           "<td style='text-align:right'>" + fmtInt(row.order_count) + "</td>";
         bodyEl.appendChild(tr);
       }}
@@ -2893,6 +2768,7 @@ def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) 
         const r = await fetch("/api/market-insights?symbol=" + encodeURIComponent(symbol) + "&depth=" + encodeURIComponent(depth), {{ cache: "no-store" }});
         if (!r.ok) return;
         const book = await r.json();
+        syncSymbols(book.symbols);
         const bids = Array.isArray(book.bids) ? book.bids : [];
         const asks = Array.isArray(book.asks) ? book.asks : [];
         const bookKey = JSON.stringify([symbol, depth, book.asof_epoch || null, book.error || null, bids, asks]);

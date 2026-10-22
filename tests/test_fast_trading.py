@@ -728,6 +728,30 @@ class FastTradingCycleTests(unittest.TestCase):
 
 
 class FastTradingManagerTests(unittest.TestCase):
+    def test_stop_all_stops_both_modes_all_symbols_and_accounts_outside_current_config(self):
+        publish = Mock()
+        manager = FastTradingStrategyManager(
+            market_data_store=MarketDataStore(),
+            account_metas_provider=lambda: metas("A"),
+            publish_command=publish,
+        )
+        self.addCleanup(manager.stop_all)
+        # Keep worker cycles inert while exercising real worker shutdown.
+        # Include accounts outside the current configuration to check scope.
+        manager.run_cycle = Mock(return_value=Mock(commands=[], capacity_noop=False, reason="test cycle"))
+        strategies = []
+        for mode, symbol, account in (("E", "AAPL", "A"), ("F", "AAPL", "B"), ("E", "MSFT", "REMOVED")):
+            command = {**strategy_command(), "trading_mode": mode, "symbol": symbol,
+                       "fast_trading_account_ids": [account]}
+            key = manager.start_strategy(command)
+            strategies.append(manager._strategies[key])
+        self.assertEqual(manager.stop_all(), 3)
+        self.assertEqual(manager._strategies, {})
+        self.assertTrue(all(strategy.stop_event.is_set() for strategy in strategies))
+        self.assertTrue(all(not strategy.thread.is_alive() for strategy in strategies))
+        self.assertEqual(manager.stop_all(), 0)
+        publish.assert_not_called()
+
     def test_manager_records_order_action_time_for_future_cooldown_checks(self):
         store = MarketDataStore()
         store.upsert_book(

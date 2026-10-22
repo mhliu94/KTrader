@@ -1,5 +1,7 @@
 import json
 import unittest
+from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
 
@@ -45,7 +47,11 @@ class FastTradingUiTests(unittest.TestCase):
         self.assertNotIn("aggression_level", html)
         self.assertNotIn("allocation_pct", html)
         self.assertNotIn("payloadGroups", html)
-        self.assertIn('id="algo-generic-constraints"', html)
+        self.assertNotIn('id="algo-generic-constraints"', html)
+        for mode in "abcd":
+            self.assertNotIn(f'id="algo-mode-{mode}"', html)
+        self.assertNotIn('id="stop-mode-', html)
+        self.assertNotIn("id='stop-acct-", html)
 
 
 class FastTradingApiPayloadTests(unittest.TestCase):
@@ -58,7 +64,7 @@ class FastTradingApiPayloadTests(unittest.TestCase):
             "SESSIONS": webserver.SESSIONS,
         }
         self.started_commands: list[dict] = []
-        self.stop_calls: list[tuple[str, list[str] | None]] = []
+        self.stop_calls: list[str] = []
         self.published_commands: list[tuple[str, dict]] = []
 
         class FakeManager:
@@ -70,9 +76,9 @@ class FastTradingApiPayloadTests(unittest.TestCase):
                 inner_self.commands.append(command)
                 return "E:AAPL"
 
-            def stop_matching(inner_self, trading_mode: str, account_ids=None) -> int:
-                inner_self.stop_calls.append((trading_mode, account_ids))
-                return 1
+            def stop_all(inner_self) -> int:
+                inner_self.stop_calls.append("ALL")
+                return 3
 
         class FakeProducer:
             def __init__(inner_self, published_commands: list) -> None:
@@ -217,20 +223,94 @@ class FastTradingApiPayloadTests(unittest.TestCase):
         self.assertEqual(self.started_commands, [])
         self.assertEqual(self.published_commands, [])
 
-    def test_fast_stop_preserves_and_uses_selected_account_filter(self):
+    def test_stop_without_inputs_stops_every_strategy_and_publishes_global_scope(self):
         client = TestClient(webserver.app)
+        self.addCleanup(client.close)
         client.cookies.set("auth_token", "token")
 
         response = client.post(
             "/submit-algo-stop",
-            data={"trading_mode": "E", "account_ids": "B"},
             follow_redirects=False,
         )
 
         self.assertEqual(response.status_code, 303)
-        self.assertEqual(self.stop_calls, [("E", ["B"])])
-        self.assertEqual(self.published_commands[0][0], "E")
-        self.assertEqual(self.published_commands[0][1]["account_ids"], ["B"])
+        self.assertEqual(self.stop_calls, ["ALL"])
+        key, command = self.published_commands[0]
+        self.assertEqual(key, "ALGO_STOP")
+        self.assertEqual(command["scope"], "ALL")
+        self.assertNotIn("trading_mode", command)
+        self.assertNotIn("account_ids", command)
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        self.assertIn("Stopped 3 algorithm strategies", query["ok"][0])
+
+    def test_stop_ignores_stale_or_forged_mode_and_account_filters(self):
+        client = TestClient(webserver.app)
+        self.addCleanup(client.close)
+        client.cookies.set("auth_token", "token")
+        for mode in ("E", "F", "A", "bogus"):
+            with self.subTest(mode=mode):
+                response = client.post("/submit-algo-stop?lang=zh", data={
+                    "trading_mode": mode, "account_ids": ["B", "UNKNOWN"],
+                    "symbol": "AAPL", "reason": "  risk limit  ",
+                }, follow_redirects=False)
+                query = parse_qs(urlsplit(response.headers["location"]).query)
+                self.assertIn("所有模式和账户", query["ok"][0])
+                command = self.published_commands[-1][1]
+                self.assertEqual(command["scope"], "ALL")
+                self.assertEqual(command["reason"], "risk limit")
+                self.assertNotIn("trading_mode", command)
+                self.assertNotIn("account_ids", command)
+                self.assertNotIn("symbol", command)
+        self.assertEqual(self.stop_calls, ["ALL"] * 4)
+
+    def test_stop_remains_effective_when_kafka_notification_fails(self):
+        client = TestClient(webserver.app)
+        self.addCleanup(client.close)
+        client.cookies.set("auth_token", "token")
+        broken = Mock()
+        broken.publish_order.side_effect = RuntimeError("Kafka unavailable")
+        for producer in (None, broken):
+            with self.subTest(producer=producer):
+                webserver.COMMANDS_PRODUCER = producer
+                response = client.post("/submit-algo-stop", follow_redirects=False)
+                query = parse_qs(urlsplit(response.headers["location"]).query)
+                self.assertIn("Stopped 3", query["ok"][0])
+                self.assertIn("notification could not be published", query["err"][0])
+        self.assertEqual(self.stop_calls, ["ALL", "ALL"])
+
+    def test_stop_requires_authentication(self):
+        client = TestClient(webserver.app)
+        self.addCleanup(client.close)
+        response = client.post("/submit-algo-stop", follow_redirects=False)
+        self.assertIn("/login", response.headers["location"])
+        self.assertEqual(self.stop_calls, [])
+        self.assertEqual(self.published_commands, [])
+
+    def test_stop_does_not_report_success_when_manager_is_unavailable(self):
+        client = TestClient(webserver.app)
+        self.addCleanup(client.close)
+        client.cookies.set("auth_token", "token")
+        webserver.FAST_TRADING_MANAGER = None
+        response = client.post("/submit-algo-stop", follow_redirects=False)
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        self.assertNotIn("ok", query)
+        self.assertIn("could not be confirmed", query["err"][0])
+        self.assertEqual(self.published_commands, [])
+
+    def test_retired_modes_cannot_be_started_from_either_endpoint(self):
+        client = TestClient(webserver.app)
+        self.addCleanup(client.close)
+        client.cookies.set("auth_token", "token")
+        for mode in "ABCD":
+            with self.subTest(mode=mode):
+                payload = {"trading_mode": mode, "symbol": "AAPL"}
+                response = client.post("/api/submit-algo", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("E or F", response.json()["error"])
+                response = client.post("/submit-algo", data=payload, follow_redirects=False)
+                self.assertIn("?err=", response.headers["location"])
+        self.assertEqual(self.started_commands, [])
+        self.assertEqual(self.published_commands, [])
 
 
 if __name__ == "__main__":

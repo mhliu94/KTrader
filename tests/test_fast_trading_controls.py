@@ -87,11 +87,14 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
             }
           });
           try {
+            equal(Array.from(form.querySelectorAll("input[name='trading_mode']"), input => input.value),
+                  ["E", "F"], "only supported modes remain");
+            equal(form.querySelector("input[name='trading_mode']:checked").value, "E", "default mode is E");
             selectMode(mode);
             document.getElementById("algo_symbol").value = "AAPL";
             form.requestSubmit();
             equal(modal.hidden, false, "fast configuration opened");
-            equal(document.getElementById("algo-generic-constraints").hidden, true, "generic constraints hidden");
+            equal(document.getElementById("algo-generic-constraints"), null, "obsolete generic controls removed");
             equal(submissions.length, 0, "opening configuration does not submit");
             equal(modal.querySelectorAll("input[name='fast_aggression_level']").length, 0, "aggression selector removed");
 
@@ -139,24 +142,16 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
             equal(config.account_ids, ["A", "C"], "only selected accounts submitted");
             equal(config.test_mode, mode === "E", "existing test mode preserved");
 
-            // Required fast controls must not prevent ordinary algo mode submissions.
-            Object.keys(groups).forEach(name => inputs(name).forEach(input => { input.checked = false; }));
-            document.getElementById("max_volume").value = "27";
-            document.getElementById("price_target").value = "101.25";
-            for (const genericMode of ["A", "B", "C", "D"]) {
-              selectMode(genericMode);
-              equal(document.getElementById("algo-generic-constraints").hidden, false,
-                    genericMode + " generic constraints remain available");
-              const previousCount = submissions.length;
-              form.requestSubmit();
-              equal(submissions.length, previousCount + 1, genericMode + " submits without fast choices");
-              equal(modal.hidden, true, genericMode + " does not open fast configuration");
-              const ordinary = submissions[submissions.length - 1];
-              equal(ordinary.trading_mode, genericMode, genericMode + " mode preserved");
-              equal(ordinary.fast_trading_config, "", genericMode + " clears fast configuration");
-              equal(ordinary.max_volume, "27", genericMode + " volume preserved");
-              equal(ordinary.price_target, "101.25", genericMode + " price target preserved");
-            }
+            const stopForm = document.querySelector("form[action='/submit-algo-stop']");
+            equal(stopForm.querySelectorAll("[name='trading_mode'], [name='account_ids']").length,
+                  0, "global stop has no mode or account inputs");
+            stopForm.addEventListener("submit", event => {
+              event.preventDefault();
+              stopForm.submit();
+            });
+            stopForm.requestSubmit();
+            equal(submissions.length, 2, "stop can be submitted without any selection");
+            equal(submissions[1], {reason: ""}, "stop submits only the optional reason");
           } catch (error) {
             failures.push(error.stack || String(error));
           }

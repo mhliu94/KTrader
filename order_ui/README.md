@@ -7,7 +7,37 @@ information, order IDs, messages, and Kafka connection/replay status.
 
 ## Run
 
-From the **KTrader repository root**, with Python 3.11 or newer:
+On the deployed KTrader server, use the top-level launcher, just like the
+trading UI launcher:
+
+```sh
+cd ~/KTrader
+./start_order_ui.sh
+```
+
+For a background process that survives closing the terminal:
+
+```sh
+nohup ./start_order_ui.sh >> logs/order_ui.log 2>&1 < /dev/null &
+```
+
+The launcher defaults to **https://45.32.121.19:8030**, uses `.venv/bin/python`,
+the shared `trading_ui/sample/config.local.json`, and the existing
+`certs/server.crt` / `certs/server.key`. It validates configuration and TLS files
+before gracefully stopping the previous order UI on the same port in this
+repository. It leaves the trading UI running. The existing self-signed
+certificate may trigger a browser certificate warning.
+
+Override settings with `ORDER_UI_CONFIG` (or `ACCOUNT_DASHBOARD_CONFIG`),
+`ORDER_UI_PYTHON`, `ORDER_UI_HOST`, `ORDER_UI_PORT`, `ORDER_UI_SSL_ENABLED`,
+`ORDER_UI_SSL_CERTFILE`, and `ORDER_UI_SSL_KEYFILE`. The launcher's host, port,
+and TLS options override `order_ui.server` for its Uvicorn listener. It does not
+install dependencies, change firewall rules, or register a boot service.
+Remote access requires inbound TCP port 8030 to be allowed by the server and
+any hosting-provider firewall; use **https**, not http, with the launcher defaults.
+
+For the direct Python entry point (which defaults to local HTTP), run from the
+**KTrader repository root** with Python 3.11 or newer:
 
 ```sh
 python3 -m venv .venv
@@ -21,6 +51,21 @@ configured users. Order UI sessions expire after 12 hours and use their own
 cookie, `ktrader_order_ui_session`, so signing in/out does not overwrite trading
 UI sessions. All configured login users can read all configured visible accounts,
 matching the trading UI's account visibility model.
+
+Use the **EN / 中文** switch in the header to choose English or Simplified
+Chinese on either the login screen or the dashboard. The choice uses the main
+trading UI's `lang` cookie (180 days), so both interfaces share the preference
+when accessed on the same hostname. `?lang=zh` or `?lang=en` overrides the cookie,
+as in the main UI. Switching languages preserves the current filters and orders.
+Interface labels, order statuses/types, and connection messages are translated;
+account/order IDs, symbols, and broker-provided messages retain their source text.
+
+The table shows **20 orders per page** by default. Choose **10, 20, or 50** using
+the page-size selector and navigate with Previous / Next. Filters search all
+orders before pagination and return to page one when changed. Live updates and
+language changes preserve the current page; a shorter result set moves to the
+last available page, and a new trading date returns to page one. Time, quantity,
+limit/stop price, and average fill price use larger, bold numerals.
 
 This process starts only the order consumer and web server. No orders can be
 placed, amended, or canceled through it. The existing trading UI can run at the

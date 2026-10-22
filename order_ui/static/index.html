@@ -5,49 +5,65 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orders · KTrader</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/i18n.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="KTrader Orders"><span class="brand-icon">K</span>KTrader <span class="brand-section">/ Orders</span></a>
-    <div id="session" hidden><span id="username"></span><button id="logout" class="quiet" type="button">Sign out</button></div>
+    <a class="brand" href="/" aria-label="KTrader Orders" data-i18n-label="brand_label"><span class="brand-icon">K</span>KTrader <span class="brand-section" data-i18n="brand_section">/ Orders</span></a>
+    <div class="topbar-actions">
+      <div class="language-switch" role="group" aria-label="Language" data-i18n-label="language">
+        <button type="button" data-language="en" lang="en" aria-pressed="true">EN</button><span aria-hidden="true">/</span><button type="button" data-language="zh" lang="zh-CN" aria-pressed="false">中文</button>
+      </div>
+      <div id="session" hidden><span id="username"></span><button id="logout" class="quiet" type="button" data-i18n="logout">Sign out</button></div>
+    </div>
   </header>
   <main>
     <section id="login" class="login-card" hidden>
-      <p class="eyebrow">ORDER MONITOR</p><h1>Your trading day,<br>in one place.</h1>
-      <p class="muted">Sign in with your KTrader credentials to follow today's orders.</p>
+      <p class="eyebrow" data-i18n="monitor">ORDER MONITOR</p><h1><span data-i18n="login_heading">Your trading day,</span><br><span data-i18n="login_heading_end">in one place.</span></h1>
+      <p class="muted" data-i18n="login_description">Sign in with your KTrader credentials to follow today's orders.</p>
       <form id="login-form">
-        <label>Username<input id="login-username" autocomplete="username" required maxlength="256"></label>
-        <label>Password<input id="password" type="password" autocomplete="current-password" required maxlength="4096"></label>
+        <label><span data-i18n="username">Username</span><input id="login-username" autocomplete="username" required maxlength="256"></label>
+        <label><span data-i18n="password">Password</span><input id="password" type="password" autocomplete="current-password" required maxlength="4096"></label>
         <p id="login-error" class="error" role="alert"></p>
-        <button id="login-submit" class="primary" type="submit">Sign in</button>
+        <button id="login-submit" class="primary" type="submit" data-i18n="login">Sign in</button>
       </form>
     </section>
-    <p id="loading" role="status">Connecting to your order dashboard…</p>
+    <p id="loading" role="status" data-i18n="connecting_dashboard">Connecting to your order dashboard…</p>
     <section id="dashboard" hidden>
-      <div class="page-heading"><div><p class="eyebrow">ORDER MONITOR</p><h1>Today's orders</h1><p id="day" class="muted"></p></div><span id="feed-status" class="feed" role="status">Connecting</span></div>
+      <div class="page-heading"><div><p class="eyebrow" data-i18n="monitor">ORDER MONITOR</p><h1 data-i18n="today_orders">Today's orders</h1><p id="day" class="muted"></p></div><span id="feed-status" class="feed" role="status" data-i18n="connecting">Connecting</span></div>
       <div id="notice" class="notice" role="status" hidden></div>
       <div class="metrics">
-        <div><span>All orders</span><strong id="total">0</strong></div>
-        <div><span>Working</span><strong id="working">0</strong></div>
-        <div><span>Filled</span><strong id="filled">0</strong></div>
-        <div><span>Canceled / rejected / expired</span><strong id="closed">0</strong></div>
+        <div><span data-i18n="all_orders">All orders</span><strong id="total">0</strong></div>
+        <div><span data-i18n="working">Working</span><strong id="working">0</strong></div>
+        <div><span data-i18n="filled">Filled</span><strong id="filled">0</strong></div>
+        <div><span data-i18n="closed">Canceled / rejected / expired</span><strong id="closed">0</strong></div>
       </div>
-      <section class="orders-panel" aria-label="Orders">
+      <section class="orders-panel" aria-label="Orders" data-i18n-label="orders">
         <div class="filters">
-          <label>Account<select id="account"><option value="">All accounts</option></select></label>
-          <label>Status<select id="status"><option value="">All statuses</option></select></label>
-          <label class="search">Search<input id="search" type="search" placeholder="Symbol, order ID or command ID" aria-label="Search orders"></label>
+          <label><span data-i18n="account">Account</span><select id="account"><option value="" data-i18n="all_accounts">All accounts</option></select></label>
+          <label><span data-i18n="status">Status</span><select id="status"><option value="" data-i18n="all_statuses">All statuses</option></select></label>
+          <label class="search"><span data-i18n="search">Search</span><input id="search" type="search" placeholder="Symbol, order ID or command ID" aria-label="Search orders" data-i18n-placeholder="search_placeholder" data-i18n-label="search_orders"></label>
         </div>
-        <div class="table-meta"><span id="count">0 orders</span><span id="refreshed">Waiting for data</span></div>
+        <div class="table-meta"><span id="count" data-i18n="zero_orders">0 orders</span><span id="refreshed" data-i18n="waiting_data">Waiting for data</span></div>
+        <nav class="pagination" aria-label="Order pages" data-i18n-label="pagination">
+          <label class="page-size"><span data-i18n="page_size">Orders per page</span><select id="page-size">
+            <option value="10">10</option><option value="20" selected>20</option><option value="50">50</option>
+          </select></label>
+          <div class="page-controls">
+            <button id="previous-page" class="quiet" type="button" data-i18n="previous_page" disabled>Previous</button>
+            <span id="page-summary" role="status" aria-live="polite" aria-atomic="true"></span>
+            <button id="next-page" class="quiet" type="button" data-i18n="next_page" disabled>Next</button>
+          </div>
+        </nav>
         <div class="table-scroll">
-          <table><caption class="sr-only">Today's orders, newest update first</caption><thead><tr>
-            <th scope="col">Updated</th><th scope="col">Account</th><th scope="col">Order</th><th scope="col">Symbol / side</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col" class="number">Filled / quantity</th><th scope="col" class="number">Limit / stop</th><th scope="col" class="number">Avg. fill</th><th scope="col">Details</th>
+          <table><caption class="sr-only" data-i18n="table_caption">Today's orders, newest update first</caption><thead><tr>
+            <th scope="col" data-i18n="updated">Updated</th><th scope="col" data-i18n="account">Account</th><th scope="col" data-i18n="order">Order</th><th scope="col" data-i18n="symbol_side">Symbol / side</th><th scope="col" data-i18n="type">Type</th><th scope="col" data-i18n="status">Status</th><th scope="col" class="number" data-i18n="filled_quantity">Filled / quantity</th><th scope="col" class="number" data-i18n="limit_stop">Limit / stop</th><th scope="col" class="number" data-i18n="average_fill">Avg. fill</th><th scope="col" data-i18n="details">Details</th>
           </tr></thead><tbody id="orders"></tbody></table>
         </div>
-        <div id="empty" class="empty" hidden><strong id="empty-title">No orders today</strong><p id="empty-detail">New orders will appear here automatically.</p></div>
+        <div id="empty" class="empty" hidden><strong id="empty-title" data-i18n="no_orders">No orders today</strong><p id="empty-detail" data-i18n="new_orders">New orders will appear here automatically.</p></div>
       </section>
-      <footer><span>Read-only order status · Latest updates first</span><span id="refresh-note"></span></footer>
+      <footer><span data-i18n="footer">Read-only order status · Latest updates first</span><span id="refresh-note"></span></footer>
     </section>
   </main>
 </body>

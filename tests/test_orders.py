@@ -2,6 +2,7 @@ import unittest
 
 from trading_ui.models import AccountMeta
 from trading_ui.services.orders import (
+    build_algo_stop_command,
     parse_fast_trading_settings,
     parse_fast_trading_test_mode,
     validate_algo_start_inputs,
@@ -160,20 +161,11 @@ class AlgoOrderValidationTests(unittest.TestCase):
         values = {
             "trading_mode": mode,
             "symbol": "AAPL",
-            "max_volume_raw": None,
-            "market_volume_target_raw": "not-used",
-            "end_time_et_raw": None,
-            "abs_pos_change_limit_raw": None,
-            "price_target_raw": None,
-            "single_order_notional_limit_raw": None,
-            "order_rate_limit_per_minute_raw": None,
             "fast_trading_config_raw": fast_config,
             "account_metas": metas("A", "B"),
             "invalid_mode": "invalid mode",
             "invalid_symbol": "invalid symbol",
             "invalid_account": "invalid account",
-            "number_required": "number required",
-            "end_time_required": "end time required",
             "fast_config_required": "fast config required",
             "fast_price_limit_positive": "price limit positive",
             "fast_accounts_required": "accounts required",
@@ -290,29 +282,29 @@ class AlgoOrderValidationTests(unittest.TestCase):
                         self.assertIsNone(error)
                         self.assertEqual(command[f"fast_trading_{field}"], value)
 
-    def test_modes_a_through_d_accept_generic_inputs_without_fast_configuration(self):
+    def test_retired_modes_are_rejected_even_with_valid_fast_settings(self):
+        valid = {"price_limit": 10, "account_ids": ["A"], "book_levels": 2,
+                 "target_percentage": 100, "cycle_seconds": 30}
         for mode in ("A", "B", "C", "D"):
-            with self.subTest(mode=mode):
-                command, error = self._validate(
-                    mode=mode,
-                    max_volume_raw="-1",
-                    market_volume_target_raw="-1",
-                    abs_pos_change_limit_raw="-1",
-                    price_target_raw="100",
-                    single_order_notional_limit_raw="-1",
-                    order_rate_limit_per_minute_raw="-1",
-                    end_time_et_raw="2099-12-31T00:00",
-                )
-                self.assertIsNone(error)
-                self.assertEqual(command["trading_mode"], mode)
-                self.assertEqual(command["price_target"], 100)
-                self.assertFalse(any(key.startswith("fast_trading_") for key in command))
+            for config in (None, valid):
+                with self.subTest(mode=mode, config=config):
+                    command, error = self._validate(mode=mode, fast_config=config)
+                    self.assertIsNone(command)
+                    self.assertEqual(error, "invalid mode")
 
-    def test_modes_a_through_d_still_require_generic_inputs(self):
-        cmd, err = self._validate(mode="A", fast_config=None)
-
-        self.assertIsNone(cmd)
-        self.assertEqual(err, "number required")
+    def test_stop_command_always_has_global_scope_and_optional_reason(self):
+        for reason in (None, "", "  risk limit  "):
+            with self.subTest(reason=reason):
+                command = build_algo_stop_command(reason)
+                self.assertEqual(command["type"], "STOP_ALGO_TRADING")
+                self.assertEqual(command["scope"], "ALL")
+                self.assertNotIn("trading_mode", command)
+                self.assertNotIn("account_ids", command)
+                self.assertNotIn("symbol", command)
+                if reason and reason.strip():
+                    self.assertEqual(command["reason"], reason.strip())
+                else:
+                    self.assertNotIn("reason", command)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,10 @@ nohup.out
 *.pid
 *.sock
 *.configurator.lock
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3.lock
 
 # Local application state and generated data
 *_state.json

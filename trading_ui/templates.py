@@ -1502,6 +1502,277 @@ def render_trading_status_page(
 """
 
 
+def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) -> tuple[str, str, str]:
+    account_options = "\n".join(
+        f'<option value="{html_escape(account.id)}">#{account.num_id} '
+        f'{html_escape(account.id)} ({html_escape(account.broker)})</option>'
+        for account in sorted(account_metas.values(), key=lambda account: account.num_id)
+    )
+    settings = f"""
+      <fieldset id="smart-selling-settings" hidden disabled style="border:0;padding:0;margin:0;min-width:0;">
+        <p class="help">{html_escape(t(lang, 'smart_description'))}</p>
+        <div class="row">
+          <div>
+            <label for="smart-account">{html_escape(t(lang, 'account'))}</label>
+            <select id="smart-account" required>{account_options}</select>
+          </div>
+          <div>
+            <label for="smart-quantity">{html_escape(t(lang, 'smart_quantity'))}</label>
+            <input id="smart-quantity" type="number" min="0" step="any" inputmode="decimal" required>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px;">
+          <div>
+            <label for="smart-start">{html_escape(t(lang, 'smart_start'))}</label>
+            <input id="smart-start" type="datetime-local" step="1" required aria-describedby="smart-local-time">
+          </div>
+          <div>
+            <label for="smart-deadline">{html_escape(t(lang, 'smart_deadline'))}</label>
+            <input id="smart-deadline" type="datetime-local" step="1" required aria-describedby="smart-local-time">
+          </div>
+        </div>
+        <p class="help" id="smart-local-time">{html_escape(t(lang, 'smart_local_time'))}</p>
+        <div class="row">
+          <div>
+            <label for="smart-mode">{html_escape(t(lang, 'smart_mode'))}</label>
+            <select id="smart-mode">
+              <option value="patient">{html_escape(t(lang, 'smart_patient'))}</option>
+              <option value="normal" selected>{html_escape(t(lang, 'smart_normal'))}</option>
+              <option value="urgent">{html_escape(t(lang, 'smart_urgent'))}</option>
+            </select>
+          </div>
+          <div>
+            <label for="smart-minimum-price">{html_escape(t(lang, 'smart_minimum_price'))}</label>
+            <input id="smart-minimum-price" type="number" min="0" step="any" inputmode="decimal">
+          </div>
+        </div>
+        <label class="fast-account-row" style="margin-top:12px;">
+          <input id="smart-imminent-event" type="checkbox" aria-describedby="smart-event-help">
+          <span>{html_escape(t(lang, 'smart_imminent_event'))}</span>
+        </label>
+        <p class="help" id="smart-event-help">{html_escape(t(lang, 'smart_event_help'))}</p>
+        <p class="help">{html_escape(t(lang, 'smart_limits_help'))}</p>
+        <p class="help">{html_escape(t(lang, 'smart_completion_help'))}</p>
+        <div class="warn" id="smart-selling-error" role="alert"></div>
+      </fieldset>
+      <div class="help" id="smart-selling-message" role="status"></div>
+    """
+    status = f"""
+      <div class="divider"></div>
+      <div class="section-heading">{html_escape(t(lang, 'smart_status_title'))}</div>
+      <div class="help" id="smart-status-message" role="status">{html_escape(t(lang, 'smart_status_loading'))}</div>
+      <div class="warn" id="smart-status-error" role="alert"></div>
+      <div class="warn" id="smart-status-action-error" role="alert"></div>
+      <div class="table-scroll">
+        <table class="pos" id="smart-status-table" hidden>
+          <thead><tr>
+            <th>{html_escape(t(lang, 'account'))} / {html_escape(t(lang, 'symbol'))}</th>
+            <th>Q0</th><th>{html_escape(t(lang, 'smart_filled'))}</th>
+            <th>{html_escape(t(lang, 'smart_remaining'))}</th><th>{html_escape(t(lang, 'smart_reserved'))}</th>
+            <th>{html_escape(t(lang, 'smart_state'))}</th><th>{html_escape(t(lang, 'smart_reason'))}</th>
+            <th>{html_escape(t(lang, 'smart_stop'))}</th>
+          </tr></thead>
+          <tbody id="smart-status-rows"></tbody>
+        </table>
+      </div>
+    """
+    label_keys = (
+        "smart_submit", "algo_submit", "smart_started", "smart_stopping", "smart_status_empty",
+        "smart_status_failed", "smart_stop", "smart_no_accounts", "smart_invalid_account",
+        "smart_invalid_quantity", "smart_invalid_times", "smart_invalid_price", "smart_request_failed",
+        "smart_auth_failed", "invalid_symbol", "smart_state_idle", "smart_state_scheduled",
+        "smart_state_submit_pending", "smart_state_live", "smart_state_cancel_pending", "smart_state_reconcile",
+        "smart_state_completed", "smart_state_stopped", "smart_state_expired", "smart_state_halted",
+        "smart_state_running", "smart_state_stopping",
+        "smart_market_halted", "smart_market_resuming", "smart_market_trading", "smart_market_unknown",
+    )
+    labels = json.dumps({key: t(lang, key) for key in label_keys}).replace("<", "\\u003c")
+    script = """
+    <script>
+      (function() {
+        const labels = __SMART_LABELS__;
+        const form = document.getElementById("algo-form");
+        const settings = document.getElementById("smart-selling-settings");
+        const submit = document.getElementById("algo-submit");
+        const account = document.getElementById("smart-account");
+        const quantity = document.getElementById("smart-quantity");
+        const start = document.getElementById("smart-start");
+        const deadline = document.getElementById("smart-deadline");
+        const minimumPrice = document.getElementById("smart-minimum-price");
+        const error = document.getElementById("smart-selling-error");
+        const message = document.getElementById("smart-selling-message");
+        const statusMessage = document.getElementById("smart-status-message");
+        const statusError = document.getElementById("smart-status-error");
+        const actionError = document.getElementById("smart-status-action-error");
+        const table = document.getElementById("smart-status-table");
+        const rows = document.getElementById("smart-status-rows");
+        const stopRequests = new Set();
+        let submitting = false;
+        let refreshing = false;
+        if (!form || !settings) return;
+
+        function isSmartMode() {
+          const selected = form.querySelector("input[name='trading_mode']:checked");
+          return selected && selected.value === "G";
+        }
+
+        function localDateTime(date) {
+          const pad = value => String(value).padStart(2, "0");
+          return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
+            + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+        }
+
+        function updateMode() {
+          const smart = isSmartMode();
+          settings.hidden = !smart;
+          settings.disabled = !smart;
+          submit.textContent = smart ? labels.smart_submit : labels.algo_submit;
+          submit.disabled = submitting || (smart && !account.options.length);
+          if (smart && !start.value) {
+            const now = new Date();
+            start.value = localDateTime(now);
+            deadline.value = localDateTime(new Date(now.getTime() + 2 * 60 * 60 * 1000));
+          }
+          if (smart && !account.options.length) error.textContent = labels.smart_no_accounts;
+        }
+
+        async function request(url, options) {
+          const response = await fetch(url, Object.assign({credentials: "same-origin", cache: "no-store"}, options));
+          if (response.status === 401 || response.status === 403 || response.redirected) {
+            throw new Error(labels.smart_auth_failed);
+          }
+          const data = await response.json();
+          if (!response.ok || !data.ok) throw new Error(data.error || labels.smart_request_failed);
+          return data;
+        }
+
+        function stateLabel(state) {
+          const key = {
+            IDLE: "idle", SCHEDULED: "scheduled", RUNNING: "running", HOLD: "halted",
+            STOPPING: "stopping", STOPPED: "stopped", COMPLETED: "completed", DEADLINE: "expired",
+            SUBMIT_PENDING: "submit_pending", LIVE: "live", CANCEL_PENDING: "cancel_pending",
+            RECONCILE: "reconcile", EXPIRED: "expired", HALTED: "halted"
+          }[state];
+          return key ? labels["smart_state_" + key] : String(state || "—");
+        }
+
+        function renderParents(parents) {
+          rows.replaceChildren();
+          table.hidden = !parents.length;
+          statusMessage.textContent = parents.length ? "" : labels.smart_status_empty;
+          for (const parent of parents) {
+            const row = document.createElement("tr");
+            const childState = parent.active_order && parent.active_order.state;
+            const marketState = labels["smart_market_" + String(parent.market_state || "").toLowerCase()];
+            const state = stateLabel(parent.state) + (childState ? " / " + stateLabel(childState) : "")
+              + (marketState ? " / " + marketState : "");
+            const reason = [parent.reason, parent.market_state !== "TRADING" ? parent.market_reason : ""]
+              .filter(Boolean).join(" · ") || "—";
+            const values = [String(parent.account_id || "") + " / " + String(parent.symbol || ""),
+              parent.quantity, parent.filled, parent.remaining, parent.reserved, state, reason];
+            for (const value of values) {
+              const cell = document.createElement("td");
+              cell.textContent = value === null || value === undefined ? "—" : String(value);
+              row.appendChild(cell);
+            }
+            const actions = document.createElement("td");
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "btn btn-red";
+            button.textContent = labels.smart_stop;
+            button.setAttribute("aria-label", labels.smart_stop + " " + parent.account_id + " " + parent.symbol);
+            button.disabled = stopRequests.has(parent.parent_id)
+              || ["STOPPING", "STOPPED", "COMPLETED", "DEADLINE", "EXPIRED"].includes(parent.state);
+            button.addEventListener("click", async function() {
+              button.disabled = true;
+              stopRequests.add(parent.parent_id);
+              actionError.textContent = "";
+              try {
+                await request("/api/smart-selling/" + encodeURIComponent(parent.parent_id) + "/stop", {method: "POST"});
+                message.textContent = labels.smart_stopping;
+              } catch (failure) {
+                actionError.textContent = labels.smart_request_failed + " " + failure.message;
+              } finally {
+                stopRequests.delete(parent.parent_id);
+                button.disabled = false;
+                await refreshParents();
+              }
+            });
+            actions.appendChild(button);
+            row.appendChild(actions);
+            rows.appendChild(row);
+          }
+        }
+
+        async function refreshParents() {
+          if (refreshing) return;
+          refreshing = true;
+          try {
+            const data = await request("/api/smart-selling");
+            if (!Array.isArray(data.parents)) throw new Error(labels.smart_status_failed);
+            renderParents(data.parents);
+            statusError.textContent = "";
+          } catch (failure) {
+            statusError.textContent = labels.smart_status_failed + " " + failure.message;
+          } finally {
+            refreshing = false;
+          }
+        }
+
+        form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
+          input.addEventListener("change", updateMode);
+        });
+        form.addEventListener("submit", async function(event) {
+          if (!isSmartMode()) return;
+          event.preventDefault();
+          if (submitting) return;
+          error.textContent = "";
+          message.textContent = "";
+          const symbol = document.getElementById("algo_symbol").value.trim().toUpperCase();
+          const amount = Number(quantity.value);
+          const startDate = new Date(start.value);
+          const deadlineDate = new Date(deadline.value);
+          const floor = minimumPrice.value.trim() ? Number(minimumPrice.value) : null;
+          if (!account.value) { error.textContent = labels.smart_invalid_account; return; }
+          if (!symbol) { error.textContent = labels.invalid_symbol; return; }
+          if (!Number.isFinite(amount) || amount <= 0) { error.textContent = labels.smart_invalid_quantity; return; }
+          if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(deadlineDate.getTime())
+              || deadlineDate <= startDate || deadlineDate.getTime() <= Date.now()) {
+            error.textContent = labels.smart_invalid_times; return;
+          }
+          if (floor !== null && (!Number.isFinite(floor) || floor <= 0)) {
+            error.textContent = labels.smart_invalid_price; return;
+          }
+          const payload = {
+            account_id: account.value, symbol: symbol, quantity: amount,
+            mode: document.getElementById("smart-mode").value,
+            start_time: startDate.toISOString(), deadline: deadlineDate.toISOString(),
+            minimum_price: floor, imminent_event: document.getElementById("smart-imminent-event").checked
+          };
+          submitting = true;
+          updateMode();
+          try {
+            await request("/api/smart-selling", {
+              method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
+            });
+            message.textContent = labels.smart_started;
+          } catch (failure) {
+            error.textContent = labels.smart_request_failed + " " + failure.message;
+          } finally {
+            submitting = false;
+            updateMode();
+            await refreshParents();
+          }
+        });
+        updateMode();
+        refreshParents();
+        setInterval(refreshParents, 5000);
+      })();
+    </script>
+    """.replace("__SMART_LABELS__", labels)
+    return settings, status, script
+
+
 def render_control_panel_page(
     lang: str,
     account_metas: Dict[str, AccountMeta],
@@ -1509,6 +1780,7 @@ def render_control_panel_page(
     error: str = "",
     ok: str = "",
 ) -> str:
+    smart_settings, smart_status, smart_script = _smart_selling_controls(lang, account_metas)
     # Reuse balance/holding rules for order summaries and the E/F configuration.
     account_balance_helpers = """
         function usdCash(account) {
@@ -1865,6 +2137,10 @@ def render_control_panel_page(
 
         form.addEventListener("submit", function(event) {
           const mode = selectedMode();
+          if (mode === "G") {
+            event.preventDefault();
+            return;
+          }
           if (confirmed) {
             confirmed = false;
             return;
@@ -2102,6 +2378,8 @@ def render_control_panel_page(
             <label class="choice-btn" for="algo-mode-e">{html_escape(t(lang,'mode_e'))}</label>
             <input class="choice-input" type="radio" id="algo-mode-f" name="trading_mode" value="F">
             <label class="choice-btn" for="algo-mode-f">{html_escape(t(lang,'mode_f'))}</label>
+            <input class="choice-input" type="radio" id="algo-mode-g" name="trading_mode" value="G">
+            <label class="choice-btn" for="algo-mode-g">{html_escape(t(lang,'mode_g'))}</label>
           </div>
         </div>
         <div>
@@ -2112,8 +2390,10 @@ def render_control_panel_page(
         </div>
       </div>
 
-      <button class="btn btn-green" type="submit">{html_escape(t(lang,'algo_submit'))}</button>
+      {smart_settings}
+      <button class="btn btn-green" id="algo-submit" type="submit">{html_escape(t(lang,'algo_submit'))}</button>
     </form>
+      {smart_status}
       </section>
 
       {fast_trading_modal}
@@ -2468,6 +2748,7 @@ def render_control_panel_page(
     </script>
 
     {fast_trading_script}
+    {smart_script}
 
   <datalist id="symbol-suggestions">
     {symbol_opts}

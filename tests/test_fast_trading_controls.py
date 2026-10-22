@@ -88,7 +88,7 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
           });
           try {
             equal(Array.from(form.querySelectorAll("input[name='trading_mode']"), input => input.value),
-                  ["E", "F"], "only supported modes remain");
+                  ["E", "F", "G"], "only supported modes remain");
             equal(form.querySelector("input[name='trading_mode']:checked").value, "E", "default mode is E");
             selectMode(mode);
             document.getElementById("algo_symbol").value = "AAPL";

@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import secrets
+import threading
+from decimal import InvalidOperation
 from datetime import datetime, timezone
 from hmac import compare_digest
 from typing import AsyncIterator, Dict, Tuple
@@ -42,6 +44,8 @@ from .services.orders import (
     validate_trading_status_inputs,
 )
 from .services.fast_trading import FastTradingStrategyManager
+from .services.smart_selling_runtime import SmartSellingRuntime
+from .kafka.consumer_smart_selling import SmartSellingConsumer
 from .kafka.consumer_account_details import AccountDetailsConsumer
 from .kafka.consumer_market_data import PriceBookConsumer
 from .kafka.producer_trading_commands import TradingCommandsProducer
@@ -63,6 +67,9 @@ ACCOUNT_CONSUMER = None
 MARKET_DATA_CONSUMER = None
 COMMANDS_PRODUCER = None
 FAST_TRADING_MANAGER = None
+SMART_SELLING_MANAGER = None
+SMART_SELLING_CONSUMER = None
+ALGO_CONTROL_LOCK = threading.RLock()
 OPERATIONS_LOG = None
 
 MD_STORE = MarketDataStore()
@@ -217,8 +224,44 @@ def _can_manage_trading(user: str | None) -> bool:
 
 
 def _publish_fast_trading_command(command: Dict, key: str) -> None:
+    _publish_control_command(command, key)
+
+
+def _publish_control_command(command: Dict, key: str) -> None:
+    """Serialize manual/E/F ownership checks with Smart selling parent starts."""
+    places_order = command.get("type") in {
+        "LIMIT_ORDER",
+        "LIMIT_ORDER_FOK",
+        "MARKET_ORDER",
+        "DELAYED_MARKET_ORDER",
+    }
+    with ALGO_CONTROL_LOCK:
+        if SMART_SELLING_MANAGER and places_order:
+            if SMART_SELLING_MANAGER.owns(command.get("account_id"), command.get("symbol")):
+                raise ValueError(
+                    "Smart selling owns this account/instrument; "
+                    "stop it and await terminal order status first"
+                )
+            SMART_SELLING_MANAGER.track_external_order(command)
+        _publish_trading_command(command, key)
+
+
+def _publish_trading_command(command: Dict, key: str) -> None:
+    """Transport only: callers check ownership and journal intent before handoff."""
     assert COMMANDS_PRODUCER is not None
     COMMANDS_PRODUCER.publish_order(command, key=key)
+
+
+def _start_fast_strategy(command):
+    with ALGO_CONTROL_LOCK:
+        if SMART_SELLING_MANAGER and any(
+            SMART_SELLING_MANAGER.owns(account, command.get("symbol"))
+            for account in command.get("fast_trading_account_ids", [])
+        ):
+            raise ValueError(
+                "Stop Smart selling and await terminal order status before starting another algorithm"
+            )
+        return FAST_TRADING_MANAGER.start_strategy(command)
 
 
 def _require_auth_page(request: Request):
@@ -239,6 +282,7 @@ def _require_auth_api(request: Request):
 @app.on_event("startup")
 def on_startup() -> None:
     global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG, HIST_CLOSE_STORE
+    global SMART_SELLING_MANAGER, SMART_SELLING_CONSUMER
 
     server_started_at = datetime.now(timezone.utc)
     config_path = os.getenv("ACCOUNT_DASHBOARD_CONFIG", "./trading_ui/sample/config.json")
@@ -258,9 +302,6 @@ def on_startup() -> None:
     ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store, ACCOUNT_METAS)
     ACCOUNT_CONSUMER.start()
 
-    MARKET_DATA_CONSUMER = PriceBookConsumer(APP_CONFIG["kafka"], MD_STORE)
-    MARKET_DATA_CONSUMER.start()
-
     COMMANDS_PRODUCER = TradingCommandsProducer(APP_CONFIG["kafka"])
     FAST_TRADING_MANAGER = FastTradingStrategyManager(
         market_data_store=MD_STORE,
@@ -270,16 +311,44 @@ def on_startup() -> None:
         publish_command=_publish_fast_trading_command,
         fast_trading_settings=APP_CONFIG.get("fast_trading"),
     )
+    if APP_CONFIG["smart_selling"]["enabled"]:
+        SMART_SELLING_MANAGER = SmartSellingRuntime(
+            APP_CONFIG["smart_selling"],
+            account_metas_provider=lambda: ACCOUNT_METAS,
+            snapshots_provider=lambda: get_served_snapshots()[0],
+            publish_command=_publish_trading_command,
+            fast_conflict=lambda account, symbol: FAST_TRADING_MANAGER.has_strategy(
+                account, symbol
+            ),
+        )
+        SMART_SELLING_CONSUMER = SmartSellingConsumer(APP_CONFIG, SMART_SELLING_MANAGER)
+        SMART_SELLING_CONSUMER.start()
+        SMART_SELLING_MANAGER.start()
+    MARKET_DATA_CONSUMER = PriceBookConsumer(
+        APP_CONFIG["kafka"],
+        MD_STORE,
+        payload_callback=SMART_SELLING_MANAGER.on_price_book if SMART_SELLING_MANAGER else None,
+        health_callback=(
+            SMART_SELLING_MANAGER.on_price_book_health if SMART_SELLING_MANAGER else None
+        ),
+    )
+    MARKET_DATA_CONSUMER.start()
 
 
 @app.on_event("shutdown")
 def on_shutdown() -> None:
     if FAST_TRADING_MANAGER:
         FAST_TRADING_MANAGER.stop_all()
+    if SMART_SELLING_MANAGER:
+        SMART_SELLING_MANAGER.stop_all()
     if ACCOUNT_CONSUMER:
         ACCOUNT_CONSUMER.stop()
     if MARKET_DATA_CONSUMER:
         MARKET_DATA_CONSUMER.stop()
+    if SMART_SELLING_CONSUMER:
+        SMART_SELLING_CONSUMER.stop()
+    if SMART_SELLING_MANAGER:
+        SMART_SELLING_MANAGER.close()
     if COMMANDS_PRODUCER:
         COMMANDS_PRODUCER.flush(2.0)
 
@@ -475,7 +544,7 @@ def submit_order(
 
     try:
         assert COMMANDS_PRODUCER is not None and cmd is not None
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
+        _publish_control_command(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
         ok = f"{t(lang,'published_cmd')}={cmd['command_id']}"
         return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
     except Exception as e:
@@ -527,7 +596,7 @@ async def submit_quick_order(request: Request):
 
         try:
             assert COMMANDS_PRODUCER is not None and cmd is not None
-            COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
+            _publish_control_command(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
             published_count += 1
             if first_cmd_id is None:
                 first_cmd_id = str(cmd.get("command_id", ""))
@@ -586,7 +655,7 @@ async def submit_limit_order(request: Request):
 
         try:
             assert COMMANDS_PRODUCER is not None and cmd is not None
-            COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "LIMIT_ORDER"))
+            _publish_control_command(cmd, key=cmd.get("account_id", "LIMIT_ORDER"))
             published_count += 1
             if first_cmd_id is None:
                 first_cmd_id = str(cmd.get("command_id", ""))
@@ -635,7 +704,7 @@ async def submit_cancel_open_orders(request: Request):
 
         try:
             assert COMMANDS_PRODUCER is not None and cmd is not None
-            COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "CANCEL_OPEN_ORDERS"))
+            _publish_control_command(cmd, key=cmd.get("account_id", "CANCEL_OPEN_ORDERS"))
             published_count += 1
             if first_cmd_id is None:
                 first_cmd_id = str(cmd.get("command_id", ""))
@@ -678,7 +747,7 @@ def submit_currency_conversion(
 
     try:
         assert COMMANDS_PRODUCER is not None and cmd is not None
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "CURRENCY_CONVERSION"))
+        _publish_control_command(cmd, key=cmd.get("account_id", "CURRENCY_CONVERSION"))
         ok = f"{t(lang,'conversion_submitted')} {t(lang,'published_cmd')}={cmd['command_id']}"
         return RedirectResponse(url=f"/currency-conversion?ok={quote(ok)}", status_code=303)
     except Exception as e:
@@ -713,7 +782,7 @@ async def submit_trading_status(request: Request):
             return RedirectResponse(url=f"/trading-status?err={quote(err)}", status_code=303)
         try:
             assert COMMANDS_PRODUCER is not None and cmd is not None
-            COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "SET_TRADING_ENABLED"))
+            _publish_control_command(cmd, key=cmd.get("account_id", "SET_TRADING_ENABLED"))
             published_count += 1
             if first_cmd_id is None:
                 first_cmd_id = str(cmd.get("command_id", ""))
@@ -764,7 +833,7 @@ def submit_algo(
     try:
         assert COMMANDS_PRODUCER is not None and cmd is not None
         assert FAST_TRADING_MANAGER is not None
-        strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
+        strategy_key = _start_fast_strategy(cmd)
         ok = f"{t(lang,'algo_submitted')} {strategy_key}. {t(lang,'published_cmd')}={cmd['command_id']}"
         return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
     except Exception as e:
@@ -845,7 +914,7 @@ async def api_submit_account_quick_order(request: Request) -> JSONResponse:
         )
 
     try:
-        COMMANDS_PRODUCER.publish_order(cmd, key=account_id)
+        _publish_control_command(cmd, key=account_id)
     except Exception as exc:
         return JSONResponse(
             {"ok": False, "error": str(exc) or t(lang, "publish_failed")},
@@ -917,7 +986,7 @@ async def api_submit_account_limit_order(request: Request) -> JSONResponse:
         )
 
     try:
-        COMMANDS_PRODUCER.publish_order(cmd, key=account_id)
+        _publish_control_command(cmd, key=account_id)
     except Exception as exc:
         return JSONResponse(
             {"ok": False, "error": str(exc) or t(lang, "publish_failed")},
@@ -1004,7 +1073,7 @@ async def api_submit_order(request: Request) -> JSONResponse:
     try:
         assert COMMANDS_PRODUCER is not None
         assert cmd is not None
-        COMMANDS_PRODUCER.publish_order(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
+        _publish_control_command(cmd, key=cmd.get("account_id", "MARKET_ORDER"))
         return JSONResponse({"ok": True, "command": cmd})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -1047,10 +1116,67 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         assert COMMANDS_PRODUCER is not None
         assert cmd is not None
         assert FAST_TRADING_MANAGER is not None
-        strategy_key = FAST_TRADING_MANAGER.start_strategy(cmd)
+        strategy_key = _start_fast_strategy(cmd)
         return JSONResponse({"ok": True, "command": cmd, "strategy_key": strategy_key})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/smart-selling")
+def api_smart_selling_status(request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    return JSONResponse(
+        {
+            "ok": True,
+            "parents": SMART_SELLING_MANAGER.list_parents() if SMART_SELLING_MANAGER else [],
+            "available": SMART_SELLING_MANAGER is not None,
+        }
+    )
+
+
+def _smart_origin_allowed(request):
+    origin = request.headers.get("origin")
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    return not origin or origin.rstrip("/") == expected
+
+
+@app.post("/api/smart-selling")
+async def api_start_smart_selling(request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    if not _smart_origin_allowed(request):
+        return JSONResponse(
+            {"ok": False, "error": "Cross-origin submission is not allowed"}, status_code=403
+        )
+    if SMART_SELLING_MANAGER is None:
+        return JSONResponse({"ok": False, "error": "Smart selling is unavailable"}, status_code=503)
+    try:
+        payload = await request.json()
+        with ALGO_CONTROL_LOCK:
+            parent = SMART_SELLING_MANAGER.start_parent(payload)
+        return JSONResponse({"ok": True, "parent": parent})
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
+@app.post("/api/smart-selling/{parent_id}/stop")
+def api_stop_smart_selling(parent_id: str, request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    if not _smart_origin_allowed(request):
+        return JSONResponse(
+            {"ok": False, "error": "Cross-origin submission is not allowed"}, status_code=403
+        )
+    if SMART_SELLING_MANAGER is None:
+        return JSONResponse({"ok": False, "error": "Smart selling is unavailable"}, status_code=503)
+    try:
+        return JSONResponse({"ok": True, "parent": SMART_SELLING_MANAGER.stop_parent(parent_id)})
+    except KeyError:
+        return JSONResponse({"ok": False, "error": "Unknown Smart selling parent"}, status_code=404)
 
 
 @app.post("/submit-algo-stop")
@@ -1065,22 +1191,31 @@ def submit_algo_stop(
     # Scope comes from the server, never from submitted mode/account fields.
     # Stop local strategies first even if Kafka is unavailable.
     try:
-        if FAST_TRADING_MANAGER is None:
+        if FAST_TRADING_MANAGER is None and SMART_SELLING_MANAGER is None:
             raise RuntimeError(t(lang, "algo_stop_unavailable"))
-        stopped_count = FAST_TRADING_MANAGER.stop_all()
+        stopped_count = FAST_TRADING_MANAGER.stop_all() if FAST_TRADING_MANAGER else 0
+        smart_count = SMART_SELLING_MANAGER.stop_all() if SMART_SELLING_MANAGER else 0
     except Exception as e:
         return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
 
     ok = t(lang, "algo_stop_submitted").format(count=stopped_count)
+    if smart_count:
+        ok += (
+            f" 已请求停止 {smart_count} 个智能卖出任务，等待订单终态确认。"
+            if lang == "zh"
+            else f" Stop requested for {smart_count} Smart selling parent(s); awaiting final order confirmations."
+        )
     cmd = build_algo_stop_command(reason=reason)
     try:
         if COMMANDS_PRODUCER is None:
             raise RuntimeError(t(lang, "algo_stop_notification_failed"))
-        COMMANDS_PRODUCER.publish_order(cmd, key="ALGO_STOP")
+        _publish_control_command(cmd, key="ALGO_STOP")
     except Exception:
         LOGGER.exception("All local algorithm strategies stopped, but stop notification failed")
         err = t(lang, "algo_stop_notification_failed")
-        return RedirectResponse(url=f"/control-panel?ok={quote(ok)}&err={quote(err)}", status_code=303)
+        return RedirectResponse(
+            url=f"/control-panel?ok={quote(ok)}&err={quote(err)}", status_code=303
+        )
     ok += f" {t(lang,'published_cmd')}={cmd['command_id']}"
     return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
 

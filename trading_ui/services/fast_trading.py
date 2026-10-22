@@ -526,6 +526,16 @@ class FastTradingStrategyManager:
     def _strategy_key(trading_mode: str, symbol: str) -> str:
         return f"{str(trading_mode).strip().upper()}:{str(symbol).strip().upper()}"
 
+    def has_strategy(self, account_id: str, symbol: str) -> bool:
+        """Used by the control server to reserve an instrument for Smart selling."""
+        target = _normalize_symbol(symbol)
+        with self._lock:
+            return any(
+                _normalize_symbol(strategy.command.get("symbol")) == target
+                and account_id in self._strategy_accounts(strategy.command)
+                for strategy in self._strategies.values()
+            ) or account_id in self._inflight_account_ids
+
     @staticmethod
     def _strategy_accounts(command: Mapping[str, Any]) -> set[str]:
         raw_accounts = command.get("fast_trading_account_ids")

@@ -1,0 +1,25 @@
+{
+  "smart_selling": {
+    "enabled": true,
+    "state_db": "../../logs/smart_selling.sqlite3",
+    "order_status_topic": "order-status",
+    "trading_volume_topic": "trading-volume",
+    "quote_max_age": 10,
+    "trade_max_age": 15,
+    "account_max_age": 60,
+    "instrument_defaults": {
+      "tick_size": "0.01",
+      "quantity_step": "1",
+      "min_quantity": "1",
+      "min_notional": "0"
+    },
+    "instruments": {
+      "EXAMPLE": {
+        "tick_size": "0.0001",
+        "quantity_step": "1",
+        "min_quantity": "1",
+        "min_notional": "0"
+      }
+    }
+  }
+}

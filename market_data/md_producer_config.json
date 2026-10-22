@@ -15,5 +15,21 @@
     "TANH",
     "UZX",
     "CHSN"
-  ]
+  ],
+  "trading_volume_topic": "trading-volume",
+  "trading_volume_symbols": [
+    "AEHL",
+    "BIYA",
+    "BABA",
+    "MSFT",
+    "AAPL",
+    "GOOG",
+    "NVDA",
+    "TSLA",
+    "POM",
+    "TANH",
+    "UZX",
+    "CHSN"
+  ],
+  "trading_volume_poll_interval_seconds": 5
 }

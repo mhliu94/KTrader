@@ -207,6 +207,13 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
     cfg["fast_trading"] = _normalize_fast_trading_config(cfg.get("fast_trading"))
 
+    # Keep Smart selling's local journal separate from configuration and logs.
+    from .smart_selling_config import normalize_smart_selling_config
+    smart_raw = cfg.get("smart_selling")
+    cfg["smart_selling"] = normalize_smart_selling_config(smart_raw)
+    if "state_db" in (smart_raw or {}):
+        cfg["smart_selling"]["state_db"] = _resolve_path(cfg["smart_selling"]["state_db"])
+
     cfg.setdefault("auth", {})
     cfg["auth"].setdefault("users", {})
     users = cfg["auth"]["users"]

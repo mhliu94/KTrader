@@ -3,12 +3,18 @@ import logging
 import os
 import time
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional, Dict, Any, List
 from kafka import KafkaProducer
 
 import requests
-from data_types import *
+try:
+    from .data_types import PriceLevel, PriceBookSide, PriceBook
+    from .trading_volume import TradingVolumePublisher, daily_volume, normalized_symbols, select_quote, trade_timestamp, utc_iso
+except ImportError:  # Executed directly by start_tiger_listener.sh / a service.
+    from data_types import PriceLevel, PriceBookSide, PriceBook
+    from trading_volume import TradingVolumePublisher, daily_volume, normalized_symbols, select_quote, trade_timestamp, utc_iso
 from pathlib import Path
 
 
@@ -20,6 +26,8 @@ LOGGER = logging.getLogger("market-data.price-book-producer")
 
 _day_volume_by_symbol: Dict[str, int] = {}
 _day_volume_lock = threading.Lock()
+_depth_book_cache: Dict[str, Dict[str, Any]] = {}
+_depth_book_lock = threading.Lock()
 
 
 def configure_logging() -> None:
@@ -108,6 +116,7 @@ class TSHttpStream:
         self.request_timeout_s = request_timeout_s
         self._stop = threading.Event()
         self.seq_num = 1
+        self.feed_id = uuid.uuid4().hex
 
     def stop(self) -> None:
         self._stop.set()
@@ -136,6 +145,8 @@ class TSHttpStream:
 
                 with session.get(url, headers=headers, stream=True, timeout=self.request_timeout_s) as r:
                     r.raise_for_status()
+                    self.feed_id = uuid.uuid4().hex
+                    self.seq_num = 1
                     backoff = 1.0  # reset after successful connect
 
                     buffer = ""
@@ -167,6 +178,7 @@ class TSHttpStream:
                             status = obj.get("StreamStatus")
                             obj["Symbol"] = symbol  # TS doesn't provide symbol in their API, so set it here
                             obj["SequenceNumber"] = self.seq_num
+                            obj["FeedID"] = self.feed_id
                             self.seq_num += 1
                             if status == "GoAway":
                                 raise RuntimeError("Server requested stream restart (GoAway).")
@@ -202,11 +214,11 @@ def _to_int(v: Any) -> Optional[int]:
 
 
 def _extract_day_volume_from_obj(obj: Dict[str, Any]) -> Optional[int]:
-    for key in ("DayVolume", "TotalVolume", "Volume", "TradeVolume"):
-        day_vol = _to_int(obj.get(key))
-        if day_vol is not None:
-            return day_vol
-    return None
+    # v3 Quote.Volume is cumulative daily volume; LastSize/TradeVolume are not.
+    try:
+        return daily_volume(obj.get("Volume"))
+    except ValueError:
+        return None
 
 
 class TSQuotePoller:
@@ -220,9 +232,11 @@ class TSQuotePoller:
         on_error: Optional[Callable[[Exception], None]] = None,
         poll_interval_s: float = 5.0,
         request_timeout_s: int = 15,
+        volume_publisher: Optional[TradingVolumePublisher] = None,
     ):
         self.tm = token_manager
-        self.symbols = symbols
+        self.symbols = normalized_symbols(symbols)
+        self.volume_publisher = volume_publisher
         self.on_error = on_error or (lambda e: None)
         self.poll_interval_s = poll_interval_s
         self.request_timeout_s = request_timeout_s
@@ -239,44 +253,111 @@ class TSQuotePoller:
             self._thread.join(timeout=5.0)
 
     def _run(self) -> None:
-        session = requests.Session()
-        while not self._stop.is_set():
-            for symbol in self.symbols:
-                if self._stop.is_set():
-                    return
-                try:
-                    day_vol = self._fetch_day_volume(session, symbol)
-                    if day_vol is not None:
-                        with _day_volume_lock:
-                            _day_volume_by_symbol[symbol] = day_vol
-                except Exception as e:
-                    self.on_error(e)
-            self._stop.wait(self.poll_interval_s)
+        with requests.Session() as session:
+            while not self._stop.is_set():
+                self.poll_once(session)
+                self._stop.wait(self.poll_interval_s)
 
-    def _fetch_day_volume(self, session: requests.Session, symbol: str) -> Optional[int]:
-        url = f"{TS_API_BASE}/v3/marketdata/quotes/{symbol}"
+    def poll_once(self, session: requests.Session) -> None:
+        # Official v3 GetQuoteSnapshots allows up to 100 comma-separated
+        # symbols. Reuse each snapshot for the book cache and volume topic.
+        for offset in range(0, len(self.symbols), 100):
+            if self._stop.is_set():
+                return
+            symbols = self.symbols[offset:offset + 100]
+            started, timer = time.time(), time.monotonic()
+            try:
+                payload = self._fetch_quotes(session, symbols)
+            except Exception as error:
+                observed = time.time()
+                duration = (time.monotonic() - timer) * 1000
+                self.on_error(error)
+                for symbol in symbols:
+                    if self.volume_publisher:
+                        try:
+                            self.volume_publisher.publish_error(
+                                symbol, "quote request failed: " + type(error).__name__,
+                                request_started_at=started, observed_at=observed,
+                                request_duration_ms=duration)
+                        except Exception as publish_error:
+                            self.on_error(publish_error)
+                continue
+            observed = time.time()
+            duration = (time.monotonic() - timer) * 1000
+            for symbol in symbols:
+                try:
+                    quote = select_quote(payload, symbol)
+                except ValueError as error:
+                    self.on_error(error)
+                    if self.volume_publisher:
+                        try:
+                            self.volume_publisher.publish_error(
+                                symbol, str(error), request_started_at=started,
+                                observed_at=observed, request_duration_ms=duration)
+                        except Exception as publish_error:
+                            self.on_error(publish_error)
+                    continue
+                day_volume = _extract_day_volume_from_obj(quote)
+                if day_volume is not None:
+                    with _day_volume_lock:
+                        _day_volume_by_symbol[symbol] = day_volume
+                if self.volume_publisher:
+                    try:
+                        self.volume_publisher.publish_quote(
+                            symbol, quote, request_started_at=started,
+                            observed_at=observed, request_duration_ms=duration)
+                    except Exception as error:
+                        self.on_error(error)
+
+    def _fetch_quotes(self, session: requests.Session, symbols: List[str]) -> Dict[str, Any]:
+        from urllib.parse import quote
+        encoded_symbols = quote(",".join(symbols), safe=",.$@_-" )
+        url = f"{TS_API_BASE}/v3/marketdata/quotes/{encoded_symbols}"
         token = self.tm.get_access_token()
-        resp = session.get(
+        response = session.get(
             url,
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=self.request_timeout_s,
         )
-        resp.raise_for_status()
-        payload = resp.json()
+        response.raise_for_status()
+        return response.json()
 
-        if isinstance(payload, dict):
-            day_vol = _extract_day_volume_from_obj(payload)
-            if day_vol is not None:
-                return day_vol
+    def _fetch_day_volume(self, session: requests.Session, symbol: str) -> Optional[int]:
+        # Kept for callers of the old single-symbol helper.
+        quote = select_quote(self._fetch_quotes(session, [symbol]), symbol)
+        return _extract_day_volume_from_obj(quote)
 
-            quotes = payload.get("Quotes")
-            if isinstance(quotes, list):
-                for item in quotes:
-                    if isinstance(item, dict):
-                        day_vol = _extract_day_volume_from_obj(item)
-                        if day_vol is not None:
-                            return day_vol
-        return None
+
+def _publish_depth_heartbeat(evt: Dict[str, Any]) -> None:
+    """Only an actual documented TS depth heartbeat can refresh an idle book.
+
+    https://api.tradestation.com/docs/specification/ documents Heartbeat2 with
+    Timestamp (RFC3339), sent after five seconds on an idle aggregate stream.
+    A fresh connection cannot reuse a snapshot from its previous connection.
+    """
+    symbol = str(evt.get("Symbol") or "").strip().upper()
+    feed_id = str(evt.get("FeedID") or "")
+    with _depth_book_lock:
+        cached = _depth_book_cache.get(symbol)
+        if not cached or not feed_id or cached.get("feed_id") != feed_id:
+            return
+        payload = dict(cached)
+    observed = time.time()
+    try:
+        source_time = trade_timestamp(evt.get("Timestamp"))
+    except ValueError:
+        source_time = None
+    healthy = source_time is not None and -1 <= observed - source_time <= 10
+    payload.update(kind="PRICE_BOOK_HEARTBEAT", feed_id=feed_id,
+                   book_observed_at=utc_iso(source_time) if source_time is not None else None,
+                   observed_at=utc_iso(observed), healthy=healthy,
+                   sequence_num=evt.get("SequenceNumber"))
+    if source_time is not None:
+        payload["update_time"] = int(source_time * 1e9)
+    try:
+        producer.send(topic=kafka_topic, key="price-book", value=json.dumps(payload))
+    except Exception as error:
+        LOGGER.warning("depth heartbeat publish error %s", type(error).__name__)
 
 
 # ---------- Example usage ----------
@@ -285,12 +366,15 @@ def print_depth_event(evt: Dict[str, Any]) -> None:
     # For quick visibility:
     # print(evt)
     if "Heartbeat" in evt:
+        _publish_depth_heartbeat(evt)
+        return
+    if evt.get("StreamStatus"):
         return
 
     update_time = int(time.time() * 1e9) # epoch nanos
 
     try:
-        symbol = str(evt.get("Symbol", "")).strip()
+        symbol = str(evt.get("Symbol", "")).strip().upper()
         if not symbol:
             return
 
@@ -331,8 +415,13 @@ def print_depth_event(evt: Dict[str, Any]) -> None:
         ask_side = PriceBookSide(False, update_time, al_list)
         curr_book = PriceBook(symbol, bid_side, ask_side, update_time, evt["SequenceNumber"])
         payload = json.loads(curr_book.to_json())
+        payload.update(kind="PRICE_BOOK", feed_id=str(evt.get("FeedID") or "legacy"),
+                       book_observed_at=utc_iso(update_time / 1e9),
+                       observed_at=utc_iso(update_time / 1e9), source="TradeStation")
         if day_volume is not None:
             payload["volume"] = day_volume
+        with _depth_book_lock:
+            _depth_book_cache[symbol] = dict(payload)
 
         producer.send(
             topic=kafka_topic,
@@ -369,9 +458,14 @@ if __name__ == "__main__":
         kafka_topic = json_content["kafka_topic"]
         trading_symbols = json_content["symbols"]
         trading_symbols = [str(s).strip() for s in trading_symbols if str(s).strip()]
-        trading_symbols = list(dict.fromkeys(trading_symbols))  # dedupe, preserve order
+        trading_symbols = normalized_symbols(trading_symbols)  # dedupe, preserve order
         if not trading_symbols:
             raise ValueError("Config 'symbols' must contain at least one symbol.")
+        volume_symbols = normalized_symbols(json_content.get("trading_volume_symbols", []))
+        volume_topic = str(json_content.get("trading_volume_topic", "trading-volume")).strip()
+        volume_poll_interval = float(json_content.get("trading_volume_poll_interval_seconds", 5))
+        if not 1 <= volume_poll_interval <= 300:
+            raise ValueError("trading_volume_poll_interval_seconds must be between 1 and 300")
 
     producer = KafkaProducer(
         bootstrap_servers=f"{kafka_server_ip}:{kafka_port}",
@@ -391,10 +485,15 @@ if __name__ == "__main__":
 
     streams: List[TSHttpStream] = []
     threads: List[threading.Thread] = []
-    quote_poller = TSQuotePoller(token_manager=tm, symbols=trading_symbols, on_error=print_err)
+    volume_publisher = TradingVolumePublisher(producer, volume_symbols, topic=volume_topic,
+                                               max_request_seconds=max(10, 2 * volume_poll_interval))
+    quote_symbols = list(dict.fromkeys(trading_symbols + volume_symbols))
+    quote_poller = TSQuotePoller(token_manager=tm, symbols=quote_symbols, on_error=print_err,
+                                poll_interval_s=volume_poll_interval,
+                                volume_publisher=volume_publisher)
     try:
         quote_poller.start()
-        LOGGER.info("Started quote poller for day volume")
+        LOGGER.info("Started quote poller; volume topic=%s, volume symbols=%s", volume_topic, volume_symbols)
 
         for symbol in trading_symbols:
             stream = TSHttpStream(token_manager=tm, on_message=print_depth_event, on_error=print_err)

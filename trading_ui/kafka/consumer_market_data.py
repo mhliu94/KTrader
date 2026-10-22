@@ -20,12 +20,14 @@ def parse_market_data_message(raw: bytes):
 
 
 class PriceBookConsumer:
-    def __init__(self, kafka_cfg: Dict[str, Any], store: MarketDataStore) -> None:
+    def __init__(self, kafka_cfg: Dict[str, Any], store: MarketDataStore, payload_callback=None, health_callback=None) -> None:
         self._kafka_cfg = kafka_cfg
         self._store = store
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._consumer: Optional[Consumer] = None
+        self._payload_callback = payload_callback
+        self._health_callback = health_callback
 
     def start(self) -> None:
         bootstrap_servers = self._kafka_cfg.get("market_data_bootstrap_servers", self._kafka_cfg["bootstrap_servers"])
@@ -48,6 +50,8 @@ class PriceBookConsumer:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._health_callback:
+            self._health_callback(False)
         if self._thread:
             self._thread.join(timeout=5)
         if self._consumer:
@@ -67,6 +71,8 @@ class PriceBookConsumer:
 
             if msg.error():
                 if msg.error().code() != KafkaError._PARTITION_EOF:
+                    if self._health_callback:
+                        self._health_callback(False)
                     LOGGER.warning("market-data consume error: %s", msg.error())
                     time.sleep(0.2)
                 continue
@@ -89,6 +95,15 @@ class PriceBookConsumer:
                 book = order_book_from_price_book(payload, depth_limit=depth_limit)
                 if book is not None:
                     self._store.upsert_book(book)
+                if self._payload_callback:
+                    try:
+                        if self._health_callback:
+                            self._health_callback(True)
+                        self._payload_callback(payload, topic=msg.topic(), partition=msg.partition(), offset=msg.offset())
+                    except Exception:
+                        LOGGER.exception("Smart selling rejected a price-book update")
+                        if self._health_callback:
+                            self._health_callback(False)
 
     def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         for partition in partitions:

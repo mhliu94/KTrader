@@ -11,10 +11,14 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Mapping
 
 ZERO = Decimal("0")
+PARTICIPATION_PERCENTAGES = {
+    "patient": Decimal("3"),
+    "normal": Decimal("6"),
+    "urgent": Decimal("10"),
+}
 PARTICIPATION_RATES = {
-    "patient": Decimal(".03"),
-    "normal": Decimal(".06"),
-    "urgent": Decimal(".10"),
+    mode: percentage.scaleb(-2)
+    for mode, percentage in PARTICIPATION_PERCENTAGES.items()
 }
 SMART_SELLING_DEFAULTS = {
     "horizon_seconds": 7200,
@@ -52,6 +56,14 @@ def parse_input_decimal(value, label="quantity", *, positive=False, nonnegative=
     return number
 
 
+def parse_participation_percentage(value, label="participation percentage"):
+    """Validate percentage units before deriving a parent's fixed volume rate."""
+    percentage = parse_input_decimal(value, label, positive=True)
+    if percentage > 100:
+        raise ValueError(f"{label} must be greater than 0 and at most 100")
+    return percentage
+
+
 def decimal_string(value):
     """Keep Decimal values exact when writing JSON or SQLite payloads."""
     return format(value, "f") if isinstance(value, Decimal) else value
@@ -81,6 +93,8 @@ def parse_timestamp(value, default=None):
 
 
 def utc_timestamp_string(value):
+    if value is None:
+        return None
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -120,10 +134,12 @@ def plan_child_order(parent: Mapping[str, Any], quote: Mapping[str, Any], now: f
     depth_limited = depth_budget < min(child_cap, remaining)
     ready_quantity = round_down_to_step(min(child_cap, remaining, depth_budget), quantity_step)
 
-    horizon = parent["deadline_mono"] - parent["start_mono"]
-    elapsed_fraction = max(0, min(1, (now - parent["start_mono"]) / horizon))
-    progress_reference = parent_quantity * parse_decimal(elapsed_fraction)
-    behind_schedule = filled < progress_reference - child_cap
+    behind_schedule = False
+    if parent["deadline_mono"] is not None:
+        horizon = parent["deadline_mono"] - parent["start_mono"]
+        elapsed_fraction = max(0, min(1, (now - parent["start_mono"]) / horizon))
+        progress_reference = parent_quantity * parse_decimal(elapsed_fraction)
+        behind_schedule = filled < progress_reference - child_cap
     aggressive = bool(
         parent["mode"] == "urgent"
         or parent["fallback"]

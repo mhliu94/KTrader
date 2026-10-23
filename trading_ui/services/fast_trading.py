@@ -515,6 +515,8 @@ class FastTradingStrategyManager:
         self._monotonic = monotonic
         self._lock = threading.RLock()
         self._strategies: Dict[str, _FastStrategy] = {}
+        # Stopping workers still own their session until their last handoff ends.
+        self._stopping_strategies: Dict[str, _FastStrategy] = {}
         # Shared by all E/F strategies and retained across session stops for
         # the lifetime of this control-server process.
         self._last_action_monotonic_by_account: Dict[str, float] = {}
@@ -533,8 +535,29 @@ class FastTradingStrategyManager:
             return any(
                 _normalize_symbol(strategy.command.get("symbol")) == target
                 and account_id in self._strategy_accounts(strategy.command)
-                for strategy in self._strategies.values()
+                for strategy in (*self._strategies.values(), *self._stopping_strategies.values())
             ) or account_id in self._inflight_account_ids
+
+    def has_active_session(self) -> bool:
+        with self._lock:
+            return bool(self._strategies or self._stopping_strategies or self._inflight_account_ids)
+
+    def owns_account(self, account_id: str) -> bool:
+        with self._lock:
+            return account_id in self._inflight_account_ids or any(
+                account_id in self._strategy_accounts(strategy.command)
+                for strategy in (*self._strategies.values(), *self._stopping_strategies.values())
+            )
+
+    def has_running_strategy(self, account_id: str, symbol: str) -> bool:
+        """Only a running worker may hand off a new order after a stop request."""
+        with self._lock:
+            return any(
+                not strategy.stop_event.is_set()
+                and _normalize_symbol(strategy.command.get("symbol")) == _normalize_symbol(symbol)
+                and account_id in self._strategy_accounts(strategy.command)
+                for strategy in self._strategies.values()
+            )
 
     @staticmethod
     def _strategy_accounts(command: Mapping[str, Any]) -> set[str]:
@@ -581,7 +604,6 @@ class FastTradingStrategyManager:
         mode, symbol, _, _, book_levels, target_percentage, cycle_seconds = self._validated_strategy_values(start_command)
         strategy_command = dict(start_command)
         key = self._strategy_key(mode, symbol)
-        self.stop_strategy(mode, symbol)
 
         strategy = _FastStrategy(
             key=key,
@@ -597,9 +619,15 @@ class FastTradingStrategyManager:
         )
         strategy.thread = thread
         with self._lock:
+            if self.has_active_session():
+                raise ValueError("Stop the existing algorithm session before starting another")
             self._strategies[key] = strategy
-        self._record_strategy_started(strategy)
-        thread.start()
+            self._record_strategy_started(strategy)
+            try:
+                thread.start()
+            except BaseException:
+                self._strategies.pop(key, None)
+                raise
         LOGGER.info(
             "Algo trading started successfully mode=%s symbol=%s key=%s command_id=%s "
             "book_levels=%s target_percentage=%s cycle_seconds=%s test_mode=%s",
@@ -646,13 +674,16 @@ class FastTradingStrategyManager:
                 strategy = self._strategies.pop(key, None)
                 if strategy is not None:
                     strategy.last_reason = reason
+                    strategy.stop_event.set()
+                    self._stopping_strategies[key] = strategy
                     strategies.append(strategy)
 
         for strategy in strategies:
-            strategy.stop_event.set()
-        for strategy in strategies:
             if strategy.thread is not None and strategy.thread is not threading.current_thread():
                 strategy.thread.join(timeout=2.0)
+            with self._lock:
+                if strategy.thread is None or not strategy.thread.is_alive():
+                    self._stopping_strategies.pop(strategy.key, None)
             LOGGER.info(
                 "Algo trading stopped mode=%s symbol=%s key=%s command_id=%s reason=%s",
                 strategy.command.get("trading_mode"),
@@ -714,11 +745,13 @@ class FastTradingStrategyManager:
                         strategy.consecutive_capacity_noops = 0
                     elif result.capacity_noop:
                         strategy.consecutive_capacity_noops += 1
-                    if strategy.consecutive_capacity_noops >= FAST_MAX_CONSECUTIVE_CAPACITY_NOOPS:
-                        strategy.last_reason = STOP_REASON_CAPACITY_NOOPS
-                        reached_noop_limit = True
-                    else:
-                        strategy.last_reason = result.reason
+                    # A cycle may finish after stop; retain the stop reason.
+                    if not strategy.stop_event.is_set():
+                        if strategy.consecutive_capacity_noops >= FAST_MAX_CONSECUTIVE_CAPACITY_NOOPS:
+                            strategy.last_reason = STOP_REASON_CAPACITY_NOOPS
+                            reached_noop_limit = True
+                        else:
+                            strategy.last_reason = result.reason
 
                 if reached_noop_limit:
                     LOGGER.info(
@@ -735,13 +768,17 @@ class FastTradingStrategyManager:
                 if strategy.stop_event.wait(max(0.0, cycle_seconds - elapsed)):
                     break
         except Exception:
-            strategy.last_reason = "Strategy error"
+            with self._lock:
+                if not strategy.stop_event.is_set():
+                    strategy.last_reason = "Strategy error"
             LOGGER.exception("Fast trading strategy failed key=%s", strategy.key)
         finally:
             with self._lock:
                 existing = self._strategies.get(strategy.key)
                 if existing is strategy:
                     self._strategies.pop(strategy.key, None)
+                if self._stopping_strategies.get(strategy.key) is strategy:
+                    self._stopping_strategies.pop(strategy.key, None)
                 reason = strategy.last_reason or "Strategy stopped"
                 cycles = strategy.cycles
                 published_commands = strategy.published_commands

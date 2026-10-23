@@ -72,7 +72,7 @@ class SmartSellingTests(unittest.TestCase):
             status,
             quantity,
             broker_order_id="broker-" + child["client_order_id"],
-            **kwargs
+            **kwargs,
         )
 
     def status(self):
@@ -84,6 +84,15 @@ class SmartSellingTests(unittest.TestCase):
         self.assertLessEqual(
             Decimal(result["filled"]) + Decimal(result["reserved"]), Decimal(result["quantity"])
         )
+        accounts = result["accounts"].values()
+        self.assertEqual(sum(Decimal(a["filled"]) for a in accounts), Decimal(result["filled"]))
+        self.assertEqual(sum(Decimal(a["reserved"]) for a in accounts), Decimal(result["reserved"]))
+        for account in accounts:
+            self.assertGreaterEqual(Decimal(account["reserved"]), 0)
+            self.assertLessEqual(
+                Decimal(account["filled"]) + Decimal(account["reserved"]),
+                Decimal(account["quantity"]),
+            )
         return result
 
     def test_three_fixed_modes_and_one_tick_midpoint(self):
@@ -100,6 +109,32 @@ class SmartSellingTests(unittest.TestCase):
                 self.assertEqual(Decimal(self.status()["participation"]), Decimal(rate))
                 self.report(child, "FILLED", child["quantity"], final=True)
                 self.engine.request_stop(self.parent)
+
+    def test_configured_participation_is_exact_and_survives_restart_and_correction(self):
+        self.start(mode="patient", participation_percentage="0.000000000000000000000001")
+        self.tape("1e24", "original")
+        self.assertEqual(Decimal(self.status()["participation"]), Decimal("1e-26"))
+        self.assertEqual(Decimal(self.status()["earned"]), Decimal(".01"))
+
+        self.engine.close()
+        self.engine = SmartSellingEngine(
+            self.path, clock=self.clock.monotonic, wall_clock=self.clock.wall
+        )
+        self.assertEqual(Decimal(self.status()["participation"]), Decimal("1e-26"))
+        self.tape("-1e23", "correction", correction_of="original")
+        self.assertEqual(Decimal(self.status()["earned"]), Decimal(".009"))
+        self.tape("1e23", "next")
+        self.assertEqual(Decimal(self.status()["earned"]), Decimal(".01"))
+
+    def test_configured_participation_accepts_full_volume_and_rejects_invalid_values(self):
+        for percentage in (True, False, None, "NaN", "Infinity", 0, -1, "100.01", "1e-25"):
+            with self.subTest(percentage=percentage), self.assertRaises(ValueError):
+                self.start(participation_percentage=percentage)
+        self.start(participation_percentage="100")
+        self.tape("100")
+        self.assertEqual(Decimal(self.status()["participation"]), Decimal(1))
+        self.assertEqual(Decimal(self.status()["earned"]), Decimal(100))
+        self.assertEqual(Decimal(self.child()["quantity"]), Decimal(100))
 
     def test_one_parent_per_account_symbol(self):
         self.start()
@@ -764,6 +799,221 @@ class SmartSellingTests(unittest.TestCase):
                 for action in actions
             )
         )
+
+    def test_round_robin_uses_one_shared_slice_and_participation_budget(self):
+        self.start(
+            account_ids=["A", "B", "C"], account_quantities={"A": "400", "B": "400", "C": "400"}
+        )
+        self.tape("2000")
+        first = self.child()
+        self.assertEqual((first["account_id"], first["quantity"]), ("A", "100"))
+        self.assertEqual(self.status()["earned"], "200.00")
+        self.assertEqual(self.engine.tick(), [])
+        for index, expected in enumerate(["B", "C", "A"], start=1):
+            self.report(first, "FILLED", first["quantity"], final=True)
+            self.clock.now = 5 * index
+            self.quote()
+            self.tape("1000", event_id=f"rotation-{index}")
+            first = self.child()
+            self.assertEqual(first["account_id"], expected)
+            self.assertEqual(Decimal(first["quantity"]), 100)
+            self.status()
+
+    def test_short_inventory_spills_only_remainder_and_retires_empty_accounts(self):
+        self.start(
+            account_ids=["empty", "A", "B", "C"],
+            account_quantities={"empty": "0", "A": "40", "B": "30", "C": "930"},
+        )
+        self.tape("2000")
+        for now, expected_account, expected_quantity in [
+            (0, "A", "40"),
+            (5, "B", "30"),
+            (10, "C", "30"),
+            (15, "C", "100"),
+        ]:
+            self.clock.now = now
+            self.quote()
+            child = self.child()
+            self.assertEqual(
+                (child["account_id"], child["quantity"]), (expected_account, expected_quantity)
+            )
+            if now == 0:
+                self.assertEqual(self.status()["accounts"]["A"]["reserved"], "40")
+                self.clock.now = 1
+                self.assertEqual(self.engine.tick(), [])
+            self.report(child, "FILLED", child["quantity"], final=True)
+            status = self.status()
+        self.assertTrue(status["accounts"]["empty"]["done"])
+        self.assertTrue(status["accounts"]["A"]["done"])
+        self.assertTrue(status["accounts"]["B"]["done"])
+        self.assertEqual(status["accounts"]["C"]["filled"], "130")
+
+    def test_split_slice_keeps_remainder_when_fresh_depth_is_smaller(self):
+        self.start(
+            account_ids=["A", "B", "C"], account_quantities={"A": "40", "B": "500", "C": "460"}
+        )
+        self.tape("2000")
+        first = self.child()
+        self.report(first, "FILLED", "40", final=True)
+        self.clock.now = 5
+        self.quote(bid_size="500")
+        second = self.child()
+        self.assertEqual((second["account_id"], second["quantity"]), ("B", "50"))
+        self.report(second, "FILLED", "50", final=True)
+        self.clock.now = 10
+        self.quote()
+        third = self.child()
+        self.assertEqual((third["account_id"], third["quantity"]), ("C", "10"))
+
+    def test_partial_fill_cancel_refunds_only_selected_account_and_rotates(self):
+        self.start(account_ids=["A", "B"], account_quantities={"A": "500", "B": "500"})
+        self.tape("2000")
+        first = self.child()
+        self.report(first, "PARTIALLY_FILLED", "30")
+        self.clock.now = 2
+        actions = self.engine.tick()
+        self.assertEqual([(a["type"], a["account_id"]) for a in actions], [("cancel", "A")])
+        before = self.status()
+        self.assertEqual(before["accounts"]["A"]["reserved"], "70")
+        self.assertEqual(before["accounts"]["B"]["reserved"], "0")
+        self.report(first, "CANCELED", "40", final=True)
+        after = self.status()
+        self.assertEqual(after["accounts"]["A"]["filled"], "40")
+        self.assertEqual(after["accounts"]["A"]["reserved"], "0")
+        self.clock.now = 5
+        self.quote()
+        second = self.child()
+        self.assertEqual(second["account_id"], "B")
+        self.report(second, "NEW")
+        context = self.engine.get_order_context(second["client_order_id"])
+        self.assertEqual(context["account_id"], "B")
+        self.assertEqual(
+            self.engine.find_order_by_broker_id("B", "broker-" + second["client_order_id"]), context
+        )
+        self.assertIsNone(
+            self.engine.find_order_by_broker_id("A", "broker-" + second["client_order_id"])
+        )
+
+    def test_fractional_fill_never_creates_an_off_step_account_order(self):
+        self.start(account_ids=["A", "B"], account_quantities={"A": "100", "B": "900"})
+        self.tape("3000")
+        first = self.child()
+        self.report(first, "CANCELED", "20.5", final=True)
+        self.clock.now = 5
+        self.quote()
+        second = self.child()
+        self.assertEqual(second["account_id"], "B")
+        self.report(second, "FILLED", second["quantity"], final=True)
+        self.clock.now = 10
+        self.quote()
+        self.tape("1000", event_id="fractional-fill-followup")
+        third = self.child()
+        self.assertEqual((third["account_id"], third["quantity"]), ("A", "79"))
+        account = self.status()["accounts"]["A"]
+        self.assertEqual(account["remaining"], "79.5")
+        self.assertEqual(Decimal(account["reserved"]), 79)
+
+    def test_multi_account_pre_dispatch_refund_keeps_account_reservations_exact(self):
+        self.start(account_ids=["A", "B"], account_quantities={"A": "500", "B": "500"})
+        self.tape("2000")
+        first = self.child()
+        self.quote(bid_size="400")
+        prepared = self.engine.prepare_dispatch(first["client_order_id"])
+        self.assertEqual(prepared["account_id"], "A")
+        self.assertEqual(self.status()["accounts"]["A"]["reserved"], "40")
+        self.assertTrue(self.engine.abort_dispatch(first["client_order_id"], "not published"))
+        self.assertEqual(self.status()["accounts"]["A"]["reserved"], "0")
+
+    def test_round_robin_and_inventory_survive_restart(self):
+        self.start(account_ids=["A", "B"], account_quantities={"A": "40", "B": "960"})
+        self.tape("2000")
+        first = self.child()
+        self.report(first, "FILLED", "40", final=True)
+        self.engine.close()
+        self.clock.now = 5
+        self.engine = SmartSellingEngine(
+            self.path, clock=self.clock.monotonic, wall_clock=self.clock.wall
+        )
+        self.quote()
+        second = self.child()
+        self.assertEqual((second["account_id"], second["quantity"]), ("B", "60"))
+        self.assertTrue(self.status()["accounts"]["A"]["done"])
+
+    def test_explicit_target_remains_supported_without_exceeding_inventory(self):
+        self.start(
+            quantity="150",
+            horizon_seconds=30,
+            account_ids=["A", "B"],
+            account_quantities={"A": "40", "B": "960"},
+        )
+        self.tape("2000")
+        for now, account, quantity in [(0, "A", "40"), (5, "B", "60"), (10, "B", "50")]:
+            self.clock.now = now
+            self.quote()
+            child = self.child()
+            self.assertEqual((child["account_id"], child["quantity"]), (account, quantity))
+            self.report(child, "FILLED", quantity, final=True)
+        status = self.status()
+        self.assertEqual(status["state"], "COMPLETED")
+        self.assertEqual(status["filled"], "150")
+        self.assertEqual(status["accounts"]["B"]["remaining"], "850")
+        self.assertEqual(self.engine.tick(), [])
+
+    def test_selected_account_ownership_and_inventory_are_validated(self):
+        self.start(account_ids=["A", "B"], account_quantities={"A": "500", "B": "500"})
+        with self.assertRaisesRegex(ValueError, "already owns"):
+            self.start(account_id="B")
+        with self.assertRaisesRegex(ValueError, "available inventory"):
+            self.start(account_ids=["C", "D"], account_quantities={"C": "40", "D": "50"})
+        with self.assertRaisesRegex(ValueError, "account quantity"):
+            self.start(account_ids=["C", "D"], account_quantities={"C": "-1", "D": "1001"})
+
+    def test_no_deadline_runs_past_sizing_horizon_and_survives_restart(self):
+        parent = self.start(deadline=None, start_time="now")
+        self.assertIsNone(parent["deadline"])
+        self.engine.close()
+        self.clock.now = 10000
+        self.engine = SmartSellingEngine(
+            self.path, clock=self.clock.monotonic, wall_clock=self.clock.wall
+        )
+        self.quote()
+        self.tape()
+        child = self.child()
+        self.assertIsNone(child["deadline"])
+        self.assertTrue(self.status()["active"])
+        self.assertEqual(self.status()["state"], "RUNNING")
+
+    def test_no_deadline_does_not_create_schedule_pressure(self):
+        self.start(mode="patient", deadline=None)
+        self.clock.now = 10000
+        self.quote(bid="10", ask="10.10")
+        self.tape("4000")
+        self.assertEqual(Decimal(self.child()["limit_price"]), Decimal("10.10"))
+
+    def test_legacy_parent_is_upgraded_without_losing_reserved_inventory(self):
+        self.start()
+        self.tape()
+        child = self.child()
+        row = self.engine._db.execute(
+            "SELECT data FROM smart_parents WHERE id=?", (self.parent,)
+        ).fetchone()
+        legacy = json.loads(row[0])
+        for key in ["accounts", "account_ids", "next_account_index", "slice_remaining"]:
+            legacy.pop(key)
+        legacy["order"].pop("account_id")
+        self.engine._db.execute(
+            "UPDATE smart_parents SET data=? WHERE id=?", (json.dumps(legacy), self.parent)
+        )
+        self.engine.close()
+        self.engine = SmartSellingEngine(
+            self.path, clock=self.clock.monotonic, wall_clock=self.clock.wall
+        )
+        status = self.status()
+        self.assertEqual(status["account_ids"], ["A"])
+        self.assertEqual(status["accounts"]["A"]["reserved"], "100")
+        self.assertEqual(status["active_order"]["account_id"], "A")
+        self.report(child, "CANCELED", "20", final=True)
+        self.assertEqual(self.status()["accounts"]["A"]["filled"], "20")
 
     def test_defaults_and_required_broker_rules(self):
         parent = self.start(mode="2", horizon_seconds=7200)

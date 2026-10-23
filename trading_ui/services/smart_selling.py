@@ -19,13 +19,14 @@ import uuid
 
 from .smart_selling_policy import (
     ZERO,
-    PARTICIPATION_RATES,
+    PARTICIPATION_PERCENTAGES,
     SMART_SELLING_DEFAULTS,
     ChildPlan,
     decimal_string,
     meets_order_minimum,
     parse_decimal,
     parse_input_decimal,
+    parse_participation_percentage,
     parse_timestamp,
     plan_child_order,
     round_down_to_step,
@@ -88,7 +89,11 @@ class SmartSellingEngine:
             wall = self.wall_clock()
             for parent in self._active():
                 parent["start_mono"] = now + parent["start_wall"] - wall
-                parent["deadline_mono"] = now + parent["deadline_wall"] - wall
+                parent["deadline_mono"] = (
+                    now + parent["deadline_wall"] - wall
+                    if parent["deadline_wall"] is not None
+                    else None
+                )
                 if parent["last_send_wall"] is not None:
                     parent["last_send"] = now - max(0, wall - parent["last_send_wall"])
                 parent["last_diagnostic"] = None
@@ -128,13 +133,34 @@ class SmartSellingEngine:
         if symbol is not None:
             query += " AND symbol=?"
             args = (symbol,)
-        return [json.loads(row[0]) for row in self._db.execute(query, args)]
+        return [self._upgrade_parent(json.loads(row[0])) for row in self._db.execute(query, args)]
 
     def _load(self, parent_id):
         row = self._db.execute("SELECT data FROM smart_parents WHERE id=?", (parent_id,)).fetchone()
         if row is None:
             raise KeyError(parent_id)
-        return json.loads(row[0])
+        return self._upgrade_parent(json.loads(row[0]))
+
+    @staticmethod
+    def _upgrade_parent(parent):
+        """Read legacy single-account records as one-account sessions."""
+        account = parent["account_id"]
+        parent.setdefault("account_ids", [account])
+        parent.setdefault(
+            "accounts",
+            {
+                account: {
+                    "quantity": parent["quantity"],
+                    "F": parent["F"],
+                    "R": parent["R"],
+                }
+            },
+        )
+        parent.setdefault("next_account_index", 0)
+        parent.setdefault("slice_remaining", "0")
+        if parent["order"]:
+            parent["order"].setdefault("account_id", account)
+        return parent
 
     def _save(self, parent):
         """Enforce credit conservation and the parent position bound on every write."""
@@ -148,6 +174,18 @@ class SmartSellingEngine:
             or filled + reserved > parse_decimal(parent["quantity"])
         ):
             raise AssertionError("Smart selling ledger invariant violated")
+        accounts = parent["accounts"]
+        if (
+            sum((parse_decimal(a["F"]) for a in accounts.values()), ZERO) != filled
+            or sum((parse_decimal(a["R"]) for a in accounts.values()), ZERO) != reserved
+            or any(
+                parse_decimal(a["F"]) < 0
+                or parse_decimal(a["R"]) < 0
+                or parse_decimal(a["F"]) + parse_decimal(a["R"]) > parse_decimal(a["quantity"])
+                for a in accounts.values()
+            )
+        ):
+            raise AssertionError("Smart selling account inventory invariant violated")
         self._db.execute(
             "INSERT INTO smart_parents(id,account_id,symbol,active,data) VALUES(?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET active=excluded.active,data=excluded.data",
@@ -187,15 +225,31 @@ class SmartSellingEngine:
     def start_parent(self, settings):
         now = self.clock()
         wall = self.wall_clock()
-        account = str(settings.get("account_id") or "").strip()
+        selected = settings.get("account_ids")
+        if selected is None:
+            selected = [settings.get("account_id")]
+        if not isinstance(selected, (list, tuple)):
+            raise ValueError("account_ids must be a list")
+        account_ids = list(dict.fromkeys(str(value or "").strip() for value in selected))
         symbol = str(settings.get("symbol") or "").strip().upper()
-        if not account or not symbol:
-            raise ValueError("account_id and symbol are required")
+        if not account_ids or not all(account_ids) or not symbol:
+            raise ValueError("account_id or account_ids and symbol are required")
+        account = account_ids[0]
+        # quantity has NO UI component; the runtime supplies all sellable inventory
+        # unless a backend caller explicitly retains a smaller liquidation target.
         quantity = parse_input_decimal(settings.get("quantity"), "quantity", positive=True)
         mode = str(settings.get("mode", SMART_SELLING_DEFAULTS["mode"])).lower()
         mode = {"1": "patient", "2": "normal", "3": "urgent"}.get(mode, mode)
-        if mode not in PARTICIPATION_RATES:
+        if mode not in PARTICIPATION_PERCENTAGES:
             raise ValueError("mode must be patient, normal, or urgent")
+        percentage = parse_participation_percentage(
+            settings.get("participation_percentage", PARTICIPATION_PERCENTAGES[mode])
+        )
+        # Capture the configured rate exactly once. Existing/recovered parents
+        # keep this persisted ratio even when the application settings change.
+        with localcontext() as context:
+            context.prec = 80
+            participation = percentage.scaleb(-2)
         rules = settings.get("instrument_rules", settings)
         quantity_step = parse_input_decimal(
             rules.get("quantity_step"), "quantity_step", positive=True
@@ -210,7 +264,25 @@ class SmartSellingEngine:
         )
         if quantity != round_down_to_step(quantity, quantity_step) or quantity < minimum_quantity:
             raise ValueError("quantity must satisfy the instrument minimum and quantity step")
-        start = parse_timestamp(settings.get("start", settings.get("start_time")), wall)
+        inventory = settings.get("account_quantities")
+        if inventory is None:
+            if len(account_ids) != 1:
+                raise ValueError("account_quantities are required for multiple accounts")
+            inventory = {account: quantity}
+        if not isinstance(inventory, dict) or any(a not in inventory for a in account_ids):
+            raise ValueError("account_quantities must include every selected account")
+        accounts = {}
+        for account_id in account_ids:
+            available = parse_input_decimal(
+                inventory[account_id], "account quantity", nonnegative=True
+            )
+            if available != round_down_to_step(available, quantity_step):
+                raise ValueError("account quantities must satisfy the instrument quantity step")
+            accounts[account_id] = {"quantity": decimal_string(available), "F": "0", "R": "0"}
+        if quantity > sum((parse_decimal(a["quantity"]) for a in accounts.values()), ZERO):
+            raise ValueError("quantity exceeds the selected accounts' available inventory")
+        start_value = settings.get("start", settings.get("start_time"))
+        start = parse_timestamp(None if start_value == "now" else start_value, wall)
         horizon = float(
             parse_input_decimal(
                 settings.get("horizon_seconds", SMART_SELLING_DEFAULTS["horizon_seconds"]),
@@ -218,8 +290,13 @@ class SmartSellingEngine:
                 positive=True,
             )
         )
-        deadline = parse_timestamp(settings.get("deadline"), start + horizon)
-        if deadline <= start or deadline <= wall:
+        no_deadline = settings.get("no_deadline") is True or (
+            "deadline" in settings and settings["deadline"] is None
+        )
+        deadline = (
+            None if no_deadline else parse_timestamp(settings.get("deadline"), start + horizon)
+        )
+        if deadline is not None and (deadline <= start or deadline <= wall):
             raise ValueError("deadline must be later than start and current time")
         minimum_price = settings.get("minimum_price")
         minimum_price = (
@@ -230,7 +307,10 @@ class SmartSellingEngine:
         child_cap = max(
             minimum_quantity,
             round_down_to_step(
-                quantity * Decimal(30) / parse_input_decimal(deadline - start), quantity_step
+                quantity
+                * Decimal(30)
+                / parse_input_decimal(deadline - start if deadline is not None else horizon),
+                quantity_step,
             ),
         )
         quote_max_age = float(
@@ -250,10 +330,14 @@ class SmartSellingEngine:
         parent = {
             "parent_id": str(settings.get("parent_id") or uuid.uuid4().hex),
             "account_id": account,
+            "account_ids": account_ids,
+            "accounts": accounts,
+            "next_account_index": 0,
+            "slice_remaining": "0",
             "symbol": symbol,
             "quantity": decimal_string(quantity),
             "mode": mode,
-            "participation": decimal_string(PARTICIPATION_RATES[mode]),
+            "participation": decimal_string(participation),
             "minimum_price": minimum_price,
             "child_cap": decimal_string(child_cap),
             "base_child_cap": decimal_string(child_cap),
@@ -267,7 +351,7 @@ class SmartSellingEngine:
             "start_wall": start,
             "deadline_wall": deadline,
             "start_mono": now + start - wall,
-            "deadline_mono": now + deadline - wall,
+            "deadline_mono": now + deadline - wall if deadline is not None else None,
             "last_send": None,
             "last_send_wall": None,
             "E": "0",
@@ -277,6 +361,8 @@ class SmartSellingEngine:
             "D": "0",
             "order": None,
             "fallback": False,
+            # imminent_event has NO UI component and defaults OFF; its backend
+            # pricing behavior is retained for a future interface.
             "imminent_event": bool(settings.get("imminent_event", False)),
             "active": True,
             "stop_requested": False,
@@ -310,19 +396,21 @@ class SmartSellingEngine:
                 "SELECT 1 FROM smart_parents WHERE id=?", (parent["parent_id"],)
             ).fetchone():
                 raise ValueError("parent_id already exists")
-            if self._db.execute(
-                "SELECT 1 FROM smart_parents WHERE account_id=? AND symbol=? AND active=1",
-                (parent["account_id"], parent["symbol"]),
-            ).fetchone():
-                raise ValueError(
-                    "an active Smart selling parent already owns this account/instrument"
-                )
-            if self._db.execute(
-                "SELECT 1 FROM smart_parents WHERE account_id=? AND symbol=? "
-                "AND json_extract(data, '$.hold') != '' LIMIT 1",
-                (parent["account_id"], parent["symbol"]),
-            ).fetchone():
-                raise ValueError("unresolved Smart selling ledger conflict requires reconciliation")
+            selected = set(parent["account_ids"])
+            for row in self._db.execute(
+                "SELECT data FROM smart_parents WHERE symbol=?", (parent["symbol"],)
+            ):
+                existing = self._upgrade_parent(json.loads(row[0]))
+                if not selected.intersection(existing["account_ids"]):
+                    continue
+                if existing["active"]:
+                    raise ValueError(
+                        "an active Smart selling parent already owns this account/instrument"
+                    )
+                if existing["hold"]:
+                    raise ValueError(
+                        "unresolved Smart selling ledger conflict requires reconciliation"
+                    )
             self._save(parent)
             self._event(
                 parent,
@@ -532,7 +620,11 @@ class SmartSellingEngine:
         self, parent, event_id, *, now, wall, source, sequence, healthy, interval_start
     ):
         """Exclude stale/pre-start volume and retain unresolved sequence gaps."""
-        if parent["stop_requested"] or now < parent["start_mono"] or now >= parent["deadline_mono"]:
+        if (
+            parent["stop_requested"]
+            or now < parent["start_mono"]
+            or self._deadline_reached(parent, now)
+        ):
             return None
         if interval_start is not None and interval_start < parent["start_wall"]:
             self._event(
@@ -636,7 +728,7 @@ class SmartSellingEngine:
         action = {
             "type": kind,
             "parent_id": parent["parent_id"],
-            "account_id": parent["account_id"],
+            "account_id": order["account_id"],
             "symbol": parent["symbol"],
             "client_order_id": order["client_order_id"],
             "broker_order_id": order["broker_order_id"],
@@ -716,8 +808,22 @@ class SmartSellingEngine:
                     parse_decimal(parent["quantity"]) - parse_decimal(parent["F"]) - other_reserved
                 )
                 depth = max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
+                account = parent["accounts"][order["account_id"]]
+                account_remaining = (
+                    parse_decimal(account["quantity"])
+                    - parse_decimal(account["F"])
+                    - parse_decimal(account["R"])
+                    + old_quantity
+                )
                 quantity = round_down_to_step(
-                    min(old_quantity, parse_decimal(parent["child_cap"]), remaining, depth), step
+                    min(
+                        old_quantity,
+                        parse_decimal(parent["child_cap"]),
+                        remaining,
+                        account_remaining,
+                        depth,
+                    ),
+                    step,
                 )
                 floor = parse_decimal(parent["minimum_price"]) if parent["minimum_price"] else ZERO
                 price = round_up_to_step(
@@ -736,6 +842,7 @@ class SmartSellingEngine:
                     refund = old_quantity - quantity
                     parent["C"] = decimal_string(parse_decimal(parent["C"]) + refund)
                     parent["R"] = decimal_string(parse_decimal(parent["R"]) - refund)
+                    account["R"] = decimal_string(parse_decimal(account["R"]) - refund)
                     order.update(
                         quantity=decimal_string(quantity),
                         limit_price=decimal_string(price),
@@ -763,6 +870,8 @@ class SmartSellingEngine:
         refund = parse_decimal(order["quantity"])
         parent["C"] = decimal_string(parse_decimal(parent["C"]) + refund)
         parent["R"] = decimal_string(parse_decimal(parent["R"]) - refund)
+        account = parent["accounts"][order["account_id"]]
+        account["R"] = decimal_string(parse_decimal(account["R"]) - refund)
         order.update(state="TERMINAL", terminal_at=now, terminal_source="LOCAL_NOT_DISPATCHED")
         self._save_order(parent["parent_id"], order)
         parent["order"] = None
@@ -1006,6 +1115,9 @@ class SmartSellingEngine:
             return
         parent["F"] = decimal_string(parse_decimal(parent["F"]) + delta)
         parent["R"] = decimal_string(parse_decimal(parent["R"]) - delta)
+        account = parent["accounts"][order["account_id"]]
+        account["F"] = decimal_string(parse_decimal(account["F"]) + delta)
+        account["R"] = decimal_string(parse_decimal(account["R"]) - delta)
         order["cumulative_filled"] = decimal_string(cumulative)
         if order["cancel_requested_ever"] or order["cancel_at"] is not None:
             parent["fills_after_cancel"] = decimal_string(
@@ -1034,6 +1146,8 @@ class SmartSellingEngine:
         refund = parse_decimal(order["quantity"]) - cumulative
         parent["R"] = decimal_string(parse_decimal(parent["R"]) - refund)
         parent["C"] = decimal_string(parse_decimal(parent["C"]) + refund)
+        account = parent["accounts"][order["account_id"]]
+        account["R"] = decimal_string(parse_decimal(account["R"]) - refund)
         if status == "REJECTED":
             parent["stop_requested"] = True
             parent["stop_reason"] = "broker rejected child; review required"
@@ -1087,10 +1201,9 @@ class SmartSellingEngine:
         self._save(parent)
         self._event(parent, "order_conflict", {"reason": reason})
         for current in self._active(parent["symbol"]):
-            if (
-                current["parent_id"] != parent["parent_id"]
-                and current["account_id"] == parent["account_id"]
-            ):
+            if current["parent_id"] != parent["parent_id"] and set(
+                current["account_ids"]
+            ).intersection(parent["account_ids"]):
                 current["hold"] = reason
                 if current["order"]:
                     current["order"]["cancel_intent"] = True
@@ -1121,8 +1234,12 @@ class SmartSellingEngine:
             parent["last_diagnostic"] = None
             self._save(parent)
 
+    @staticmethod
+    def _deadline_reached(parent, now):
+        return parent["deadline_mono"] is not None and now >= parent["deadline_mono"]
+
     def _finish_if_needed(self, parent, now):
-        if now >= parent["deadline_mono"]:
+        if self._deadline_reached(parent, now):
             parent["stop_requested"] = True
             parent["stop_reason"] = "deadline reached"
         if parent["order"]:
@@ -1278,7 +1395,19 @@ class SmartSellingEngine:
             parent["reason"] = "minimum five-second send spacing"
             return None
 
-        plan = plan_child_order(parent, self._quotes[parent["symbol"]], now)
+        sizing_parent = parent
+        continuation = parse_decimal(parent["slice_remaining"])
+        if continuation:
+            sizing_parent = dict(
+                parent,
+                child_cap=decimal_string(min(continuation, parse_decimal(parent["child_cap"]))),
+            )
+        plan = plan_child_order(sizing_parent, self._quotes[parent["symbol"]], now)
+        if continuation and not meets_order_minimum(parent, continuation, plan.limit_price):
+            # A split remainder below the broker minimum joins future volume
+            # credit; it must never become an illegal child on another account.
+            parent["slice_remaining"] = "0"
+            plan = plan_child_order(parent, self._quotes[parent["symbol"]], now)
         if plan.depth_limited:
             parent["depth_cap_count"] += 1
         if plan.quantity is None:
@@ -1291,12 +1420,41 @@ class SmartSellingEngine:
         quantity = plan.quantity
         assert quantity is not None
         quote = self._quotes[parent["symbol"]]
+        account_ids = parent["account_ids"]
+        for offset in range(len(account_ids)):
+            index = (parent["next_account_index"] + offset) % len(account_ids)
+            account_id = account_ids[index]
+            account = parent["accounts"][account_id]
+            available = (
+                parse_decimal(account["quantity"])
+                - parse_decimal(account["F"])
+                - parse_decimal(account["R"])
+            )
+            allocated = round_down_to_step(
+                min(quantity, available), parse_decimal(parent["quantity_step"])
+            )
+            if meets_order_minimum(parent, allocated, plan.limit_price):
+                break
+        else:
+            parent["state"] = "HOLD"
+            parent["reason"] = "remaining account inventory below broker minimum"
+            self._save(parent)
+            return
+        # One durable child remains outstanding across the whole session.
+        # If this account cannot cover the slice, carry its remainder to the
+        # next account only after this child's final fill is known.
+        slice_quantity = parse_decimal(parent["slice_remaining"]) or quantity
+        parent["slice_remaining"] = decimal_string(max(ZERO, slice_quantity - allocated))
+        parent["next_account_index"] = (index + 1) % len(account_ids)
+        quantity = allocated
+        account["R"] = decimal_string(parse_decimal(account["R"]) + quantity)
         wall = self.wall_clock()
         parent["C"] = decimal_string(parse_decimal(parent["C"]) - quantity)
         parent["R"] = decimal_string(parse_decimal(parent["R"]) + quantity)
         parent["last_send"] = now
         parent["last_send_wall"] = wall
         parent["order"] = {
+            "account_id": account_id,
             "client_order_id": "smart-" + uuid.uuid4().hex,
             "broker_order_id": None,
             "state": "SUBMIT_PENDING",
@@ -1335,9 +1493,23 @@ class SmartSellingEngine:
         self._action(parent, "submit")
 
     def _public(self, parent):
+        parent = self._upgrade_parent(parent)
         return {
             "parent_id": parent["parent_id"],
             "account_id": parent["account_id"],
+            "account_ids": list(parent["account_ids"]),
+            "accounts": {
+                account_id: {
+                    "quantity": account["quantity"],
+                    "filled": account["F"],
+                    "reserved": account["R"],
+                    "remaining": decimal_string(
+                        parse_decimal(account["quantity"]) - parse_decimal(account["F"])
+                    ),
+                    "done": parse_decimal(account["quantity"]) == parse_decimal(account["F"]),
+                }
+                for account_id, account in parent["accounts"].items()
+            },
             "symbol": parent["symbol"],
             "quantity": parent["quantity"],
             "mode": parent["mode"],
@@ -1408,7 +1580,7 @@ class SmartSellingEngine:
             order = json.loads(row["data"])
             return {
                 "parent_id": parent["parent_id"],
-                "account_id": parent["account_id"],
+                "account_id": order.get("account_id", parent["account_id"]),
                 "symbol": parent["symbol"],
                 "quantity": order["quantity"],
                 "limit_price": order["limit_price"],
@@ -1430,7 +1602,7 @@ class SmartSellingEngine:
             rows = self._db.execute(
                 "SELECT child.id FROM smart_orders child "
                 "JOIN smart_parents parent ON parent.id=child.parent_id "
-                "WHERE parent.account_id=? "
+                "WHERE COALESCE(json_extract(child.data, '$.account_id'), parent.account_id)=? "
                 "AND json_extract(child.data, '$.broker_order_id')=? LIMIT 2",
                 (str(account_id), str(broker_order_id)),
             ).fetchall()

@@ -91,15 +91,16 @@ class CancelOpenOrdersUiTests(unittest.TestCase):
         webserver.COMMANDS_PRODUCER = self._saved["COMMANDS_PRODUCER"]
         webserver.SESSIONS = self._saved["SESSIONS"]
 
-    def test_control_panel_renders_cancel_servers_as_multi_select_choices(self):
+    def test_control_panel_renders_cancel_accounts_as_multi_select_choices(self):
         html = render_control_panel_page("en", metas(), ["AAPL", "MSFT"])
 
-        self.assertIn("Servers (multi-select)", html)
+        self.assertIn("Accounts (multi-select)", html)
+        self.assertIn("for='cancel-acct-all'>All accounts</label>", html)
         self.assertIn("type='checkbox' id='cancel-acct-all'", html)
         self.assertIn("type='checkbox' id='cancel-acct-1'", html)
         self.assertNotIn("type='radio' id='cancel-acct-1'", html)
-        self.assertIn("Linode-B", html)
-        self.assertIn("Linode-A", html)
+        self.assertIn("for='cancel-acct-1' title='B | Tiger | Linode-B | 10.0.0.1'>#1 B</label>", html)
+        self.assertIn("for='cancel-acct-2' title='A | Tiger | Linode-A | 10.0.0.2'>#2 A</label>", html)
 
     def test_submit_publishes_symbol_scoped_cancel_commands_for_multiple_servers(self):
         client = TestClient(webserver.app)

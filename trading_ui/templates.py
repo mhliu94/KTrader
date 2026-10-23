@@ -46,9 +46,8 @@ def _is_snapshot_stale(ts: str | None, now: datetime | None = None) -> bool:
     return reference_time.astimezone(timezone.utc) - updated_at.astimezone(timezone.utc) > ACCOUNT_STALE_AFTER
 
 
-def _account_server_label(meta: AccountMeta) -> str:
-    server_name = meta.machine_alias or meta.ip_address or meta.id
-    return f"#{meta.num_id} {server_name}"
+def _account_label(meta: AccountMeta) -> str:
+    return f"#{meta.num_id} {meta.id}"
 
 
 def _account_server_title(meta: AccountMeta) -> str:
@@ -269,7 +268,8 @@ def render_layout(
     .fast-account-list {{ display:flex; flex-direction:column; gap:8px; margin-top:8px; }}
     .fast-account-row {{ display:grid; grid-template-columns:auto minmax(0, 1fr); gap:8px; align-items:center; }}
     .fast-account-label {{ overflow-wrap:anywhere; font-size:13px; font-weight:600; color:#333; }}
-    .fast-account-label [data-fast-account-balance] {{ display:inline-block; }}
+    .fast-account-label [data-fast-account-balance],
+    .fast-account-label [data-smart-account-balance] {{ display:inline-block; }}
     @media (max-width: 640px) {{
       body {{ margin:16px; }}
       .topbar {{ align-items:flex-start; gap:12px; }}
@@ -1502,33 +1502,53 @@ def render_trading_status_page(
 """
 
 
-def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) -> tuple[str, str, str]:
+def _smart_selling_controls(
+    lang: str, account_metas: Dict[str, AccountMeta], account_balance_helpers: str
+) -> tuple[str, str, str]:
     account_options = "\n".join(
-        f'<option value="{html_escape(account.id)}">#{account.num_id} '
-        f'{html_escape(account.id)} ({html_escape(account.broker)})</option>'
+        f'<label class="fast-account-row">'
+        f'<input type="checkbox" data-smart-account-id="{html_escape(account.id)}">'
+        f'<span class="fast-account-label">#{account.num_id} '
+        f'{html_escape(account.id)} ({html_escape(account.broker)}) '
+        f'<b data-smart-account-balance="{html_escape(account.id)}">—</b></span></label>'
         for account in sorted(account_metas.values(), key=lambda account: account.num_id)
     )
     settings = f"""
-      <fieldset id="smart-selling-settings" hidden disabled style="border:0;padding:0;margin:0;min-width:0;">
+    <div class="modal-backdrop" id="smart-selling-modal" hidden>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="smart-selling-title">
+        <div class="modal-header">
+          <div>
+            <div class="acct" id="smart-selling-title">{html_escape(t(lang, 'smart_config_title'))}</div>
+            <div class="help">{html_escape(t(lang, 'symbol'))}: <b id="smart-selling-symbol">—</b></div>
+          </div>
+          <button class="modal-close" id="smart-selling-close" type="button" aria-label="{html_escape(t(lang, 'fast_config_cancel'))}">&times;</button>
+        </div>
+      <fieldset id="smart-selling-settings" disabled style="border:0;padding:0;margin:0;min-width:0;">
         <p class="help">{html_escape(t(lang, 'smart_description'))}</p>
-        <div class="row">
-          <div>
-            <label for="smart-account">{html_escape(t(lang, 'account'))}</label>
-            <select id="smart-account" required>{account_options}</select>
-          </div>
-          <div>
-            <label for="smart-quantity">{html_escape(t(lang, 'smart_quantity'))}</label>
-            <input id="smart-quantity" type="number" min="0" step="any" inputmode="decimal" required>
-          </div>
+        <div>
+          <label id="smart-accounts-label">{html_escape(t(lang, 'fast_accounts'))}</label>
+          <div class="fast-account-list" id="smart-selling-accounts" role="group" aria-labelledby="smart-accounts-label">{account_options}</div>
         </div>
         <div class="row" style="margin-top:12px;">
           <div>
-            <label for="smart-start">{html_escape(t(lang, 'smart_start'))}</label>
-            <input id="smart-start" type="datetime-local" step="1" required aria-describedby="smart-local-time">
+            <label id="smart-start-label">{html_escape(t(lang, 'smart_start'))}</label>
+            <div class="choice-grid" role="radiogroup" aria-labelledby="smart-start-label">
+              <input class="choice-input" id="smart-start-now" type="radio" name="smart_start_mode" value="now" checked>
+              <label class="choice-btn" for="smart-start-now">{html_escape(t(lang, 'smart_start_now'))}</label>
+              <input class="choice-input" id="smart-start-scheduled" type="radio" name="smart_start_mode" value="scheduled">
+              <label class="choice-btn" for="smart-start-scheduled">{html_escape(t(lang, 'smart_start_scheduled'))}</label>
+            </div>
+            <input id="smart-start" type="datetime-local" step="1" disabled hidden aria-label="{html_escape(t(lang, 'smart_start'))}" aria-describedby="smart-local-time">
           </div>
           <div>
-            <label for="smart-deadline">{html_escape(t(lang, 'smart_deadline'))}</label>
-            <input id="smart-deadline" type="datetime-local" step="1" required aria-describedby="smart-local-time">
+            <label id="smart-deadline-label">{html_escape(t(lang, 'smart_deadline'))}</label>
+            <div class="choice-grid" role="radiogroup" aria-labelledby="smart-deadline-label">
+              <input class="choice-input" id="smart-no-deadline" type="radio" name="smart_deadline_mode" value="none">
+              <label class="choice-btn" for="smart-no-deadline">{html_escape(t(lang, 'smart_no_deadline'))}</label>
+              <input class="choice-input" id="smart-set-deadline" type="radio" name="smart_deadline_mode" value="scheduled" checked>
+              <label class="choice-btn" for="smart-set-deadline">{html_escape(t(lang, 'smart_set_deadline'))}</label>
+            </div>
+            <input id="smart-deadline" type="datetime-local" step="1" aria-label="{html_escape(t(lang, 'smart_deadline'))}" aria-describedby="smart-local-time">
           </div>
         </div>
         <p class="help" id="smart-local-time">{html_escape(t(lang, 'smart_local_time'))}</p>
@@ -1546,18 +1566,18 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
             <input id="smart-minimum-price" type="number" min="0" step="any" inputmode="decimal">
           </div>
         </div>
-        <label class="fast-account-row" style="margin-top:12px;">
-          <input id="smart-imminent-event" type="checkbox" aria-describedby="smart-event-help">
-          <span>{html_escape(t(lang, 'smart_imminent_event'))}</span>
-        </label>
-        <p class="help" id="smart-event-help">{html_escape(t(lang, 'smart_event_help'))}</p>
-        <p class="help">{html_escape(t(lang, 'smart_limits_help'))}</p>
         <p class="help">{html_escape(t(lang, 'smart_completion_help'))}</p>
         <div class="warn" id="smart-selling-error" role="alert"></div>
+        <div class="modal-actions">
+          <button class="btn" id="smart-selling-cancel" type="button" style="background:#64748b;">{html_escape(t(lang, 'fast_config_cancel'))}</button>
+          <button class="btn btn-green" id="smart-selling-confirm" type="button">{html_escape(t(lang, 'smart_submit'))}</button>
+        </div>
       </fieldset>
-      <div class="help" id="smart-selling-message" role="status"></div>
+      </div>
+    </div>
     """
     status = f"""
+      <div class="help" id="smart-selling-message" role="status"></div>
       <div class="divider"></div>
       <div class="section-heading">{html_escape(t(lang, 'smart_status_title'))}</div>
       <div class="help" id="smart-status-message" role="status">{html_escape(t(lang, 'smart_status_loading'))}</div>
@@ -1567,7 +1587,7 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
         <table class="pos" id="smart-status-table" hidden>
           <thead><tr>
             <th>{html_escape(t(lang, 'account'))} / {html_escape(t(lang, 'symbol'))}</th>
-            <th>Q0</th><th>{html_escape(t(lang, 'smart_filled'))}</th>
+            <th>{html_escape(t(lang, 'smart_inventory'))}</th><th>{html_escape(t(lang, 'smart_filled'))}</th>
             <th>{html_escape(t(lang, 'smart_remaining'))}</th><th>{html_escape(t(lang, 'smart_reserved'))}</th>
             <th>{html_escape(t(lang, 'smart_state'))}</th><th>{html_escape(t(lang, 'smart_reason'))}</th>
             <th>{html_escape(t(lang, 'smart_stop'))}</th>
@@ -1577,9 +1597,9 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
       </div>
     """
     label_keys = (
-        "smart_submit", "algo_submit", "smart_started", "smart_stopping", "smart_status_empty",
+        "smart_submit", "algo_submit", "smart_started", "smart_stopping", "smart_status_empty", "owned_shares",
         "smart_status_failed", "smart_stop", "smart_no_accounts", "smart_invalid_account",
-        "smart_invalid_quantity", "smart_invalid_times", "smart_invalid_price", "smart_request_failed",
+        "smart_invalid_times", "smart_invalid_price", "smart_request_failed",
         "smart_auth_failed", "invalid_symbol", "smart_state_idle", "smart_state_scheduled",
         "smart_state_submit_pending", "smart_state_live", "smart_state_cancel_pending", "smart_state_reconcile",
         "smart_state_completed", "smart_state_stopped", "smart_state_expired", "smart_state_halted",
@@ -1592,10 +1612,13 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
       (function() {
         const labels = __SMART_LABELS__;
         const form = document.getElementById("algo-form");
+        const modal = document.getElementById("smart-selling-modal");
         const settings = document.getElementById("smart-selling-settings");
         const submit = document.getElementById("algo-submit");
-        const account = document.getElementById("smart-account");
-        const quantity = document.getElementById("smart-quantity");
+        const confirm = document.getElementById("smart-selling-confirm");
+        const symbolInput = document.getElementById("algo_symbol");
+        const startNow = document.getElementById("smart-start-now");
+        const noDeadline = document.getElementById("smart-no-deadline");
         const start = document.getElementById("smart-start");
         const deadline = document.getElementById("smart-deadline");
         const minimumPrice = document.getElementById("smart-minimum-price");
@@ -1609,7 +1632,33 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
         const stopRequests = new Set();
         let submitting = false;
         let refreshing = false;
-        if (!form || !settings) return;
+        let lastFocused = null;
+        let accountsCache = null;
+        if (!form || !settings || !modal) return;
+
+        __ACCOUNT_BALANCE_HELPERS__
+
+        function renderAccountBalances() {
+          const symbol = symbolInput.value.trim().toUpperCase();
+          document.getElementById("smart-selling-symbol").textContent = symbol || "—";
+          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
+          modal.querySelectorAll("[data-smart-account-balance]").forEach(function(element) {
+            const account = accounts.find(row => row.account_id === element.dataset.smartAccountBalance);
+            element.textContent = "— " + labels.owned_shares + " (" + symbol + "): "
+              + formatAccountBalance(account, true, symbol);
+          });
+        }
+
+        async function refreshAccountBalances() {
+          if (modal.hidden) return;
+          try {
+            const response = await fetch("/api/accounts", {cache: "no-store", credentials: "same-origin"});
+            if (response.ok) accountsCache = await response.json();
+          } catch (failure) {
+            // Retain the last snapshot during temporary account-data failures.
+          }
+          renderAccountBalances();
+        }
 
         function isSmartMode() {
           const selected = form.querySelector("input[name='trading_mode']:checked");
@@ -1624,16 +1673,46 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
 
         function updateMode() {
           const smart = isSmartMode();
-          settings.hidden = !smart;
-          settings.disabled = !smart;
-          submit.textContent = smart ? labels.smart_submit : labels.algo_submit;
-          submit.disabled = submitting || (smart && !account.options.length);
-          if (smart && !start.value) {
+          if (!smart && !modal.hidden) closeModal();
+          const hasAccounts = !!modal.querySelector("[data-smart-account-id]");
+          submit.textContent = labels.algo_submit;
+          submit.disabled = submitting || (smart && !hasAccounts);
+          confirm.disabled = submitting || !hasAccounts;
+          if (smart && !hasAccounts) message.textContent = labels.smart_no_accounts;
+        }
+
+        function updateTimes() {
+          start.disabled = startNow.checked;
+          start.hidden = startNow.checked;
+          deadline.disabled = noDeadline.checked;
+          deadline.hidden = noDeadline.checked;
+        }
+
+        function openModal() {
+          lastFocused = document.activeElement;
+          if (!start.value) {
             const now = new Date();
             start.value = localDateTime(now);
             deadline.value = localDateTime(new Date(now.getTime() + 2 * 60 * 60 * 1000));
           }
-          if (smart && !account.options.length) error.textContent = labels.smart_no_accounts;
+          error.textContent = "";
+          message.textContent = "";
+          settings.disabled = false;
+          modal.hidden = false;
+          updateTimes();
+          renderAccountBalances();
+          refreshAccountBalances();
+          document.body.classList.add("modal-open");
+          const firstAccount = modal.querySelector("[data-smart-account-id]");
+          if (firstAccount) firstAccount.focus();
+        }
+
+        function closeModal() {
+          if (submitting) return;
+          modal.hidden = true;
+          settings.disabled = true;
+          document.body.classList.remove("modal-open");
+          if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
         }
 
         async function request(url, options) {
@@ -1668,7 +1747,9 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
               + (marketState ? " / " + marketState : "");
             const reason = [parent.reason, parent.market_state !== "TRADING" ? parent.market_reason : ""]
               .filter(Boolean).join(" · ") || "—";
-            const values = [String(parent.account_id || "") + " / " + String(parent.symbol || ""),
+            const accountLabel = Array.isArray(parent.account_ids)
+              ? parent.account_ids.join(", ") : String(parent.account_id || "");
+            const values = [accountLabel + " / " + String(parent.symbol || ""),
               parent.quantity, parent.filled, parent.remaining, parent.reserved, state, reason];
             for (const value of values) {
               const cell = document.createElement("td");
@@ -1680,7 +1761,7 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
             button.type = "button";
             button.className = "btn btn-red";
             button.textContent = labels.smart_stop;
-            button.setAttribute("aria-label", labels.smart_stop + " " + parent.account_id + " " + parent.symbol);
+            button.setAttribute("aria-label", labels.smart_stop + " " + accountLabel + " " + parent.symbol);
             button.disabled = stopRequests.has(parent.parent_id)
               || ["STOPPING", "STOPPED", "COMPLETED", "DEADLINE", "EXPIRED"].includes(parent.state);
             button.addEventListener("click", async function() {
@@ -1722,54 +1803,85 @@ def _smart_selling_controls(lang: str, account_metas: Dict[str, AccountMeta]) ->
         form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
           input.addEventListener("change", updateMode);
         });
-        form.addEventListener("submit", async function(event) {
+        form.addEventListener("submit", function(event) {
           if (!isSmartMode()) return;
           event.preventDefault();
           if (submitting) return;
+          openModal();
+        });
+        confirm.addEventListener("click", async function() {
+          if (submitting || modal.hidden || !isSmartMode()) return;
           error.textContent = "";
           message.textContent = "";
-          const symbol = document.getElementById("algo_symbol").value.trim().toUpperCase();
-          const amount = Number(quantity.value);
-          const startDate = new Date(start.value);
-          const deadlineDate = new Date(deadline.value);
+          const symbol = symbolInput.value.trim().toUpperCase();
+          const accountIds = Array.from(modal.querySelectorAll("[data-smart-account-id]:checked"))
+            .map(input => input.dataset.smartAccountId);
+          const startDate = startNow.checked ? new Date() : new Date(start.value);
+          const deadlineDate = noDeadline.checked ? null : new Date(deadline.value);
           const floor = minimumPrice.value.trim() ? Number(minimumPrice.value) : null;
-          if (!account.value) { error.textContent = labels.smart_invalid_account; return; }
+          if (!accountIds.length) { error.textContent = labels.smart_invalid_account; return; }
           if (!symbol) { error.textContent = labels.invalid_symbol; return; }
-          if (!Number.isFinite(amount) || amount <= 0) { error.textContent = labels.smart_invalid_quantity; return; }
-          if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(deadlineDate.getTime())
-              || deadlineDate <= startDate || deadlineDate.getTime() <= Date.now()) {
+          if (!Number.isFinite(startDate.getTime()) || (deadlineDate !== null
+              && (!Number.isFinite(deadlineDate.getTime()) || deadlineDate <= startDate
+                || deadlineDate.getTime() <= Date.now()))) {
             error.textContent = labels.smart_invalid_times; return;
           }
           if (floor !== null && (!Number.isFinite(floor) || floor <= 0)) {
             error.textContent = labels.smart_invalid_price; return;
           }
+          // quantity and imminent_event have no UI components. Omit them so the
+          // backend defaults to all sellable inventory and imminent_event=false.
           const payload = {
-            account_id: account.value, symbol: symbol, quantity: amount,
+            account_ids: accountIds, symbol: symbol,
             mode: document.getElementById("smart-mode").value,
-            start_time: startDate.toISOString(), deadline: deadlineDate.toISOString(),
-            minimum_price: floor, imminent_event: document.getElementById("smart-imminent-event").checked
+            start_time: startNow.checked ? null : startDate.toISOString(),
+            deadline: deadlineDate === null ? null : deadlineDate.toISOString(),
+            minimum_price: floor
           };
           submitting = true;
+          settings.disabled = true;
+          document.getElementById("smart-selling-close").disabled = true;
           updateMode();
+          let created = false;
           try {
             await request("/api/smart-selling", {
               method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
             });
+            created = true;
             message.textContent = labels.smart_started;
           } catch (failure) {
             error.textContent = labels.smart_request_failed + " " + failure.message;
           } finally {
             submitting = false;
+            settings.disabled = false;
+            document.getElementById("smart-selling-close").disabled = false;
+            if (created) closeModal();
             updateMode();
             await refreshParents();
           }
         });
+        document.getElementById("smart-selling-close").addEventListener("click", closeModal);
+        document.getElementById("smart-selling-cancel").addEventListener("click", closeModal);
+        modal.addEventListener("click", function(event) {
+          if (event.target === modal) closeModal();
+        });
+        document.addEventListener("keydown", function(event) {
+          if (event.key === "Escape" && !modal.hidden) closeModal();
+        });
+        modal.querySelectorAll("input[name='smart_start_mode']").forEach(function(input) {
+          input.addEventListener("change", updateTimes);
+        });
+        modal.querySelectorAll("input[name='smart_deadline_mode']").forEach(function(input) {
+          input.addEventListener("change", updateTimes);
+        });
+        symbolInput.addEventListener("change", renderAccountBalances);
         updateMode();
         refreshParents();
         setInterval(refreshParents, 5000);
+        setInterval(refreshAccountBalances, 5000);
       })();
     </script>
-    """.replace("__SMART_LABELS__", labels)
+    """.replace("__SMART_LABELS__", labels).replace("__ACCOUNT_BALANCE_HELPERS__", account_balance_helpers)
     return settings, status, script
 
 
@@ -1780,8 +1892,7 @@ def render_control_panel_page(
     error: str = "",
     ok: str = "",
 ) -> str:
-    smart_settings, smart_status, smart_script = _smart_selling_controls(lang, account_metas)
-    # Reuse balance/holding rules for order summaries and the E/F configuration.
+    # Reuse balance/holding rules for order summaries and algorithm configuration.
     account_balance_helpers = """
         function usdCash(account) {
           const balances = account.cash_by_currency || {};
@@ -1790,11 +1901,17 @@ def render_control_panel_page(
           return usdKey === undefined ? account.cash : balances[usdKey];
         }
 
+        function holdingSymbol(value) {
+          const symbol = String(value || "").trim().toUpperCase();
+          return symbol.startsWith("US.") ? symbol.slice(3) : symbol;
+        }
+
         function ownedShares(account, symbol) {
+          symbol = holdingSymbol(symbol);
           if (!symbol || !Array.isArray(account.positions)) return null;
           let total = 0;
           for (const position of account.positions) {
-            if (String(position.symbol || "").trim().toUpperCase() !== symbol) continue;
+            if (holdingSymbol(position.symbol) !== symbol) continue;
             const qty = position.qty;
             if (qty === null || qty === undefined || qty === "" || !Number.isFinite(Number(qty))) return null;
             total += Number(qty);
@@ -1810,6 +1927,7 @@ def render_control_panel_page(
             : "$" + Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         }
     """
+    smart_settings, smart_status, smart_script = _smart_selling_controls(lang, account_metas, account_balance_helpers)
     order_summary_helpers = f"""
         {account_balance_helpers}
 
@@ -1863,7 +1981,7 @@ def render_control_panel_page(
         + "\n".join(
             (
                 f"<input class='choice-input cancel-account-choice' type='checkbox' id='cancel-acct-{idx}' name='account_ids' value='{html_escape(aid)}' data-cancel-account>"
-                f"<label class='choice-btn' for='cancel-acct-{idx}' title='{html_escape(_account_server_title(account_metas[aid]))}'>{html_escape(_account_server_label(account_metas[aid]))}</label>"
+                f"<label class='choice-btn' for='cancel-acct-{idx}' title='{html_escape(_account_server_title(account_metas[aid]))}'>{html_escape(_account_label(account_metas[aid]))}</label>"
             )
             for idx, aid in enumerate(sorted_account_ids, start=1)
         )
@@ -2390,13 +2508,13 @@ def render_control_panel_page(
         </div>
       </div>
 
-      {smart_settings}
       <button class="btn btn-green" id="algo-submit" type="submit">{html_escape(t(lang,'algo_submit'))}</button>
     </form>
       {smart_status}
       </section>
 
       {fast_trading_modal}
+      {smart_settings}
 
       <section class="card control-panel-section">
     <div class="hdr">

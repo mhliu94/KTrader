@@ -7,6 +7,11 @@
     "quote_max_age": 10,
     "trade_max_age": 15,
     "account_max_age": 60,
+    "participation_percentages": {
+      "patient": "3",
+      "normal": "6",
+      "urgent": "10"
+    },
     "instrument_defaults": {
       "tick_size": "0.01",
       "quantity_step": "1",

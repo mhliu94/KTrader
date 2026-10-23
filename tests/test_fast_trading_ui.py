@@ -72,6 +72,9 @@ class FastTradingApiPayloadTests(unittest.TestCase):
                 inner_self.commands = commands
                 inner_self.stop_calls = stop_calls
 
+            def has_active_session(inner_self) -> bool:
+                return False
+
             def start_strategy(inner_self, command: dict) -> str:
                 inner_self.commands.append(command)
                 return "E:AAPL"

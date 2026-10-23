@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import fcntl
 import logging
 from pathlib import Path
@@ -12,6 +12,7 @@ import time
 from .smart_selling import SmartSellingEngine
 from .smart_selling_feedback import SmartSellingFeedback
 from .smart_selling_market import SmartSellingMarketAdapter
+from .smart_selling_policy import SMART_SELLING_DEFAULTS, round_down_to_step
 from ..smart_selling_config import canonical_symbol, normalize_smart_selling_config
 from .smart_selling_commands import build_smart_selling_command
 
@@ -27,6 +28,7 @@ class SmartSellingRuntime:
         snapshots_provider,
         publish_command,
         fast_conflict=None,
+        fast_active=None,
         engine=None,
         clock=time.monotonic,
         wall_clock=time.time,
@@ -36,6 +38,7 @@ class SmartSellingRuntime:
         self.snapshots_provider = snapshots_provider
         self.publish_command = publish_command
         self.fast_conflict = fast_conflict or (lambda account, symbol: False)
+        self.fast_active = fast_active or (lambda: False)
         self.clock, self.wall_clock = clock, wall_clock
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -103,51 +106,86 @@ class SmartSellingRuntime:
         for position in snapshot.positions:
             if canonical_symbol(position.symbol) != symbol:
                 continue
-            amount = position.available_qty if position.available_qty is not None else position.qty
-            value = Decimal(str(amount))
-            if not value.is_finite():
+            try:
+                held = Decimal(str(position.qty))
+                available = Decimal(str(
+                    position.available_qty if position.available_qty is not None else position.qty
+                ))
+            except InvalidOperation as exc:
+                raise ValueError("Invalid account position quantity") from exc
+            if not held.is_finite() or not available.is_finite():
                 raise ValueError("Invalid account position quantity")
-            quantity += value
+            # Available inventory must never permit selling more than is held.
+            quantity += min(held, available)
         return max(Decimal(0), quantity)
 
     def start_parent(self, settings):
         if not isinstance(settings, dict):
             raise ValueError("Smart selling settings must be an object")
         settings = dict(settings)
-        account, symbol = str(settings.get("account_id", "")).strip(), canonical_symbol(
-            settings.get("symbol")
-        )
-        if account not in self.account_metas_provider():
+        accounts = settings.get("account_ids")
+        if accounts is None:
+            accounts = [settings.get("account_id", "")]
+        if not isinstance(accounts, list) or not accounts:
+            raise ValueError("Select at least one account")
+        if any(not isinstance(account, str) or not account.strip() for account in accounts):
+            raise ValueError("Invalid account selection")
+        accounts = [account.strip() for account in accounts]
+        if len(set(accounts)) != len(accounts):
+            raise ValueError("Select each account only once")
+        metas = self.account_metas_provider()
+        if any(account not in metas for account in accounts):
             raise ValueError("Unknown account")
+        symbol = canonical_symbol(settings.get("symbol"))
         if not symbol:
             raise ValueError("A symbol is required")
+        # imminent_event has NO UI component; omitted values remain OFF (False).
+        # Keep explicit backend requests supported for future interfaces.
         if type(settings.get("imminent_event", False)) is not bool:
             raise ValueError("imminent_event must be boolean")
-        quantity = Decimal(str(settings.get("quantity")))
-        if not quantity.is_finite() or quantity <= 0:
-            raise ValueError("Quantity must be positive and finite")
         with self._lock:
+            if self.has_active_session():
+                raise ValueError("Smart selling already owns an active session; stop it before starting another")
+            if self.fast_active() or any(self.fast_conflict(account, symbol) for account in accounts):
+                raise ValueError("Stop the existing algorithm before starting another session")
             if self.feeds["orders"] != "live":
                 raise ValueError(
                     "Wait for the order-status feed to finish reconciliation before starting Smart selling"
                 )
-            if self.fast_conflict(account, symbol):
-                raise ValueError("Stop the existing algorithm for this account and symbol first")
-            if self.feedback.has_open_orders(account, symbol):
-                raise ValueError(
-                    "Existing orders for this account and instrument must reach terminal status first"
-                )
-            if quantity > self._available_position(account, symbol):
-                raise ValueError("Quantity exceeds the account's available position")
             rules = {
                 **self.config["instrument_defaults"],
                 **self.config["instruments"].get(symbol, {}),
             }
-            # Runtime rules cannot be overridden by an HTTP payload.
+            quantity_step = Decimal(str(rules["quantity_step"]))
+            quantities = {}
+            for account in accounts:
+                if self.feedback.has_open_orders(account, symbol):
+                    raise ValueError(
+                        "Existing orders for this account and instrument must reach terminal status first"
+                    )
+                # Preserve legal explicit targets when holdings include fractional
+                # dust, and never combine unsellable fractions across accounts.
+                quantities[account] = round_down_to_step(
+                    self._available_position(account, symbol), quantity_step
+                )
+            available = sum(quantities.values(), Decimal(0))
+            # quantity has NO UI component: the UI omits it to sell all sellable
+            # inventory. Explicit backend targets remain supported.
+            try:
+                quantity = (
+                    available if settings.get("quantity") is None
+                    else Decimal(str(settings["quantity"]))
+                )
+            except InvalidOperation as exc:
+                raise ValueError("Quantity must be positive and finite") from exc
+            if not quantity.is_finite() or quantity <= 0:
+                raise ValueError("Quantity must be positive and finite; no available position to sell")
+            if quantity > available:
+                raise ValueError("Quantity exceeds the selected accounts' available position")
+            # Runtime rules and inventory limits cannot be overridden by an HTTP payload.
             permitted = {
                 key: settings[key]
                 for key in (
-                    "quantity",
                     "mode",
                     "start_time",
                     "deadline",
@@ -156,8 +194,15 @@ class SmartSellingRuntime:
                 )
                 if key in settings
             }
+            mode = str(settings.get("mode", SMART_SELLING_DEFAULTS["mode"])).lower()
+            mode = {"1": "patient", "2": "normal", "3": "urgent"}.get(mode, mode)
             permitted.update(
-                account_id=account,
+                # Trusted application settings only; HTTP rate overrides are ignored.
+                participation_percentage=self.config["participation_percentages"].get(mode),
+                account_id=accounts[0],
+                account_ids=accounts,
+                account_quantities={account: str(amount) for account, amount in quantities.items()},
+                quantity=str(quantity),
                 symbol=symbol,
                 instrument_rules=rules,
                 quote_max_age=self.config["quote_max_age"],
@@ -165,10 +210,24 @@ class SmartSellingRuntime:
             )
             return self.engine.start_parent(permitted)
 
+    @staticmethod
+    def _parent_accounts(parent):
+        return parent.get("account_ids") or [parent["account_id"]]
+
+    def has_active_session(self):
+        # Stopping and reconciling sessions retain ownership until all children resolve.
+        return bool(self.engine.list_parents(active_only=True, limit=1))
+
+    def owns_account(self, account_id):
+        return any(
+            account_id in self._parent_accounts(parent)
+            for parent in self.engine.list_parents(active_only=True, limit=1000)
+        )
+
     def owns(self, account_id, symbol):
         return any(
-            p["account_id"] == account_id and p["symbol"] == canonical_symbol(symbol)
-            for p in self.engine.list_parents(active_only=True, limit=1000)
+            account_id in self._parent_accounts(parent) and parent["symbol"] == canonical_symbol(symbol)
+            for parent in self.engine.list_parents(active_only=True, limit=1000)
         )
 
     def list_parents(self):
@@ -187,10 +246,11 @@ class SmartSellingRuntime:
             return result
 
     def stop_all(self):
-        parents = self.engine.list_parents(active_only=True, limit=1000)
-        for parent in parents:
-            self.stop_parent(parent["parent_id"])
-        return len(parents)
+        with self._lock:
+            parents = self.engine.list_parents(active_only=True, limit=1000)
+            for parent in parents:
+                self.stop_parent(parent["parent_id"])
+            return len(parents)
 
     def on_price_book(self, payload, **context):
         with self._lock:
@@ -234,7 +294,11 @@ class SmartSellingRuntime:
                         "waiting for live order and volume feeds",
                     )
                 try:
-                    self._available_position(parent["account_id"], parent["symbol"])
+                    for account in self._parent_accounts(parent):
+                        balance = parent.get("accounts", {}).get(account, {})
+                        if balance and Decimal(balance["remaining"]) <= 0:
+                            continue
+                        self._available_position(account, parent["symbol"])
                 except (ValueError, TypeError):
                     self.engine.set_feed_health(
                         parent["symbol"],
@@ -243,6 +307,8 @@ class SmartSellingRuntime:
                     )
             if self.clock() - self._last_forecast >= 30:
                 for parent in parents:
+                    if parent.get("deadline") is None:
+                        continue
                     rate = self.market.volume_rate(parent["symbol"])
                     if rate is not None:
                         deadline = datetime.fromisoformat(

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from concurrent.futures import wait
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -28,6 +29,7 @@ class SmartSellingRuntimeTests(unittest.TestCase):
             ts=self.iso(),
             trading_enabled=True,
         )
+        self.snapshots = {"A": self.snap}
         self.publish = Mock()
         self.engine = SmartSellingEngine(
             Path(self.temp.name) / "state.sqlite3",
@@ -37,7 +39,7 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         self.runtime = SmartSellingRuntime(
             {},
             account_metas_provider=lambda: self.metas,
-            snapshots_provider=lambda: {"A": self.snap},
+            snapshots_provider=lambda: self.snapshots,
             publish_command=self.publish,
             engine=self.engine,
             clock=lambda: self.now,
@@ -98,6 +100,249 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         )
         payload.update(changes)
         return payload
+
+    def add_account(self, account="B", quantity=400):
+        self.metas[account] = AccountMeta(account, len(self.metas) + 1, "AnyBroker", "WEB")
+        self.snapshots[account] = AccountSnapshot(
+            account,
+            0,
+            positions=[Position("US.XYZ", quantity, available_qty=quantity)],
+            ts=self.iso(),
+            trading_enabled=True,
+        )
+        return self.snapshots[account]
+
+    def test_multi_account_defaults_to_all_inventory_and_retains_quantity_override(self):
+        self.add_account()
+        parent = self.runtime.start_parent(
+            dict(account_ids=["A", "B"], symbol="XYZ", start_time=None, deadline=None)
+        )
+        self.assertEqual(parent["account_ids"], ["A", "B"])
+        self.assertEqual(parent["quantity"], "1400")
+        self.assertIsNone(parent["deadline"])
+        self.assertTrue(self.runtime.has_active_session())
+        self.assertTrue(self.runtime.owns_account("A"))
+        self.assertTrue(self.runtime.owns_account("B"))
+        self.assertTrue(self.runtime.owns("B", "US.XYZ"))
+        self.assertFalse(self.runtime.owns_account("C"))
+        self.runtime.stop_parent(parent["parent_id"])
+        self.assertFalse(self.runtime.has_active_session())
+        parent = self.runtime.start_parent(
+            dict(account_ids=["A", "B"], symbol="XYZ", quantity=125, deadline=None)
+        )
+        self.assertEqual(parent["quantity"], "125")
+
+    def test_all_inventory_floors_each_account_to_its_sellable_quantity_step(self):
+        self.snap.positions[0].qty = self.snap.positions[0].available_qty = 1000.5
+        self.add_account(quantity=400.75)
+        parent = self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
+        self.assertEqual(parent["quantity"], "1400")
+        self.assertEqual(parent["accounts"]["A"]["quantity"], "1000")
+        self.assertEqual(parent["accounts"]["B"]["quantity"], "400")
+        self.runtime.stop_all()
+        # Individual whole-share limits matter even when fractional dust sums to one share.
+        with self.assertRaisesRegex(ValueError, "available position"):
+            self.runtime.start_parent(
+                dict(account_ids=["A", "B"], symbol="XYZ", quantity=1401)
+            )
+
+    def test_legacy_legal_explicit_quantity_accepts_fractional_inventory(self):
+        self.snap.positions[0].qty = self.snap.positions[0].available_qty = 1000.5
+        parent = self.start(quantity=100)
+        self.assertEqual(parent["quantity"], "100")
+        self.assertEqual(parent["accounts"]["A"]["quantity"], "1000")
+        self.runtime.stop_all()
+        with self.assertRaisesRegex(ValueError, "quantity step"):
+            self.start(quantity=100.5)
+
+    def test_inventory_rounding_honors_configured_step_and_actual_holdings(self):
+        self.runtime.config["instruments"]["XYZ"] = {"quantity_step": "0.1", "min_quantity": "0.1"}
+        self.snap.positions[0].qty = 10.25
+        self.snap.positions[0].available_qty = 50
+        parent = self.runtime.start_parent(dict(account_ids=["A"], symbol="XYZ"))
+        self.assertEqual(parent["quantity"], "10.2")
+        self.assertEqual(parent["accounts"]["A"]["quantity"], "10.2")
+
+    def test_all_selected_accounts_require_fresh_enabled_inventory_and_no_open_orders(self):
+        second = self.add_account()
+        settings = dict(account_ids=["A", "B"], symbol="XYZ", deadline=None)
+        second.ts = self.iso(-100)
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.runtime.start_parent(settings)
+        second.ts = self.iso()
+        second.trading_enabled = False
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            self.runtime.start_parent(settings)
+        second.trading_enabled = True
+        external = dict(
+            command_id="manual-b", account_id="B", symbol="XYZ", type="LIMIT_ORDER",
+            qty_shares=10, limit_price=10,
+        )
+        self.runtime.track_external_order(external)
+        with self.assertRaisesRegex(ValueError, "Existing orders"):
+            self.runtime.start_parent(settings)
+
+    def test_account_selection_and_aggregate_inventory_validation(self):
+        self.add_account()
+        for accounts in ([], "A", ["A", "A"], ["A", "missing"], ["A", None]):
+            with self.subTest(accounts=accounts), self.assertRaises(ValueError):
+                self.runtime.start_parent(dict(account_ids=accounts, symbol="XYZ"))
+        with self.assertRaisesRegex(ValueError, "available position"):
+            self.runtime.start_parent(
+                dict(account_ids=["A", "B"], symbol="XYZ", quantity=1401)
+            )
+        for quantity in ("NaN", "Infinity", "not-a-number", 0, -1):
+            with self.subTest(quantity=quantity), self.assertRaises(ValueError):
+                self.runtime.start_parent(
+                    dict(account_ids=["A", "B"], symbol="XYZ", quantity=quantity)
+                )
+
+    def test_inventory_limits_ignore_short_positions_and_cap_reported_available(self):
+        self.add_account(quantity=-10)
+        self.snap.positions[0].qty = 20
+        self.snap.positions[0].available_qty = 1000
+        parent = self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
+        self.assertEqual(parent["quantity"], "20")
+        self.assertEqual(parent["accounts"]["B"]["quantity"], "0")
+        self.runtime.stop_all()
+        self.snap.positions[0].qty = 0
+        with self.assertRaisesRegex(ValueError, "no available position"):
+            self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
+
+    def test_global_active_session_and_stopping_reservation_block_other_starts(self):
+        self.add_account()
+        command = self.submit()
+        self.runtime.stop_all()
+        self.flush()
+        self.assertTrue(self.runtime.has_active_session())
+        self.assertTrue(self.runtime.owns_account("A"))
+        with self.assertRaisesRegex(ValueError, "active session"):
+            self.runtime.start_parent(dict(account_ids=["B"], symbol="OTHER"))
+        self.runtime.on_order_payload(self.snapshot(command, status="CANCELED", sequence=2))
+        self.assertFalse(self.runtime.has_active_session())
+        self.assertFalse(self.runtime.owns_account("A"))
+        self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
+
+    def test_any_fast_session_blocks_start_even_on_different_account_or_symbol(self):
+        self.runtime.fast_active = lambda: True
+        with self.assertRaisesRegex(ValueError, "existing algorithm"):
+            self.start()
+
+    def test_no_deadline_publishes_and_does_not_request_completion_forecast(self):
+        self.start(deadline=None)
+        self.engine.on_trade("XYZ", 1000, "t1", source_time=self.epoch)
+        self.runtime.tick()
+        self.flush()
+        self.assertIsNone(self.publish.call_args.args[0]["deadline"])
+        self.now = 31
+        self.snap.ts = self.iso()
+        with patch.object(self.runtime.market, "volume_rate") as volume_rate:
+            self.runtime.tick()
+        volume_rate.assert_not_called()
+
+    def test_dispatch_uses_selected_child_account_and_rechecks_its_inventory(self):
+        second = self.add_account(quantity=1000)
+        self.snap.positions[0].qty = self.snap.positions[0].available_qty = 0
+        parent = self.runtime.start_parent(
+            dict(account_ids=["A", "B"], symbol="XYZ", mode="urgent", deadline=self.iso(300))
+        )
+        self.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=self.epoch)
+        self.engine.on_trade("XYZ", 1000, "t1", source_time=self.epoch)
+        actions = self.engine.tick()
+        action = next(action for action in actions if action["type"] == "submit")
+        self.assertEqual(action["account_id"], "B")
+        second.positions[0].qty = second.positions[0].available_qty = 0
+        self.runtime._publish_action(action)
+        self.publish.assert_not_called()
+        self.assertEqual(self.engine.get_parent(parent["parent_id"])["state"], "STOPPED")
+
+    def test_round_robin_handoffs_never_oversell_when_account_snapshots_lag_fills(self):
+        self.snap.positions[0].qty = self.snap.positions[0].available_qty = 60
+        self.add_account(quantity=140)
+        parent = self.runtime.start_parent(
+            dict(account_ids=["A", "B"], symbol="XYZ", mode="urgent", deadline=self.iso(60))
+        )
+        commands = []
+        for index, (account, quantity) in enumerate((("A", 60), ("B", 40), ("B", 100))):
+            self.now = index * 5
+            # Keep the original inventory values to model account feedback lagging fills.
+            for snapshot in self.snapshots.values():
+                snapshot.ts = self.iso()
+            self.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=self.epoch + self.now)
+            if index != 1:
+                self.engine.on_trade(
+                    "XYZ", 1000, f"t{index}", source_time=self.epoch + self.now
+                )
+            self.runtime.tick()
+            self.flush()
+            command = self.publish.call_args.args[0]
+            commands.append(command)
+            self.assertEqual((command["account_id"], command["qty_shares"]), (account, quantity))
+            self.assertEqual(self.publish.call_args.args[1], account)
+            self.runtime.on_order_payload(self.snapshot(
+                command, account_id=account, order_id=f"broker-{index}", status="FILLED",
+                filled_quantity=quantity, average_fill_price=10,
+            ))
+        result = self.engine.get_parent(parent["parent_id"])
+        self.assertEqual(result["filled"], "200")
+        self.assertEqual(result["remaining"], "0")
+        self.assertEqual(result["accounts"]["A"]["remaining"], "0")
+        self.assertEqual(result["accounts"]["B"]["remaining"], "0")
+        self.assertFalse(self.runtime.has_active_session())
+        self.assertEqual(len({command["client_order_id"] for command in commands}), 3)
+
+    def test_configured_percentages_drive_each_mode_and_ignore_http_rate_overrides(self):
+        self.runtime.config = normalize_smart_selling_config({
+            "participation_percentages": {"patient": "2.5", "normal": "4", "urgent": "12.25"}
+        })
+        for mode, percentage in (("patient", "2.5"), ("normal", "4"), ("urgent", "12.25"), ("1", "2.5")):
+            with self.subTest(mode=mode):
+                parent = self.start(
+                    mode=mode, participation_percentage=99,
+                    participation_percentages={"patient": 99, "normal": 99, "urgent": 99},
+                    participation=".99",
+                )
+                self.engine.on_trade("XYZ", 100, mode, source_time=self.epoch)
+                current = self.engine.get_parent(parent["parent_id"])
+                self.assertEqual(Decimal(current["participation"]), Decimal(percentage) / 100)
+                self.assertEqual(Decimal(current["earned"]), Decimal(percentage))
+                self.runtime.stop_all()
+
+    def test_changed_configuration_only_affects_new_parent_rates(self):
+        self.runtime.config = normalize_smart_selling_config({
+            "participation_percentages": {"urgent": "12.5"}
+        })
+        original = self.start()
+        self.runtime.config["participation_percentages"]["urgent"] = "20"
+        self.engine.on_trade("XYZ", 100, "original", source_time=self.epoch)
+        current = self.engine.get_parent(original["parent_id"])
+        self.assertEqual(Decimal(current["participation"]), Decimal(".125"))
+        self.assertEqual(Decimal(current["earned"]), Decimal("12.5"))
+        self.runtime.stop_all()
+        replacement = self.start()
+        self.engine.on_trade("XYZ", 100, "replacement", source_time=self.epoch)
+        current = self.engine.get_parent(replacement["parent_id"])
+        self.assertEqual(Decimal(current["participation"]), Decimal(".2"))
+        self.assertEqual(Decimal(current["earned"]), Decimal("20"))
+        self.assertEqual(
+            Decimal(self.engine.get_parent(original["parent_id"])["participation"]),
+            Decimal(".125"),
+        )
+
+    def test_backend_event_signal_defaults_off_and_explicit_true_retains_bid_pricing(self):
+        for index, (settings, expected_price) in enumerate((({}, 10.01), ({"imminent_event": True}, 10))):
+            with self.subTest(settings=settings):
+                self.start(mode="patient", **settings)
+                self.assertEqual(self.engine._load(self.parent_id)["imminent_event"], bool(settings))
+                self.engine.on_trade("XYZ", 10000, f"event-{index}", source_time=self.epoch)
+                self.runtime.tick()
+                self.flush()
+                command = self.publish.call_args.args[0]
+                self.assertEqual(command["limit_price"], expected_price)
+                self.runtime.on_order_payload(self.snapshot(
+                    command, order_id=f"event-{index}", status="CANCELED"
+                ))
+                self.runtime.stop_all()
 
     def test_portable_existing_limit_then_symbol_cancel_with_reserved_quantity(self):
         command = self.submit()

@@ -3,6 +3,12 @@
 from decimal import Decimal, InvalidOperation
 import math
 
+from .services.smart_selling_policy import (
+    PARTICIPATION_PERCENTAGES,
+    decimal_string,
+    parse_participation_percentage,
+)
+
 INSTRUMENT_DEFAULTS = {
     "tick_size": "0.01",
     "quantity_step": "1",
@@ -50,9 +56,25 @@ def normalize_smart_selling_config(raw=None):
         "quote_max_age": 10,
         "trade_max_age": 15,
         "account_max_age": 60,
+        "participation_percentages": {},
         "instrument_defaults": {},
         "instruments": {},
         **raw,
+    }
+    percentages = config["participation_percentages"]
+    if not isinstance(percentages, dict):
+        raise ValueError("smart_selling.participation_percentages must be an object")
+    unknown = percentages.keys() - PARTICIPATION_PERCENTAGES.keys()
+    if unknown:
+        raise ValueError(
+            "Unknown smart_selling.participation_percentages modes: "
+            + ", ".join(sorted(map(str, unknown)))
+        )
+    config["participation_percentages"] = {
+        mode: decimal_string(
+            parse_participation_percentage(value, f"smart_selling.participation_percentages.{mode}")
+        )
+        for mode, value in {**PARTICIPATION_PERCENTAGES, **percentages}.items()
     }
     if type(config["enabled"]) is not bool:
         raise ValueError("smart_selling.enabled must be boolean")

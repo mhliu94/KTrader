@@ -743,14 +743,66 @@ class FastTradingManagerTests(unittest.TestCase):
         for mode, symbol, account in (("E", "AAPL", "A"), ("F", "AAPL", "B"), ("E", "MSFT", "REMOVED")):
             command = {**strategy_command(), "trading_mode": mode, "symbol": symbol,
                        "fast_trading_account_ids": [account]}
-            key = manager.start_strategy(command)
-            strategies.append(manager._strategies[key])
+            # Simulate legacy state: new starts now allow only one session.
+            key = manager._strategy_key(mode, symbol)
+            strategy = _FastStrategy(key=key, command=command, stop_event=threading.Event())
+            strategy.thread = threading.Thread(target=manager._run_strategy, args=(strategy,))
+            manager._strategies[key] = strategy
+            strategy.thread.start()
+            strategies.append(strategy)
         self.assertEqual(manager.stop_all(), 3)
         self.assertEqual(manager._strategies, {})
         self.assertTrue(all(strategy.stop_event.is_set() for strategy in strategies))
         self.assertTrue(all(not strategy.thread.is_alive() for strategy in strategies))
         self.assertEqual(manager.stop_all(), 0)
         publish.assert_not_called()
+
+    def test_start_requires_previous_session_to_stop_even_for_other_accounts_and_symbols(self):
+        manager = FastTradingStrategyManager(
+            market_data_store=MarketDataStore(),
+            account_metas_provider=lambda: metas("A", "B"),
+            publish_command=Mock(),
+        )
+        self.addCleanup(manager.stop_all)
+        manager.start_strategy(strategy_command())
+        for mode, symbol, account in (("E", "AAPL", "A"), ("F", "MSFT", "B")):
+            with self.assertRaisesRegex(ValueError, "Stop the existing"):
+                manager.start_strategy({**strategy_command(), "trading_mode": mode,
+                                        "symbol": symbol, "fast_trading_account_ids": [account]})
+        self.assertTrue(manager.owns_account("A"))
+        self.assertFalse(manager.owns_account("B"))
+        manager.stop_all()
+        self.assertFalse(manager.has_active_session())
+        manager.start_strategy({**strategy_command(), "trading_mode": "F", "symbol": "MSFT"})
+
+    def test_stopping_worker_reserves_session_until_inflight_cycle_exits(self):
+        entered, release = threading.Event(), threading.Event()
+        manager = FastTradingStrategyManager(
+            market_data_store=MarketDataStore(),
+            account_metas_provider=lambda: metas("A"),
+            publish_command=Mock(),
+        )
+        def blocked_cycle(command):
+            entered.set()
+            release.wait(10)
+            return Mock(commands=[], capacity_noop=False, reason="test cycle")
+        manager.run_cycle = blocked_cycle
+        key = manager.start_strategy(strategy_command())
+        strategy = manager._strategies[key]
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(manager.stop_all(), 1)
+            self.assertTrue(manager.has_active_session())
+            self.assertTrue(manager.owns_account("A"))
+            self.assertFalse(manager.has_running_strategy("A", "AAPL"))
+            with self.assertRaisesRegex(ValueError, "Stop the existing"):
+                manager.start_strategy(strategy_command())
+        finally:
+            release.set()
+            strategy.thread.join(2)
+            manager.stop_all()
+        self.assertFalse(manager.has_active_session())
+        self.assertEqual(strategy.last_reason, "Manual stop")
 
     def test_manager_records_order_action_time_for_future_cooldown_checks(self):
         store = MarketDataStore()

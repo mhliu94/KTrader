@@ -34,6 +34,13 @@
     "historical_prices_csv": "../../market_data/historical_prices.csv",
     "market_insights_max_levels": 20
   },
+  "smart_selling": {
+    "participation_percentages": {
+      "patient": "3",
+      "normal": "6",
+      "urgent": "10"
+    }
+  },
   "fast_trading": {
     "aggression_levels": {
       "1": { "book_levels": 2, "cycle_seconds": 30 },

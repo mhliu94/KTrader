@@ -224,11 +224,20 @@ def _can_manage_trading(user: str | None) -> bool:
 
 
 def _publish_fast_trading_command(command: Dict, key: str) -> None:
-    _publish_control_command(command, key)
+    with ALGO_CONTROL_LOCK:
+        if not FAST_TRADING_MANAGER or not FAST_TRADING_MANAGER.has_running_strategy(
+            command.get("account_id"), command.get("symbol")
+        ):
+            return
+        if SMART_SELLING_MANAGER:
+            if SMART_SELLING_MANAGER.has_active_session():
+                raise ValueError("Stop Smart selling before starting another algorithm")
+            SMART_SELLING_MANAGER.track_external_order(command)
+        _publish_trading_command(command, key)
 
 
 def _publish_control_command(command: Dict, key: str) -> None:
-    """Serialize manual/E/F ownership checks with Smart selling parent starts."""
+    """Manual order instructions cannot interfere with an algorithm's accounts."""
     places_order = command.get("type") in {
         "LIMIT_ORDER",
         "LIMIT_ORDER_FOK",
@@ -236,12 +245,21 @@ def _publish_control_command(command: Dict, key: str) -> None:
         "DELAYED_MARKET_ORDER",
     }
     with ALGO_CONTROL_LOCK:
-        if SMART_SELLING_MANAGER and places_order:
-            if SMART_SELLING_MANAGER.owns(command.get("account_id"), command.get("symbol")):
+        account_id = command.get("account_id")
+        if (
+            places_order
+            or command.get("type") == "CURRENCY_CONVERSION"
+            or str(command.get("type", "")).startswith("CANCEL_")
+        ):
+            if any(
+                manager and manager.owns_account(account_id)
+                for manager in (FAST_TRADING_MANAGER, SMART_SELLING_MANAGER)
+            ):
                 raise ValueError(
-                    "Smart selling owns this account/instrument; "
-                    "stop it and await terminal order status first"
+                    "An algorithm session owns this account; "
+                    "stop it and await outstanding order confirmations first"
                 )
+        if SMART_SELLING_MANAGER and places_order:
             SMART_SELLING_MANAGER.track_external_order(command)
         _publish_trading_command(command, key)
 
@@ -252,16 +270,27 @@ def _publish_trading_command(command: Dict, key: str) -> None:
     COMMANDS_PRODUCER.publish_order(command, key=key)
 
 
+def _require_idle_algorithms():
+    if any(
+        manager and manager.has_active_session()
+        for manager in (FAST_TRADING_MANAGER, SMART_SELLING_MANAGER)
+    ):
+        raise ValueError(
+            "Stop the existing algorithm session and await outstanding order confirmations "
+            "before starting another"
+        )
+
+
 def _start_fast_strategy(command):
     with ALGO_CONTROL_LOCK:
-        if SMART_SELLING_MANAGER and any(
-            SMART_SELLING_MANAGER.owns(account, command.get("symbol"))
-            for account in command.get("fast_trading_account_ids", [])
-        ):
-            raise ValueError(
-                "Stop Smart selling and await terminal order status before starting another algorithm"
-            )
+        _require_idle_algorithms()
         return FAST_TRADING_MANAGER.start_strategy(command)
+
+
+def _start_smart_parent(settings):
+    with ALGO_CONTROL_LOCK:
+        _require_idle_algorithms()
+        return SMART_SELLING_MANAGER.start_parent(settings)
 
 
 def _require_auth_page(request: Request):
@@ -317,6 +346,7 @@ def on_startup() -> None:
             account_metas_provider=lambda: ACCOUNT_METAS,
             snapshots_provider=lambda: get_served_snapshots()[0],
             publish_command=_publish_trading_command,
+            fast_active=lambda: FAST_TRADING_MANAGER.has_active_session(),
             fast_conflict=lambda account, symbol: FAST_TRADING_MANAGER.has_strategy(
                 account, symbol
             ),
@@ -1155,8 +1185,7 @@ async def api_start_smart_selling(request: Request):
         return JSONResponse({"ok": False, "error": "Smart selling is unavailable"}, status_code=503)
     try:
         payload = await request.json()
-        with ALGO_CONTROL_LOCK:
-            parent = SMART_SELLING_MANAGER.start_parent(payload)
+        parent = _start_smart_parent(payload)
         return JSONResponse({"ok": True, "parent": parent})
     except (ValueError, TypeError, InvalidOperation) as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
@@ -1174,7 +1203,8 @@ def api_stop_smart_selling(parent_id: str, request: Request):
     if SMART_SELLING_MANAGER is None:
         return JSONResponse({"ok": False, "error": "Smart selling is unavailable"}, status_code=503)
     try:
-        return JSONResponse({"ok": True, "parent": SMART_SELLING_MANAGER.stop_parent(parent_id)})
+        with ALGO_CONTROL_LOCK:
+            return JSONResponse({"ok": True, "parent": SMART_SELLING_MANAGER.stop_parent(parent_id)})
     except KeyError:
         return JSONResponse({"ok": False, "error": "Unknown Smart selling parent"}, status_code=404)
 
@@ -1190,34 +1220,36 @@ def submit_algo_stop(
     lang = resolve_lang(request)
     # Scope comes from the server, never from submitted mode/account fields.
     # Stop local strategies first even if Kafka is unavailable.
-    try:
-        if FAST_TRADING_MANAGER is None and SMART_SELLING_MANAGER is None:
-            raise RuntimeError(t(lang, "algo_stop_unavailable"))
-        stopped_count = FAST_TRADING_MANAGER.stop_all() if FAST_TRADING_MANAGER else 0
-        smart_count = SMART_SELLING_MANAGER.stop_all() if SMART_SELLING_MANAGER else 0
-    except Exception as e:
-        return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
+    # Keep new starts behind the stop notification as well as the local stop.
+    with ALGO_CONTROL_LOCK:
+        try:
+            if FAST_TRADING_MANAGER is None and SMART_SELLING_MANAGER is None:
+                raise RuntimeError(t(lang, "algo_stop_unavailable"))
+            stopped_count = FAST_TRADING_MANAGER.stop_all() if FAST_TRADING_MANAGER else 0
+            smart_count = SMART_SELLING_MANAGER.stop_all() if SMART_SELLING_MANAGER else 0
+        except Exception as e:
+            return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
 
-    ok = t(lang, "algo_stop_submitted").format(count=stopped_count)
-    if smart_count:
-        ok += (
-            f" 已请求停止 {smart_count} 个智能卖出任务，等待订单终态确认。"
-            if lang == "zh"
-            else f" Stop requested for {smart_count} Smart selling parent(s); awaiting final order confirmations."
-        )
-    cmd = build_algo_stop_command(reason=reason)
-    try:
-        if COMMANDS_PRODUCER is None:
-            raise RuntimeError(t(lang, "algo_stop_notification_failed"))
-        _publish_control_command(cmd, key="ALGO_STOP")
-    except Exception:
-        LOGGER.exception("All local algorithm strategies stopped, but stop notification failed")
-        err = t(lang, "algo_stop_notification_failed")
-        return RedirectResponse(
-            url=f"/control-panel?ok={quote(ok)}&err={quote(err)}", status_code=303
-        )
-    ok += f" {t(lang,'published_cmd')}={cmd['command_id']}"
-    return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
+        ok = t(lang, "algo_stop_submitted").format(count=stopped_count)
+        if smart_count:
+            ok += (
+                f" 已请求停止 {smart_count} 个智能卖出任务，等待订单终态确认。"
+                if lang == "zh"
+                else f" Stop requested for {smart_count} Smart selling parent(s); awaiting final order confirmations."
+            )
+        cmd = build_algo_stop_command(reason=reason)
+        try:
+            if COMMANDS_PRODUCER is None:
+                raise RuntimeError(t(lang, "algo_stop_notification_failed"))
+            _publish_control_command(cmd, key="ALGO_STOP")
+        except Exception:
+            LOGGER.exception("All local algorithm strategies stopped, but stop notification failed")
+            err = t(lang, "algo_stop_notification_failed")
+            return RedirectResponse(
+                url=f"/control-panel?ok={quote(ok)}&err={quote(err)}", status_code=303
+            )
+        ok += f" {t(lang,'published_cmd')}={cmd['command_id']}"
+        return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
 
 
 @app.get("/submit-algo")

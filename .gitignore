@@ -8,6 +8,7 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+reports/
 
 # Virtual environments and local tooling
 .venv/

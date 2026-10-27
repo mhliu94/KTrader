@@ -78,6 +78,7 @@ HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
 ACCOUNT_SORT_COOKIE = "account_details_sort"
 ACCOUNT_SECURITY_COOKIE = "account_details_security"
 ACCOUNT_SORT_COOKIE_MAX_AGE = 180 * 24 * 3600
+ACCOUNT_DETAILS_QUOTE_REFRESH_SECONDS = 5.0
 
 
 def _filter_configured_snapshots(accounts: Dict[str, AccountSnapshot]) -> Dict[str, AccountSnapshot]:
@@ -134,6 +135,12 @@ def get_served_snapshots() -> Tuple[Dict, str]:
 
 def _render_account_details_content(lang: str, account_sort: str, security: str) -> str:
     accounts, src = get_served_snapshots()
+    held_symbols = sorted({
+        str(position.symbol or "").strip().upper()
+        for account in accounts.values()
+        for position in account.positions
+        if str(position.symbol or "").strip() and position.qty
+    })
     return render_account_details_page(
         lang=lang,
         store=store,
@@ -144,6 +151,7 @@ def _render_account_details_content(lang: str, account_sort: str, security: str)
         symbols=_normalized_configured_symbols(),
         account_sort=account_sort,
         security=security,
+        quotes=MD_STORE.get_stock_quotes(held_symbols),
     )
 
 
@@ -168,16 +176,25 @@ async def _account_details_event_stream(
             _current_user(request) is None or await request.is_disconnected()
         ):
             return
-        yield _account_details_sse_event(lang, account_sort, security, version)
+        last_event = _account_details_sse_event(lang, account_sort, security, version)
+        yield last_event
         while True:
             try:
-                next_version = await asyncio.wait_for(updates.get(), timeout=15.0)
+                next_version = await asyncio.wait_for(
+                    updates.get(), timeout=ACCOUNT_DETAILS_QUOTE_REFRESH_SECONDS
+                )
             except TimeoutError:
                 if request is not None and (
                     _current_user(request) is None or await request.is_disconnected()
                 ):
                     return
-                yield ": keep-alive\n\n"
+                # Quotes can change without a new account snapshot.
+                event = _account_details_sse_event(lang, account_sort, security, version)
+                if event != last_event:
+                    last_event = event
+                    yield event
+                else:
+                    yield ": keep-alive\n\n"
                 continue
 
             if request is not None and (
@@ -185,7 +202,8 @@ async def _account_details_event_stream(
             ):
                 return
             version = next_version
-            yield _account_details_sse_event(lang, account_sort, security, version)
+            last_event = _account_details_sse_event(lang, account_sort, security, version)
+            yield last_event
     finally:
         store.unsubscribe_updates(token)
 

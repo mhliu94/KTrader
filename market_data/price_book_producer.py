@@ -11,9 +11,11 @@ from kafka import KafkaProducer
 import requests
 try:
     from .data_types import PriceLevel, PriceBookSide, PriceBook
+    from .stock_quotes import StockQuotePublisher
     from .trading_volume import TradingVolumePublisher, daily_volume, normalized_symbols, select_quote, trade_timestamp, utc_iso
 except ImportError:  # Executed directly by start_tiger_listener.sh / a service.
     from data_types import PriceLevel, PriceBookSide, PriceBook
+    from stock_quotes import StockQuotePublisher
     from trading_volume import TradingVolumePublisher, daily_volume, normalized_symbols, select_quote, trade_timestamp, utc_iso
 from pathlib import Path
 
@@ -223,7 +225,7 @@ def _extract_day_volume_from_obj(obj: Dict[str, Any]) -> Optional[int]:
 
 class TSQuotePoller:
     """
-    Poll TradeStation quote endpoint periodically and cache day volume per symbol.
+    Poll TradeStation snapshots for daily volume and actual last-trade prices.
     """
     def __init__(
         self,
@@ -233,10 +235,12 @@ class TSQuotePoller:
         poll_interval_s: float = 5.0,
         request_timeout_s: int = 15,
         volume_publisher: Optional[TradingVolumePublisher] = None,
+        stock_quote_publisher: Optional[StockQuotePublisher] = None,
     ):
         self.tm = token_manager
         self.symbols = normalized_symbols(symbols)
         self.volume_publisher = volume_publisher
+        self.stock_quote_publisher = stock_quote_publisher
         self.on_error = on_error or (lambda e: None)
         self.poll_interval_s = poll_interval_s
         self.request_timeout_s = request_timeout_s
@@ -260,7 +264,7 @@ class TSQuotePoller:
 
     def poll_once(self, session: requests.Session) -> None:
         # Official v3 GetQuoteSnapshots allows up to 100 comma-separated
-        # symbols. Reuse each snapshot for the book cache and volume topic.
+        # symbols. Reuse each snapshot for the book cache and both quote topics.
         for offset in range(0, len(self.symbols), 100):
             if self._stop.is_set():
                 return
@@ -273,14 +277,9 @@ class TSQuotePoller:
                 duration = (time.monotonic() - timer) * 1000
                 self.on_error(error)
                 for symbol in symbols:
-                    if self.volume_publisher:
-                        try:
-                            self.volume_publisher.publish_error(
-                                symbol, "quote request failed: " + type(error).__name__,
-                                request_started_at=started, observed_at=observed,
-                                request_duration_ms=duration)
-                        except Exception as publish_error:
-                            self.on_error(publish_error)
+                    self._publish_to_topics(
+                        "publish_error", symbol, "quote request failed: " + type(error).__name__,
+                        request_started_at=started, observed_at=observed, request_duration_ms=duration)
                 continue
             observed = time.time()
             duration = (time.monotonic() - timer) * 1000
@@ -289,25 +288,26 @@ class TSQuotePoller:
                     quote = select_quote(payload, symbol)
                 except ValueError as error:
                     self.on_error(error)
-                    if self.volume_publisher:
-                        try:
-                            self.volume_publisher.publish_error(
-                                symbol, str(error), request_started_at=started,
-                                observed_at=observed, request_duration_ms=duration)
-                        except Exception as publish_error:
-                            self.on_error(publish_error)
+                    self._publish_to_topics(
+                        "publish_error", symbol, str(error), request_started_at=started,
+                        observed_at=observed, request_duration_ms=duration)
                     continue
                 day_volume = _extract_day_volume_from_obj(quote)
                 if day_volume is not None:
                     with _day_volume_lock:
                         _day_volume_by_symbol[symbol] = day_volume
-                if self.volume_publisher:
-                    try:
-                        self.volume_publisher.publish_quote(
-                            symbol, quote, request_started_at=started,
-                            observed_at=observed, request_duration_ms=duration)
-                    except Exception as error:
-                        self.on_error(error)
+                self._publish_to_topics(
+                    "publish_quote", symbol, quote, request_started_at=started,
+                    observed_at=observed, request_duration_ms=duration)
+
+    def _publish_to_topics(self, method, symbol, value, **timing):
+        for publisher in (self.volume_publisher, self.stock_quote_publisher):
+            if publisher is not None:
+                try:
+                    getattr(publisher, method)(symbol, value, **timing)
+                except Exception as error:
+                    # One failed topic must not prevent publication to the other.
+                    self.on_error(error)
 
     def _fetch_quotes(self, session: requests.Session, symbols: List[str]) -> Dict[str, Any]:
         from urllib.parse import quote
@@ -463,6 +463,7 @@ if __name__ == "__main__":
             raise ValueError("Config 'symbols' must contain at least one symbol.")
         volume_symbols = normalized_symbols(json_content.get("trading_volume_symbols", []))
         volume_topic = str(json_content.get("trading_volume_topic", "trading-volume")).strip()
+        stock_quotes_topic = str(json_content.get("stock_quotes_topic", "stock-quotes")).strip()
         volume_poll_interval = float(json_content.get("trading_volume_poll_interval_seconds", 5))
         if not 1 <= volume_poll_interval <= 300:
             raise ValueError("trading_volume_poll_interval_seconds must be between 1 and 300")
@@ -488,12 +489,15 @@ if __name__ == "__main__":
     volume_publisher = TradingVolumePublisher(producer, volume_symbols, topic=volume_topic,
                                                max_request_seconds=max(10, 2 * volume_poll_interval))
     quote_symbols = list(dict.fromkeys(trading_symbols + volume_symbols))
+    stock_quote_publisher = StockQuotePublisher(producer, trading_symbols, topic=stock_quotes_topic)
     quote_poller = TSQuotePoller(token_manager=tm, symbols=quote_symbols, on_error=print_err,
                                 poll_interval_s=volume_poll_interval,
-                                volume_publisher=volume_publisher)
+                                volume_publisher=volume_publisher,
+                                stock_quote_publisher=stock_quote_publisher)
     try:
         quote_poller.start()
         LOGGER.info("Started quote poller; volume topic=%s, volume symbols=%s", volume_topic, volume_symbols)
+        LOGGER.info("Publishing last-trade snapshots; topic=%s, symbols=%s", stock_quotes_topic, trading_symbols)
 
         for symbol in trading_symbols:
             stream = TSHttpStream(token_manager=tm, on_message=print_depth_event, on_error=print_err)

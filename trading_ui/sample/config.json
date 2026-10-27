@@ -1,6 +1,6 @@
 {
   "accounts_file": "./trading_accounts.json",
-  "symbols": ["TSLA", "NVDA", "AEHL", "BIYA"],
+  "symbols": ["TSLA", "NVDA", "AEHL", "BIYA", "POM"],
   "auth": {
     "users": {
       "admin": { "password": "admin12345" },

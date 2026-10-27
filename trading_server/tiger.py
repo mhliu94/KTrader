@@ -800,6 +800,7 @@ class TigerBroker:
         return cash_by_currency
 
     def _query_cash_maps(self, account: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """Publish native currency holdings, never FX-converted account totals."""
         assert self._trade_client is not None
 
         cash_by_currency: Dict[str, float] = {}
@@ -914,23 +915,11 @@ class TigerBroker:
 
         currency = str(currency or "").strip().upper()
         balances, available = self._cash_maps_from_prime_assets(portfolio)
-        if currency in balances:
-            return balances[currency], available.get(currency, balances[currency])
-
-        segments = pick_first_attr(portfolio, ("segments",), {}) or {}
-        security_segment = segments.get("S") if isinstance(segments, dict) else None
-        if security_segment is None:
-            security_segment = pick_first_attr(portfolio, ("summary",), None)
-
-        balance = finite_float_or_none(
-            pick_first_attr(security_segment, ("cash_balance",), None)
-        )
-        cash_available = finite_float_or_none(
-            pick_first_attr(security_segment, ("cash_available_for_trade",), None)
-        )
-        if cash_available is None:
-            cash_available = balance
-        return balance, cash_available
+        # Segment cash is the entire account converted to base_currency.
+        # It is not a holding in that currency, even when the labels match.
+        # Keep missing balances missing so the global per-currency fallback
+        # can supply native cash without duplicating USD as AUD/NZD/etc.
+        return balances.get(currency), available.get(currency)
 
     def _cash_from_global_assets(self, portfolio: Any, currency: str) -> Optional[float]:
         if portfolio is None:
@@ -946,9 +935,9 @@ class TigerBroker:
                 if parsed_cash is not None:
                     return parsed_cash
 
-        summary = pick_first_attr(portfolio, ("summary",), portfolio)
-        cash = pick_first_attr(summary, ("cash", "cash_balance", "available_funds"), None)
-        return finite_float_or_none(cash) if cash is not None else None
+        # Global summary cash is also a converted total; available_funds can
+        # include margin. Neither is a substitute for a native cash balance.
+        return None
 
     def _query_positions(self, account: str) -> List[Dict[str, Any]]:
         assert self._trade_client is not None

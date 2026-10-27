@@ -1,12 +1,14 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
 
 import trading_ui.webserver as webserver
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
+from trading_ui.services.market_data import MarketDataStore, StockQuote
 from trading_ui.store import AccountStore
 from trading_ui.templates import ACCOUNT_SORT_NUMERIC_ID, render_live_account_details_page
 
@@ -24,8 +26,10 @@ class AccountLiveUpdateTests(unittest.TestCase):
             "SYMBOLS": webserver.SYMBOLS,
             "APP_CONFIG": webserver.APP_CONFIG,
             "SESSIONS": webserver.SESSIONS,
+            "MD_STORE": webserver.MD_STORE,
         }
         webserver.store = AccountStore()
+        webserver.MD_STORE = MarketDataStore()
         webserver.ACCOUNT_METAS = {
             "A": AccountMeta(id="A", num_id=1, broker="Tiger"),
         }
@@ -41,6 +45,7 @@ class AccountLiveUpdateTests(unittest.TestCase):
         webserver.SYMBOLS = self._saved["SYMBOLS"]
         webserver.APP_CONFIG = self._saved["APP_CONFIG"]
         webserver.SESSIONS = self._saved["SESSIONS"]
+        webserver.MD_STORE = self._saved["MD_STORE"]
 
     def test_waits_for_live_data_without_loading_sample_balances(self):
         accounts, source = webserver.get_served_snapshots()
@@ -104,6 +109,38 @@ class AccountLiveUpdateTests(unittest.TestCase):
         self.assertIn('window.addEventListener("pagehide", closeUpdates', html)
         self.assertNotIn('http-equiv="refresh"', html.lower())
         self.assertNotIn("refreshCountdown", html)
+
+    def test_quote_updates_refresh_held_symbols_without_an_account_update(self):
+        # A held symbol can differ from the configured order-entry symbols.
+        webserver.store.upsert(AccountSnapshot(
+            account_id="A", cash=100, positions=[Position(" aapl ", 10, 90)],
+        ))
+
+        def update_quote(last, observed_at):
+            webserver.MD_STORE.upsert_stock_quote(StockQuote(
+                symbol="AAPL", last=last, trade_time=observed_at, observed_at=observed_at,
+            ))
+
+        async def exercise_stream():
+            update_quote(100, 1_700_000_000)
+            events = webserver._account_details_event_stream("en", ACCOUNT_SORT_NUMERIC_ID, "TSLA")
+            try:
+                first = event_payload(await anext(events))
+                update_quote(125, 1_700_000_005)
+                updated = event_payload(await asyncio.wait_for(anext(events), timeout=1.0))
+                heartbeat = await asyncio.wait_for(anext(events), timeout=1.0)
+                return first, updated, heartbeat
+            finally:
+                await events.aclose()
+
+        with patch.object(webserver, "ACCOUNT_DETAILS_QUOTE_REFRESH_SECONDS", 0.01):
+            first, updated, heartbeat = asyncio.run(exercise_stream())
+
+        self.assertIn("100.0000", first["html"])
+        self.assertIn("1,000.00", first["html"])
+        self.assertIn("125.0000", updated["html"])
+        self.assertIn("1,250.00", updated["html"])
+        self.assertEqual(heartbeat, ": keep-alive\n\n")
 
     def test_stream_route_requires_auth_and_disables_proxy_buffering(self):
         def request(cookie: bytes | None = None) -> Request:

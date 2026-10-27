@@ -188,9 +188,9 @@
       "ip_address": "139.162.185.38",
       "machine_alias": "Linode-DE1",
       "numeric_id": 20,
-      "string_id": "LONGBRIDGE-HHM",
+      "string_id": "TIGER-WJY",
       "owner_type": "individual",
-      "broker": "Longbridge",
+      "broker": "Tiger",
       "trading_medium": "API"
     },
     {
@@ -200,7 +200,8 @@
       "string_id": "LONGBRIDGE-JJH",
       "owner_type": "individual",
       "broker": "Longbridge",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "172.139.18.222",
@@ -209,7 +210,8 @@
       "string_id": "LONGBRIDGE-JQN",
       "owner_type": "individual",
       "broker": "Longbridge",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "172.232.208.240",
@@ -218,7 +220,8 @@
       "string_id": "LONGBRIDGE-JQY",
       "owner_type": "individual",
       "broker": "Longbridge",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "172.232.208.132",
@@ -227,7 +230,8 @@
       "string_id": "LONGBRIDGE-JERRY",
       "owner_type": "individual",
       "broker": "Longbridge",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "172.139.18.230",
@@ -236,7 +240,8 @@
       "string_id": "LONGBRIDGE-MANNING",
       "owner_type": "individual",
       "broker": "Longbridge",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     },
     {
       "ip_address": "255.255.255.255",
@@ -245,7 +250,8 @@
       "string_id": "LONGBRIDGE-YUHANG",
       "owner_type": "individual",
       "broker": "Longbridge",
-      "trading_medium": "API"
+      "trading_medium": "API",
+      "hidden": true
     }
   ]
 }

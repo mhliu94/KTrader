@@ -6,7 +6,9 @@ from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING
 
-from ..services.market_data import MarketDataStore, order_book_from_price_book, quote_row_from_price_book
+from ..services.market_data import (
+    MarketDataStore, order_book_from_price_book, quote_row_from_price_book, stock_quote_from_payload,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,9 +43,12 @@ class PriceBookConsumer:
         }
 
         topic = self._kafka_cfg["market_data_topic"]
+        stock_quotes_topic = self._kafka_cfg.get("stock_quotes_topic", "stock-quotes")
+        if topic == stock_quotes_topic:
+            raise ValueError("stock_quotes_topic must differ from market_data_topic")
         self._consumer = Consumer(conf)
-        self._consumer.subscribe([topic], on_assign=self._on_assign)
-        LOGGER.info("market-data consuming topic=%s bootstrap=%s", topic, bootstrap_servers)
+        self._consumer.subscribe([topic, stock_quotes_topic], on_assign=self._on_assign)
+        LOGGER.info("market-data consuming topics=%s bootstrap=%s", [topic, stock_quotes_topic], bootstrap_servers)
 
         self._thread = threading.Thread(target=self._run, name="price-book-consumer", daemon=True)
         self._thread.start()
@@ -81,29 +86,41 @@ class PriceBookConsumer:
             if not val:
                 continue
 
-            row = parse_market_data_message(val)
-            if row is not None:
-                self._store.upsert(row)
-
             try:
                 payload = json.loads(val.decode("utf-8"))
             except Exception:
                 payload = None
 
             if isinstance(payload, dict):
-                depth_limit = int(self._kafka_cfg.get("market_insights_max_levels", 20))
-                book = order_book_from_price_book(payload, depth_limit=depth_limit)
-                if book is not None:
-                    self._store.upsert_book(book)
-                if self._payload_callback:
-                    try:
-                        if self._health_callback:
-                            self._health_callback(True)
-                        self._payload_callback(payload, topic=msg.topic(), partition=msg.partition(), offset=msg.offset())
-                    except Exception:
-                        LOGGER.exception("Smart selling rejected a price-book update")
-                        if self._health_callback:
-                            self._health_callback(False)
+                try:
+                    self._handle_payload(payload, topic=msg.topic(), partition=msg.partition(), offset=msg.offset())
+                except (ValueError, TypeError, OverflowError):
+                    LOGGER.warning("Invalid market-data record on topic=%s", msg.topic())
+
+    def _handle_payload(self, payload, *, topic, partition=0, offset=0):
+        if topic == self._kafka_cfg.get("stock_quotes_topic", "stock-quotes"):
+            quote = stock_quote_from_payload(payload)
+            if quote is not None:
+                self._store.upsert_stock_quote(quote)
+            return
+        if topic != self._kafka_cfg["market_data_topic"]:
+            return
+        row = quote_row_from_price_book(payload)
+        if row is not None:
+            self._store.upsert(row)
+        depth_limit = int(self._kafka_cfg.get("market_insights_max_levels", 20))
+        book = order_book_from_price_book(payload, depth_limit=depth_limit)
+        if book is not None:
+            self._store.upsert_book(book)
+        if self._payload_callback:
+            try:
+                if self._health_callback:
+                    self._health_callback(True)
+                self._payload_callback(payload, topic=topic, partition=partition, offset=offset)
+            except Exception:
+                LOGGER.exception("Smart selling rejected a price-book update")
+                if self._health_callback:
+                    self._health_callback(False)
 
     def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         for partition in partitions:

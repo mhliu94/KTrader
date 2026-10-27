@@ -133,6 +133,45 @@ the existing cancel command cancels **all open orders for that account and symbo
 
 ## Independent trading-volume feed
 
+### Last-trade quotes for the account summary
+
+The price-book publisher also publishes **`stock-quotes`** on its configured
+Kafka cluster, using the fixed `symbols` list in
+`market_data/md_producer_config.json`. It reuses the quote poller's existing
+requests and interval (five seconds by default). Volume-only symbols are not
+automatically added to this topic.
+
+The topic has been provisioned on the configured market-data cluster with one
+partition and one replica, matching `price-books`.
+
+Each record is keyed by symbol and represents the latest observed trade, **not
+every individual trade**. `last` comes from TradeStation's `Last`, `trade_time`
+from `TradeTime`, and optional `last_size` from `LastSize`. Prices are decimal
+strings; timestamps are UTC ISO 8601. An example record is:
+
+```json
+{"schema_version":1,"type":"STOCK_QUOTE","symbol":"AAPL","source":"TradeStation","last":"125.1250","last_size":7,"trade_time":"2026-10-23T19:59:58Z","observed_at":"2026-10-23T20:00:00Z","is_delayed":false,"is_halted":false,"healthy":true}
+```
+
+Missing or invalid prices/timestamps, provider errors, and delayed or unknown
+realtime status produce `healthy:false`, `last:null`, and a `reason`. An old
+last-trade timestamp is valid when markets are closed or a stock is illiquid.
+These records are independent of Smart selling's volume eligibility rules.
+
+The dashboard consumes this topic alongside `price-books` and stores trade
+prices separately from depth-derived prices. Its account summary uses only
+trade prices for **Last / 最新** and **Market Value / 市值**; holdings with no
+usable trade quote show `--` for both. Unavailable observations clear a previous
+price, and older observations cannot overwrite newer ones.
+
+The producer setting `stock_quotes_topic` and dashboard Kafka setting of the
+same name default to `stock-quotes`; the dashboard also accepts
+`KAFKA_STOCK_QUOTES_TOPIC`. Provision the topic on the market-data cluster if
+broker topic auto-creation is disabled. Restart the publisher and dashboard to
+load these changes.
+
+### Volume observations
+
 The Kafka topic **`trading-volume`** was created on the configured market-data
 cluster with one partition and one replica, matching `price-books`.
 

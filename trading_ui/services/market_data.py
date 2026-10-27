@@ -1,6 +1,8 @@
 import threading
 import csv
+import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -16,6 +18,62 @@ class QuoteRow:
     volume: Optional[int]
     asof_epoch: Optional[int]
     error: Optional[str] = None
+
+
+@dataclass
+class StockQuote:
+    symbol: str
+    last: Optional[float]
+    trade_time: Optional[float]
+    observed_at: float
+    is_delayed: Optional[bool] = None
+    is_halted: Optional[bool] = None
+    error: Optional[str] = None
+
+
+def _quote_timestamp(value: object) -> float:
+    timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("quote timestamp requires a UTC offset")
+    return timestamp.timestamp()
+
+
+def stock_quote_from_payload(payload: dict) -> Optional[StockQuote]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("type") != "STOCK_QUOTE"
+        or payload.get("schema_version") != 1
+    ):
+        return None
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return None
+    try:
+        observed_at = _quote_timestamp(payload.get("observed_at"))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    quote = StockQuote(
+        symbol=symbol, last=None, trade_time=None, observed_at=observed_at,
+        is_delayed=payload.get("is_delayed") if isinstance(payload.get("is_delayed"), bool) else None,
+        is_halted=payload.get("is_halted") if isinstance(payload.get("is_halted"), bool) else None,
+        error="last trade unavailable",
+    )
+    if payload.get("healthy") is not True or quote.is_delayed is not False:
+        return quote
+    try:
+        last = float(payload.get("last"))
+        trade_time = _quote_timestamp(payload.get("trade_time"))
+        if (
+            isinstance(payload.get("last"), bool)
+            or not math.isfinite(last)
+            or last <= 0
+            or trade_time > observed_at + 1
+        ):
+            return quote
+    except (ValueError, TypeError, OverflowError):
+        return quote
+    quote.last, quote.trade_time, quote.error = last, trade_time, None
+    return quote
 
 
 @dataclass
@@ -179,6 +237,19 @@ class MarketDataStore:
         self._lock = threading.RLock()
         self._rows: Dict[str, QuoteRow] = {}
         self._books: Dict[str, OrderBookSnapshot] = {}
+        self._stock_quotes: Dict[str, StockQuote] = {}
+
+    def upsert_stock_quote(self, quote: StockQuote) -> None:
+        with self._lock:
+            previous = self._stock_quotes.get(quote.symbol)
+            if previous is None or quote.observed_at >= previous.observed_at:
+                # Replace unavailable observations too; never reuse an old price
+                # after the provider explicitly reports that a quote is missing.
+                self._stock_quotes[quote.symbol] = quote
+
+    def get_stock_quotes(self, symbols: list[str]) -> Dict[str, StockQuote]:
+        with self._lock:
+            return {symbol: self._stock_quotes[symbol] for symbol in symbols if symbol in self._stock_quotes}
 
     def upsert(self, row: QuoteRow) -> None:
         with self._lock:

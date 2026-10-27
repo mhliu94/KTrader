@@ -1,8 +1,10 @@
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from trading_ui.config import load_account_metas, load_symbols
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
+from trading_ui.services.market_data import StockQuote
 from trading_ui.store import AccountStore
 from trading_ui.templates import (
     ACCOUNT_SORT_SECURITY,
@@ -45,9 +47,9 @@ def metas(*account_ids):
     }
 
 
-def render(accounts, account_metas, *, symbols=None, account_sort="numeric_id", security=None):
+def render(accounts, account_metas, *, symbols=None, account_sort="numeric_id", security=None, quotes=None, lang="en"):
     return render_account_details_page(
-        lang="en",
+        lang=lang,
         store=AccountStore(),
         accounts=accounts,
         source_label="unit-test",
@@ -56,6 +58,7 @@ def render(accounts, account_metas, *, symbols=None, account_sort="numeric_id", 
         symbols=symbols,
         account_sort=account_sort,
         security=security,
+        quotes=quotes,
     )
 
 
@@ -65,7 +68,55 @@ def portfolio_fragment(html):
     return html[start:end]
 
 
+def portfolio_table_rows(html):
+    return [
+        [re.sub(r"<[^>]+>", "", cell) for cell in re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", row)]
+        for row in re.findall(r"<tr>(.*?)</tr>", portfolio_fragment(html))
+    ]
+
+
+def market_quote(symbol, last, error=None):
+    return StockQuote(
+        symbol=symbol,
+        last=last,
+        trade_time=1_700_000_000,
+        observed_at=1_700_000_001,
+        error=error,
+    )
+
+
 class AccountPortfolioTests(unittest.TestCase):
+    def test_portfolio_prices_and_signed_market_values_follow_average_price(self):
+        accounts = {
+            "A": snapshot("A", positions=[Position(" aapl ", 10, 100), Position("MSFT", -2.5)]),
+            "B": snapshot("B", positions=[Position("AAPL", 30, 120), Position("UNKNOWN", 1)]),
+        }
+        quotes = {"AAPL": market_quote("AAPL", 125.5), "MSFT": market_quote("MSFT", 400)}
+        for lang, headers in (
+            ("en", ["Symbol", "Qty", "Avg Px", "Last", "Market Value", "Accounts"]),
+            ("zh", ["标的", "数量", "均价", "最新", "市值", "账户数"]),
+        ):
+            with self.subTest(lang=lang):
+                rows = portfolio_table_rows(render(accounts, metas("A", "B"), quotes=quotes, lang=lang))
+                self.assertEqual(rows, [
+                    headers,
+                    ["AAPL", "40.00", "115.0000", "125.5000", "5,020.00", "2"],
+                    ["MSFT", "-2.50", "—", "400.0000", "-1,000.00", "1"],
+                    ["UNKNOWN", "1.00", "—", "--", "--", "1"],
+                ])
+
+    def test_portfolio_does_not_value_positions_using_invalid_quotes(self):
+        accounts = {"A": snapshot("A", positions=[Position("AAPL", 10, 100)])}
+        for last, error in (
+            (None, None), (0, None), (-1, None),
+            (float("nan"), None), (float("inf"), None), (float("-inf"), None),
+            (125.5, "quote unavailable"),
+        ):
+            with self.subTest(last=last, error=error):
+                quotes = {"AAPL": market_quote("AAPL", last, error)}
+                rows = portfolio_table_rows(render(accounts, metas("A"), quotes=quotes))
+                self.assertEqual(rows[1], ["AAPL", "10.00", "100.0000", "--", "--", "1"])
+
     def test_configured_symbols_are_normalized_and_deduplicated(self):
         self.assertEqual(
             load_symbols({"symbols": [" aapl ", "MSFT", "AAPL", ""]}),

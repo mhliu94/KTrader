@@ -201,6 +201,7 @@ export TIGER_PRECHECK_ONLY="${TIGER_PRECHECK_ONLY:-false}"
 export TIGER_DRY_RUN="${TIGER_DRY_RUN:-false}"
 export TIGER_SANDBOX_DEBUG="${TIGER_SANDBOX_DEBUG:-false}"
 export TIGER_CURRENCY="${TIGER_CURRENCY:-USD}"
+# Query native cash for these currencies; converted account totals are not holdings.
 export TIGER_CASH_CURRENCIES="${TIGER_CASH_CURRENCIES:-USD,NZD,HKD,AUD}"
 export TIGER_FOREX_SEG_TYPE="${TIGER_FOREX_SEG_TYPE:-SEC}"
 if [[ -n "${TIGEROPEN_PROPS_PATH:-}" ]]; then

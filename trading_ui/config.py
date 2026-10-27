@@ -176,6 +176,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cfg["kafka"].setdefault("account_details_topic", os.getenv("KAFKA_ACCOUNT_DETAILS_TOPIC", "account-details"))
     cfg["kafka"].setdefault("trading_commands_topic", os.getenv("KAFKA_TRADING_COMMANDS_TOPIC", "trading-commands"))
     cfg["kafka"].setdefault("market_data_topic", os.getenv("KAFKA_MARKET_DATA_TOPIC", "price-books"))
+    cfg["kafka"].setdefault("stock_quotes_topic", os.getenv("KAFKA_STOCK_QUOTES_TOPIC", "stock-quotes"))
     cfg["kafka"].setdefault("group_id", os.getenv("KAFKA_GROUP_ID", "account-dashboard"))
     cfg["kafka"].setdefault("market_data_group_id", os.getenv("KAFKA_MARKET_DATA_GROUP_ID", "market-data-dashboard"))
     cfg["kafka"].setdefault("auto_offset_reset", os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest"))

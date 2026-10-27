@@ -1,8 +1,9 @@
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
-from .services.market_data import QuoteRow
+from .services.market_data import QuoteRow, StockQuote
 from .i18n import t
 from .models import AccountMeta, AccountSnapshot
 from .store import AccountStore
@@ -501,6 +502,7 @@ def render_account_details_page(
     symbols: List[str] | None = None,
     account_sort: str = ACCOUNT_SORT_NUMERIC_ID,
     security: str | None = None,
+    quotes: Dict[str, StockQuote] | None = None,
 ) -> str:
     effective_sort, selected_security, securities = resolve_account_sort(symbols, account_sort, security)
 
@@ -519,11 +521,20 @@ def render_account_details_page(
     portfolio_position_rows = []
     for position in portfolio["positions"]:
         avg_price = position["avg_price"]
+        quote = (quotes or {}).get(position["symbol"])
+        last = quote.last if quote is not None and not quote.error else None
+        if last is not None and (not math.isfinite(last) or last <= 0):
+            last = None
+        market_value = position["qty"] * last if last is not None else None
+        if market_value is not None and not math.isfinite(market_value):
+            market_value = None
         portfolio_position_rows.append(
             "<tr>"
             f"<td><b>{html_escape(position['symbol'])}</b></td>"
             f"<td style='text-align:right'>{position['qty']:,.2f}</td>"
             f"<td style='text-align:right'>{'—' if avg_price is None else f'{avg_price:,.4f}'}</td>"
+            f"<td style='text-align:right'>{'--' if last is None else f'{last:,.4f}'}</td>"
+            f"<td style='text-align:right'>{'--' if market_value is None else f'{market_value:,.2f}'}</td>"
             f"<td style='text-align:right'>{position['account_count']:,}</td>"
             "</tr>"
         )
@@ -551,8 +562,10 @@ def render_account_details_page(
         f"<thead><tr><th>{html_escape(t(lang, 'symbol'))}</th>"
         f"<th style='text-align:right'>{html_escape(t(lang, 'qty'))}</th>"
         f"<th style='text-align:right' title='{html_escape(t(lang, 'weighted_avg_px'))}'>{html_escape(t(lang, 'avg_px'))}</th>"
+        f"<th style='text-align:right' title='{html_escape(t(lang, 'portfolio_last_help'))}'>{html_escape(t(lang, 'portfolio_last'))}</th>"
+        f"<th style='text-align:right' title='{html_escape(t(lang, 'portfolio_market_value_help'))}'>{html_escape(t(lang, 'portfolio_market_value'))}</th>"
         f"<th style='text-align:right'>{html_escape(t(lang, 'holding_accounts'))}</th></tr></thead>"
-        f"<tbody>{''.join(portfolio_position_rows) if portfolio_position_rows else '<tr><td colspan=4><em>—</em></td></tr>'}</tbody>"
+        f"<tbody>{''.join(portfolio_position_rows) if portfolio_position_rows else '<tr><td colspan=6><em>—</em></td></tr>'}</tbody>"
         "</table></div>"
         "</section>"
     )

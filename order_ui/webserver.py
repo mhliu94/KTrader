@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from trading_ui.services.activity_reporting import ActivityReporting, DEFAULT_REPORTING_DB
 
 from .config import default_config_path, load_config
 from .consumer import OrderStatusConsumer
@@ -28,6 +29,11 @@ class LoginBody(BaseModel):
     password: str = Field(min_length=1, max_length=4096)
 
 
+class TagBody(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    symbol: str = Field(min_length=1, max_length=64)
+
+
 def create_app(config_path=None, *, consumer_factory=OrderStatusConsumer, config=None):
     sessions = {}
 
@@ -35,14 +41,17 @@ def create_app(config_path=None, *, consumer_factory=OrderStatusConsumer, config
     async def lifespan(app):
         cfg = config if config is not None else load_config(config_path or default_config_path())
         app.state.config = cfg
-        app.state.store = OrderStore(cfg["accounts"], cfg["timezone"])
+        reporting = ActivityReporting(cfg.get("reporting_db_path", DEFAULT_REPORTING_DB))
+        app.state.reporting = reporting
+        app.state.store = OrderStore(cfg["accounts"], cfg["timezone"], reporting=reporting)
         consumer = consumer_factory(cfg["kafka"], app.state.store)
         app.state.consumer = consumer
-        consumer.start()
         try:
+            consumer.start()
             yield
         finally:
             consumer.stop()
+            reporting.close()
             sessions.clear()
 
     app = FastAPI(title="KTrader Orders", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -107,10 +116,35 @@ def create_app(config_path=None, *, consumer_factory=OrderStatusConsumer, config
     def orders(request: Request):
         username = user(request)
         cfg = app.state.config
-        return {**app.state.store.snapshot(), "username": username,
+        snapshot = app.state.store.snapshot()
+        tags = app.state.reporting.order_tags(snapshot["orders"])
+        for order in snapshot["orders"]:
+            order["tags"] = tags.get((order["account_id"], order["order_id"]), [])
+        return {**snapshot, "username": username,
+                "reporting": app.state.reporting.snapshot(cfg["accounts"]),
                 "refresh_interval_seconds": cfg["refresh_interval_seconds"], "statuses": STATUSES,
                 "accounts": [{"id": meta.id, "num_id": meta.num_id, "broker": meta.broker}
                              for meta in sorted(cfg["accounts"].values(), key=lambda meta: meta.num_id)]}
+
+    @app.post("/api/tags", status_code=201)
+    def start_tag(request: Request, body: TagBody):
+        user(request)
+        same_origin(request)
+        try:
+            tag_id = app.state.reporting.start_tag(body.name, body.symbol)
+        except ValueError as exc:
+            raise HTTPException(409 if "active tag" in str(exc) else 422, str(exc)) from exc
+        return {"id": tag_id}
+
+    @app.post("/api/tags/{tag_id}/stop")
+    def stop_tag(request: Request, tag_id: str):
+        user(request)
+        same_origin(request)
+        try:
+            app.state.reporting.stop_tag(tag_id)
+        except KeyError as exc:
+            raise HTTPException(404, "Tag not found.") from exc
+        return {"ok": True}
 
     return app
 

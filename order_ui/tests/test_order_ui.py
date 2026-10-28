@@ -48,7 +48,7 @@ def config_file(tmp_path):
         {"string_id": "HIDDEN", "numeric_id": 2, "broker": "Other", "trading_medium": "WEB", "hidden": True},
     ]}
     (tmp_path / "accounts.json").write_text(json.dumps(accounts))
-    config = {"accounts_file": "accounts.json", "auth": {"users": {
+    config = {"accounts_file": "accounts.json", "reporting": {"db_path": str(tmp_path / "reports.sqlite3")}, "auth": {"users": {
         "admin": {"password": "test-admin"}, "trader": {"password": "test-trader"},
         "extra": {"password": "test-extra"}}}, "kafka": {"bootstrap_servers": "shared-broker:9092"},
         "server": {"host": "other-host", "port": 8000, "ssl_enabled": True, "ssl_certfile": "missing.crt"}}

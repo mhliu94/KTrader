@@ -293,9 +293,9 @@ def _load_account_entries(cfg: Dict[str, Any]) -> tuple[List[Dict[str, Any]], bo
     return accounts, True
 
 
-def load_account_metas(cfg: Dict[str, Any]) -> Dict[str, AccountMeta]:
+def load_account_metas(cfg: Dict[str, Any], *, include_hidden: bool = False) -> Dict[str, AccountMeta]:
     accounts, require_static_fields = _load_account_entries(cfg)
-    return parse_account_metas(accounts, require_static_fields=require_static_fields)
+    return parse_account_metas(accounts, require_static_fields=require_static_fields, include_hidden=include_hidden)
 
 
 def parse_account_metas(

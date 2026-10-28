@@ -32,11 +32,15 @@ class SmartSellingRuntime:
         engine=None,
         clock=time.monotonic,
         wall_clock=time.time,
+        reporting=None,
     ):
         self.config = normalize_smart_selling_config(config)
         self.account_metas_provider = account_metas_provider
         self.snapshots_provider = snapshots_provider
         self.publish_command = publish_command
+        self._reporting = reporting
+        self._reported_sessions = set()
+        self._reported_terminal = set()
         self.fast_conflict = fast_conflict or (lambda account, symbol: False)
         self.fast_active = fast_active or (lambda: False)
         self.clock, self.wall_clock = clock, wall_clock
@@ -73,6 +77,73 @@ class SmartSellingRuntime:
         )
         self._pending = set()
         self._last_forecast = 0
+        self._sync_reporting()
+
+    def _report(self, method, *args, **kwargs):
+        if self._reporting is None:
+            return False
+        try:
+            getattr(self._reporting, method)(*args, **kwargs)
+            return True
+        except Exception:
+            LOGGER.exception("Failed updating Smart selling reporting method=%s", method)
+            return False
+
+    def _sync_reporting(self, parents=None, parameters=None):
+        if self._reporting is None:
+            return
+        try:
+            parents = parents if parents is not None else self.engine.list_parents(limit=1000)
+            for parent in parents:
+                session_id = parent["parent_id"]
+                if session_id not in self._reported_sessions:
+                    # Existing durable rows retain their original parameters on recovery.
+                    starting = {
+                        key: parent.get(key) for key in (
+                            "symbol", "quantity", "mode", "participation", "start",
+                            "deadline", "minimum_price", "child_cap",
+                        )
+                    }
+                    starting.update(
+                        account_ids=self._parent_accounts(parent),
+                        account_quantities={
+                            account: values["quantity"]
+                            for account, values in parent.get("accounts", {}).items()
+                        },
+                        trading_mode="G",
+                    )
+                    starting.update(parameters or {})
+                    if self._report(
+                        "start_session", session_id, starting, self._parent_accounts(parent),
+                        started_at=parent.get("start"),
+                    ):
+                        self._reported_sessions.add(session_id)
+                    # A recovered outstanding child can still receive late fills.
+                    order = parent.get("active_order")
+                    if order:
+                        self._report("register_command", session_id, {
+                            "account_id": order.get("account_id", parent["account_id"]),
+                            "symbol": parent["symbol"],
+                            "command_id": order["client_order_id"],
+                            "client_order_id": order["client_order_id"],
+                        })
+                if parent["active"]:
+                    state = str(parent["state"]).lower()
+                    if state != "stopping" and parent.get("order_state") == "RECONCILE":
+                        state = "reconciling"
+                    elif state == "hold" or (state == "running" and any(
+                        value != "live" for value in self.feeds.values()
+                    )):
+                        state = "paused"
+                    self._report("heartbeat_session", session_id, status=state)
+                elif session_id not in self._reported_terminal:
+                    if self._report(
+                        "end_session", session_id, status=str(parent["state"]).lower(),
+                        reason=parent.get("reason"),
+                    ):
+                        self._reported_terminal.add(session_id)
+        except Exception:
+            LOGGER.exception("Failed reading Smart selling sessions for reporting")
 
     def start(self):
         self._thread = threading.Thread(
@@ -208,7 +279,9 @@ class SmartSellingRuntime:
                 quote_max_age=self.config["quote_max_age"],
                 trade_max_age=self.config["trade_max_age"],
             )
-            return self.engine.start_parent(permitted)
+            parent = self.engine.start_parent(permitted)
+            self._sync_reporting([parent], parameters=permitted)
+            return parent
 
     @staticmethod
     def _parent_accounts(parent):
@@ -243,6 +316,7 @@ class SmartSellingRuntime:
         with self._lock:
             result = self.engine.request_stop(parent_id)
             self._dispatch(self.engine.drain_actions())
+            self._sync_reporting([self.engine.get_parent(parent_id)])
             return result
 
     def stop_all(self):
@@ -268,6 +342,7 @@ class SmartSellingRuntime:
         with self._lock:
             self.feedback.apply_snapshot(raw)
             self._dispatch(self.engine.drain_actions())
+            self._sync_reporting()
 
     def track_external_order(self, command):
         """A locally handed-off order remains uncertain until its status arrives."""
@@ -282,6 +357,7 @@ class SmartSellingRuntime:
             if state != "live":
                 for parent in self.engine.list_parents(active_only=True, limit=1000):
                     self.engine.set_feed_health(parent["symbol"], False, f"{feed} feed {state}")
+            self._sync_reporting()
 
     def tick(self):
         with self._lock:
@@ -320,6 +396,7 @@ class SmartSellingRuntime:
                         )
                 self._last_forecast = self.clock()
             self._dispatch(self.engine.tick())
+            self._sync_reporting()
 
     def _dispatch(self, actions):
         for action in actions:
@@ -374,6 +451,8 @@ class SmartSellingRuntime:
                 if any(context[key] != action[key] for key in identity):
                     return
             command = build_smart_selling_command(action, self.account_metas_provider())
+            if action["type"] == "submit":
+                self._report("register_command", action["parent_id"], dict(command))
             publish_started = True
             self.publish_command(command, action["account_id"])
         except Exception as exc:
@@ -386,6 +465,8 @@ class SmartSellingRuntime:
             else:
                 LOGGER.exception("Smart selling %s dispatch uncertain", action["type"])
                 self.engine.on_action_error(action["client_order_id"], action["type"], str(exc))
+        finally:
+            self._sync_reporting()
 
     def close(self):
         self.stop_all()

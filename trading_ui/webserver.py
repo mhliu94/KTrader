@@ -33,6 +33,8 @@ from .templates import (
     render_trading_status_page,
 )
 from .services.operations_log import OperationsLog
+from .services.activity_reporting import ActivityReporting, reporting_db_path
+from .services.system_snapshots import SystemSnapshotRecorder
 from .services.orders import (
     validate_order_inputs,
     validate_quick_order_inputs,
@@ -71,6 +73,8 @@ SMART_SELLING_MANAGER = None
 SMART_SELLING_CONSUMER = None
 ALGO_CONTROL_LOCK = threading.RLock()
 OPERATIONS_LOG = None
+ACTIVITY_REPORTING = None
+SYSTEM_SNAPSHOTS = None
 
 MD_STORE = MarketDataStore()
 HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
@@ -328,8 +332,16 @@ def _require_auth_api(request: Request):
 
 @app.on_event("startup")
 def on_startup() -> None:
+    try:
+        _start_services()
+    except BaseException:
+        on_shutdown()
+        raise
+
+
+def _start_services() -> None:
     global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG, HIST_CLOSE_STORE
-    global SMART_SELLING_MANAGER, SMART_SELLING_CONSUMER
+    global SMART_SELLING_MANAGER, SMART_SELLING_CONSUMER, ACTIVITY_REPORTING, SYSTEM_SNAPSHOTS
 
     server_started_at = datetime.now(timezone.utc)
     config_path = os.getenv("ACCOUNT_DASHBOARD_CONFIG", "./trading_ui/sample/config.json")
@@ -346,8 +358,17 @@ def on_startup() -> None:
     )
     LOGGER.info("operations log path=%s", OPERATIONS_LOG.path)
 
-    ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store, ACCOUNT_METAS)
+    # Archive every configured trade account, including accounts hidden in the UI.
+    snapshot_metas = load_account_metas(APP_CONFIG, include_hidden=True)
+    db_path = reporting_db_path(APP_CONFIG, config_path)
+    ACTIVITY_REPORTING = ActivityReporting(db_path)
+    SYSTEM_SNAPSHOTS = SystemSnapshotRecorder(
+        db_path, accounts_provider=lambda: snapshot_metas,
+        snapshots_provider=lambda: (store.get_all(), "kafka"),
+    )
+    ACCOUNT_CONSUMER = AccountDetailsConsumer(APP_CONFIG["kafka"], store, snapshot_metas)
     ACCOUNT_CONSUMER.start()
+    SYSTEM_SNAPSHOTS.start()
 
     COMMANDS_PRODUCER = TradingCommandsProducer(APP_CONFIG["kafka"])
     FAST_TRADING_MANAGER = FastTradingStrategyManager(
@@ -355,12 +376,14 @@ def on_startup() -> None:
         account_metas_provider=lambda: ACCOUNT_METAS,
         account_snapshots_provider=lambda: get_served_snapshots()[0],
         operations_log=OPERATIONS_LOG,
+        reporting=ACTIVITY_REPORTING,
         publish_command=_publish_fast_trading_command,
         fast_trading_settings=APP_CONFIG.get("fast_trading"),
     )
     if APP_CONFIG["smart_selling"]["enabled"]:
         SMART_SELLING_MANAGER = SmartSellingRuntime(
             APP_CONFIG["smart_selling"],
+            reporting=ACTIVITY_REPORTING,
             account_metas_provider=lambda: ACCOUNT_METAS,
             snapshots_provider=lambda: get_served_snapshots()[0],
             publish_command=_publish_trading_command,
@@ -385,20 +408,28 @@ def on_startup() -> None:
 
 @app.on_event("shutdown")
 def on_shutdown() -> None:
-    if FAST_TRADING_MANAGER:
-        FAST_TRADING_MANAGER.stop_all()
-    if SMART_SELLING_MANAGER:
-        SMART_SELLING_MANAGER.stop_all()
-    if ACCOUNT_CONSUMER:
-        ACCOUNT_CONSUMER.stop()
-    if MARKET_DATA_CONSUMER:
-        MARKET_DATA_CONSUMER.stop()
-    if SMART_SELLING_CONSUMER:
-        SMART_SELLING_CONSUMER.stop()
-    if SMART_SELLING_MANAGER:
-        SMART_SELLING_MANAGER.close()
-    if COMMANDS_PRODUCER:
-        COMMANDS_PRODUCER.flush(2.0)
+    global SYSTEM_SNAPSHOTS, FAST_TRADING_MANAGER, SMART_SELLING_MANAGER
+    global ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, SMART_SELLING_CONSUMER, COMMANDS_PRODUCER, ACTIVITY_REPORTING
+    # Also used after partial startup. One failing service must not strand others.
+    for service, method, args in (
+        (SYSTEM_SNAPSHOTS, "stop", ()),
+        (FAST_TRADING_MANAGER, "stop_all", ()),
+        (SMART_SELLING_MANAGER, "stop_all", ()),
+        (ACCOUNT_CONSUMER, "stop", ()),
+        (MARKET_DATA_CONSUMER, "stop", ()),
+        (SMART_SELLING_CONSUMER, "stop", ()),
+        (SMART_SELLING_MANAGER, "close", ()),
+        (COMMANDS_PRODUCER, "flush", (2.0,)),
+        (ACTIVITY_REPORTING, "close", ()),
+    ):
+        if service is not None:
+            try:
+                getattr(service, method)(*args)
+            except Exception:
+                LOGGER.exception("Failed shutting down %s.%s", type(service).__name__, method)
+    SYSTEM_SNAPSHOTS = FAST_TRADING_MANAGER = SMART_SELLING_MANAGER = None
+    ACCOUNT_CONSUMER = MARKET_DATA_CONSUMER = SMART_SELLING_CONSUMER = None
+    COMMANDS_PRODUCER = ACTIVITY_REPORTING = None
 
 
 @app.get("/set-lang")

@@ -1,7 +1,7 @@
 # KTrader Order UI
 
-A separate, read-only FastAPI server showing today's orders across the same
-visible trading accounts as `trading_ui`. The browser fetches updates every two
+A separate FastAPI server showing today's orders, algorithm sessions, and
+symbol tags across the same visible trading accounts as `trading_ui`. The browser fetches updates every two
 seconds without page reloads. It includes account/status/search filters, fill
 information, order IDs, messages, and Kafka connection/replay status.
 
@@ -67,7 +67,8 @@ language changes preserve the current page; a shorter result set moves to the
 last available page, and a new trading date returns to page one. Time, quantity,
 limit/stop price, and average fill price use larger, bold numerals.
 
-This process starts only the order consumer and web server. No orders can be
+This process starts the order consumer and web server, and stores reporting
+history and tag controls in a shared local SQLite database. No orders can be
 placed, amended, or canceled through it. The existing trading UI can run at the
 same time on its own port.
 
@@ -133,6 +134,74 @@ overridden here. Use credentials with read access to the topic and group access
 to the configured prefix. Use HTTPS directly or through your existing reverse
 proxy when serving authenticated users over a network.
 
+## System snapshots, algorithm sessions, and tags
+
+Restart both the trading UI and order UI after installing this change. Both
+processes must use the same local database. The default is
+`reports/activity.sqlite3` under the repository root, independent of the current
+working directory. To override it, add this **top-level** object to their shared
+configuration (relative paths resolve against that configuration file):
+
+```json
+{"reporting": {"db_path": "../../reports/activity.sqlite3"}}
+```
+
+Both service users need write access to the database directory. The database uses
+SQLite WAL and a busy timeout for concurrent local access. Keep these services on
+the same host, or configure an appropriate shared local deployment; this is not a
+cross-host reporting transport. Runtime databases are ignored by Git. Data has no
+automatic expiration; include the database in backups and plan disk retention.
+
+The **trading UI** records a system snapshot immediately at startup and every
+60 seconds while running. Every configured trade account, including hidden
+accounts, receives an entry containing holdings, cash and available cash by
+currency, and the broker snapshot timestamp. Missing/invalid account data is
+marked explicitly with null balances; stale data retains its original timestamp
+and age. These are captures of the latest account-details feed, not synchronous
+broker queries. Hidden accounts remain excluded from browser reporting.
+
+Snapshots are JSON documents in SQLite's `system_snapshots` table. For example,
+inspect the latest document without changing it:
+
+```sh
+sqlite3 reports/activity.sqlite3 'SELECT payload FROM system_snapshots ORDER BY id DESC LIMIT 1;'
+```
+
+The **Algo sessions** tab shows fast trading (E/F) and Smart selling (G) sessions,
+the original starting parameters, lifecycle status, each selected account
+(including accounts with no executions), and aggregate shares bought/sold and
+signed cash change. Child commands are correlated with confirmed order snapshots;
+requested quantities and test-mode commands do not count as executions. Completed
+sessions remain available. A missing heartbeat for over 90 seconds shows an
+unknown status instead of claiming that the session is still running. Smart
+selling can restore reporting for its durable sessions after a restart; fast
+sessions interrupted by a crash remain unknown without a confirmed end event.
+
+The **Tags** tab lets any authenticated order UI user start a custom tag name
+and symbol, or stop the active tag. One tag can be active at a time. Symbols are
+case-normalized. A tag attaches to all visible accounts' orders whose original
+`created_at` falls in `[tag start, tag stop)` for that symbol. Existing orders
+created before the period are excluded. Tags survive restarts; stopping closes
+the period and preserves its history. Later fills and broker corrections on an
+already tagged order continue updating that tag. Recent orders also display and
+search their tag names. Tag reports include only accounts with filled shares,
+with separate buys, sells, buying cost, selling proceeds, and all-account totals.
+
+Cash is gross executed value (`filled_quantity × average_fill_price`), excluding
+fees, taxes, currency conversion, deposits, and other cash movements. Totals are
+separated by currency. Missing fill prices or currencies make affected amounts
+unknown; they are never replaced by limit prices or assumed USD. Increasing
+snapshot sequences replace cumulative fills, so duplicate replay, partial fills,
+and corrected fills do not double-count. Reports retain orders across midnight,
+while Recent orders keeps its existing creation-date filter. Reports require the
+order-status publisher contract below, including its fill data and correlation
+IDs; Kafka outages and replay warnings also apply to reporting totals.
+
+Authenticated APIs: `GET /api/orders` includes `reporting.sessions`,
+`reporting.tags`, and `reporting.active_tag_id`; `POST /api/tags` accepts
+`{"name":"Opening buys","symbol":"AAPL"}`; `POST /api/tags/{id}/stop` closes the
+period. Mutations require the existing same-origin `X-Order-UI-Request: 1` header.
+
 ## Kafka publisher contract
 
 The machine-readable contract is
@@ -163,6 +232,10 @@ authoritative; the consumer can still read snapshots with a missing key.
 | `quantity` | Positive number of shares/units. For an amount-based order with unknown quantity, use `null` and provide positive `notional`. |
 | `filled_quantity` | Cumulative filled shares/units, not the size of the latest fill; nonnegative and no larger than a known quantity. |
 | `average_fill_price` | Cumulative weighted average fill price, nonnegative or `null` when unavailable/unfilled. |
+
+For algorithm attribution, publishers must echo `command_id` or `client_order_id`
+from the originating command. Orders without either correlation ID still appear
+in Recent orders and tag reports, but are not guessed into an algorithm session.
 
 Optional fields: `account_num_id` (must match the configured numeric ID),
 `limit_price`, `stop_price`, `notional`, `currency` (three uppercase letters),
@@ -245,8 +318,9 @@ to populate it. No placement success is inferred from trading commands.
   increment it for changed snapshots. Prior-day, future-day, unknown, and hidden
   account events are ignored.
 - Run one Uvicorn worker per server instance. State and login sessions are in
-  memory. Separate instances receive all partitions, but do not share sessions;
-  a multi-instance proxy needs sticky sessions. No database is required.
+  memory. Separate instances receive all partitions, but do not share login sessions;
+  a multi-instance proxy needs sticky sessions. Order reporting, algorithm sessions,
+  tags, and system snapshots are durable SQLite data, independent of the daily table.
 - The UI shows stale/connection warnings during outages and retries automatically.
   Recovery is best effort within the topic's retention window. The authenticated
   `GET /api/orders` endpoint includes the current date, timezone, order snapshots,

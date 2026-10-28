@@ -8,10 +8,11 @@ from .events import OrderEvent
 
 
 class OrderStore:
-    def __init__(self, accounts, timezone_name: str, now=None):
+    def __init__(self, accounts, timezone_name: str, now=None, reporting=None):
         self.accounts = dict(accounts)
         self.zone = ZoneInfo(timezone_name)
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self.reporting = reporting
         self._lock = RLock()
         self._orders = {}
         self._day = self._now().astimezone(self.zone).date()
@@ -41,11 +42,18 @@ class OrderStore:
         with self._lock:
             today = self._rollover()
             meta = self.accounts.get(data["account_id"])
-            if meta is None or event.created_at.astimezone(self.zone).date() != today:
+            if meta is None:
                 self._feed["ignored_messages"] += 1
                 return False
             if data.get("account_num_id", meta.num_id) != meta.num_id:
                 raise ValueError("account_num_id does not match the configured account_id.")
+            event_day = event.created_at.astimezone(self.zone).date()
+            # Reports span dates; late fills on a tagged order remain reportable.
+            if self.reporting is not None and event_day <= today:
+                self.reporting.record_order(event)
+            if event_day != today:
+                self._feed["ignored_messages"] += 1
+                return False
             key = (meta.id, data["order_id"])
             previous = self._orders.get(key)
             if previous:

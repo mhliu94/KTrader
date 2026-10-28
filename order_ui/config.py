@@ -6,6 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from trading_ui.config import load_account_metas, load_json_file
+from trading_ui.services.activity_reporting import reporting_db_path
 
 
 def default_config_path() -> Path:
@@ -118,4 +119,5 @@ def load_config(path: str | Path) -> dict:
             client_config[key] = str(path.parent / value)
     kafka["client_config"] = client_config
     return {"accounts": accounts, "users": users, "timezone": zone,
-            "refresh_interval_seconds": refresh, "server": server, "kafka": kafka}
+            "refresh_interval_seconds": refresh, "server": server, "kafka": kafka,
+            "reporting_db_path": reporting_db_path(shared, path)}

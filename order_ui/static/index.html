@@ -31,8 +31,14 @@
     </section>
     <p id="loading" role="status" data-i18n="connecting_dashboard">Connecting to your order dashboard…</p>
     <section id="dashboard" hidden>
-      <div class="page-heading"><div><p class="eyebrow" data-i18n="monitor">ORDER MONITOR</p><h1 data-i18n="today_orders">Today's orders</h1><p id="day" class="muted"></p></div><span id="feed-status" class="feed" role="status" data-i18n="connecting">Connecting</span></div>
+      <div class="page-heading"><div><p class="eyebrow" data-i18n="monitor">ORDER MONITOR</p><h1 id="dashboard-title" data-i18n="today_orders">Today's orders</h1><p id="day" class="muted"></p></div><span id="feed-status" class="feed" role="status" data-i18n="connecting">Connecting</span></div>
       <div id="notice" class="notice" role="status" hidden></div>
+      <nav class="report-tabs" role="tablist" aria-label="Order reports" data-i18n-label="report_tabs">
+        <button id="tab-orders" type="button" role="tab" aria-selected="true" aria-controls="panel-orders" data-tab="orders" data-i18n="recent_orders">Recent orders</button>
+        <button id="tab-algo" type="button" role="tab" aria-selected="false" aria-controls="panel-algo" tabindex="-1" data-tab="algo" data-i18n="algo_sessions">Algo sessions</button>
+        <button id="tab-tags" type="button" role="tab" aria-selected="false" aria-controls="panel-tags" tabindex="-1" data-tab="tags" data-i18n="tags">Tags</button>
+      </nav>
+      <section id="panel-orders" role="tabpanel" aria-labelledby="tab-orders" tabindex="0">
       <div class="metrics">
         <div><span data-i18n="all_orders">All orders</span><strong id="total">0</strong></div>
         <div><span data-i18n="working">Working</span><strong id="working">0</strong></div>
@@ -62,6 +68,34 @@
           </tr></thead><tbody id="orders"></tbody></table>
         </div>
         <div id="empty" class="empty" hidden><strong id="empty-title" data-i18n="no_orders">No orders today</strong><p id="empty-detail" data-i18n="new_orders">New orders will appear here automatically.</p></div>
+      </section>
+      </section>
+      <section id="panel-algo" class="report-panel" role="tabpanel" aria-labelledby="tab-algo" tabindex="0" hidden>
+        <div class="report-heading"><h2 data-i18n="algo_sessions">Algo sessions</h2><span id="algo-current" class="feed" role="status"></span></div>
+        <p class="muted" data-i18n="algo_description">Starting parameters and confirmed executions across every participating account.</p>
+        <label class="report-selector"><span data-i18n="select_session">Session</span><select id="algo-select"></select></label>
+        <p id="algo-empty" class="empty" data-i18n="no_sessions">No algorithm sessions recorded yet.</p>
+        <div id="algo-report" hidden>
+          <div id="algo-summary" class="report-summary"></div>
+          <details class="parameters" open><summary data-i18n="starting_parameters">Starting parameters</summary><dl id="algo-parameters"></dl></details>
+          <div id="algo-accounts" class="table-scroll"></div>
+        </div>
+        <p class="report-note" data-i18n="cash_note">Cash amounts use confirmed fills before fees. Currencies are shown separately; missing prices or currencies are marked incomplete.</p>
+      </section>
+      <section id="panel-tags" class="report-panel" role="tabpanel" aria-labelledby="tab-tags" tabindex="0" hidden>
+        <div class="report-heading"><h2 data-i18n="tags">Tags</h2><span id="tag-current" class="feed" role="status"></span></div>
+        <p class="muted" data-i18n="tag_description">Tag orders created for a symbol while the tag is active. Existing tagged orders keep updating as fills arrive after tagging stops.</p>
+        <form id="tag-form" class="tag-controls">
+          <label><span data-i18n="tag_name">Tag name</span><input id="tag-name" required maxlength="100" autocomplete="off"></label>
+          <label><span data-i18n="symbol">Symbol</span><input id="tag-symbol" required maxlength="64" autocomplete="off" autocapitalize="characters" placeholder="AAPL"></label>
+          <button id="tag-start" class="primary" type="submit" data-i18n="start_tagging">Start tagging</button>
+          <button id="tag-stop" class="quiet" type="button" data-i18n="stop_tagging" hidden>Stop tagging</button>
+        </form>
+        <p id="tag-error" class="error" role="alert"></p>
+        <label class="report-selector"><span data-i18n="select_tag">Tag period</span><select id="tag-select"></select></label>
+        <p id="tag-empty" class="empty" data-i18n="no_tags">No tag periods recorded yet.</p>
+        <div id="tag-report" hidden><div id="tag-summary" class="report-summary"></div><div id="tag-accounts" class="table-scroll"></div></div>
+        <p class="report-note" data-i18n="cash_note">Cash amounts use confirmed fills before fees. Currencies are shown separately; missing prices or currencies are marked incomplete.</p>
       </section>
       <footer><span data-i18n="footer">Read-only order status · Latest updates first</span><span id="refresh-note"></span></footer>
     </section>

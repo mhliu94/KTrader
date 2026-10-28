@@ -3,6 +3,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -505,11 +506,13 @@ class FastTradingStrategyManager:
         operations_log: Optional[OperationsLog] = None,
         fast_trading_settings: Optional[Mapping[str, Any]] = None,
         monotonic: Callable[[], float] = time.monotonic,
+        reporting=None,
     ) -> None:
         self._market_data_store = market_data_store
         self._account_metas_provider = account_metas_provider
         self._account_snapshots_provider = account_snapshots_provider
         self._operations_log = operations_log
+        self._reporting = reporting
         self._publish_command = publish_command
         self._settings = _runtime_settings(fast_trading_settings)
         self._monotonic = monotonic
@@ -603,6 +606,8 @@ class FastTradingStrategyManager:
     def start_strategy(self, start_command: Dict[str, Any]) -> str:
         mode, symbol, _, _, book_levels, target_percentage, cycle_seconds = self._validated_strategy_values(start_command)
         strategy_command = dict(start_command)
+        if self._reporting is not None and not strategy_command.get("command_id"):
+            strategy_command["command_id"] = uuid.uuid4().hex
         key = self._strategy_key(mode, symbol)
 
         strategy = _FastStrategy(
@@ -622,11 +627,20 @@ class FastTradingStrategyManager:
             if self.has_active_session():
                 raise ValueError("Stop the existing algorithm session before starting another")
             self._strategies[key] = strategy
+            self._report(
+                "start_session", strategy.command.get("command_id"),
+                dict(strategy.command), sorted(self._strategy_accounts(strategy.command)),
+                started_at=strategy.started_at,
+            )
             self._record_strategy_started(strategy)
             try:
                 thread.start()
             except BaseException:
                 self._strategies.pop(key, None)
+                self._report(
+                    "end_session", strategy.command.get("command_id"),
+                    status="failed", reason="Strategy worker failed to start",
+                )
                 raise
         LOGGER.info(
             "Algo trading started successfully mode=%s symbol=%s key=%s command_id=%s "
@@ -676,6 +690,7 @@ class FastTradingStrategyManager:
                     strategy.last_reason = reason
                     strategy.stop_event.set()
                     self._stopping_strategies[key] = strategy
+                    self._report("heartbeat_session", strategy.command.get("command_id"), status="stopping")
                     strategies.append(strategy)
 
         for strategy in strategies:
@@ -693,6 +708,27 @@ class FastTradingStrategyManager:
                 reason,
             )
         return len(strategies)
+
+    def _report(self, method, *args, **kwargs):
+        if self._reporting is None:
+            return
+        try:
+            getattr(self._reporting, method)(*args, **kwargs)
+        except Exception:
+            LOGGER.exception("Failed updating algorithm reporting method=%s", method)
+
+    def _wait_for_cycle(self, strategy, seconds):
+        if self._reporting is None:
+            return strategy.stop_event.wait(seconds)
+        deadline = self._monotonic() + seconds
+        while not strategy.stop_event.is_set():
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return False
+            self._report("heartbeat_session", strategy.command.get("command_id"))
+            if strategy.stop_event.wait(min(10.0, remaining)):
+                return True
+        return True
 
     def _record_strategy_started(self, strategy: _FastStrategy) -> None:
         if self._operations_log is None:
@@ -732,6 +768,7 @@ class FastTradingStrategyManager:
         try:
             _, _, _, _, _, _, cycle_seconds = self._validated_strategy_values(strategy.command)
             while not strategy.stop_event.is_set():
+                self._report("heartbeat_session", strategy.command.get("command_id"))
                 cycle_start = self._monotonic()
                 result = self.run_cycle(strategy.command)
                 test_mode = _truthy_bool(strategy.command.get("fast_trading_test_mode"))
@@ -765,7 +802,7 @@ class FastTradingStrategyManager:
                     break
 
                 elapsed = self._monotonic() - cycle_start
-                if strategy.stop_event.wait(max(0.0, cycle_seconds - elapsed)):
+                if self._wait_for_cycle(strategy, max(0.0, cycle_seconds - elapsed)):
                     break
         except Exception:
             with self._lock:
@@ -787,6 +824,10 @@ class FastTradingStrategyManager:
                 reason=reason,
                 cycles=cycles,
                 published_commands=published_commands,
+            )
+            self._report(
+                "end_session", strategy.command.get("command_id"),
+                status="failed" if reason == "Strategy error" else "stopped", reason=reason,
             )
 
     def run_cycle(self, command: Dict[str, Any]) -> FastTradingCycleResult:
@@ -842,6 +883,8 @@ class FastTradingStrategyManager:
                         _command_json(cmd),
                     )
                 else:
+                    if command.get("command_id"):
+                        self._report("register_command", command["command_id"], dict(cmd))
                     LOGGER.info("Publishing fast trading command key=%s command=%s", key, _command_json(cmd))
                     self._publish_command(cmd, key)
 

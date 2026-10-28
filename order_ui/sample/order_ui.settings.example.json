@@ -1,4 +1,5 @@
 {
+  "reporting": {"db_path": "../../reports/activity.sqlite3"},
   "order_ui": {
     "timezone": "America/New_York",
     "refresh_interval_seconds": 2,

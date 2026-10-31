@@ -7,6 +7,9 @@ from typing import Dict, Optional, Tuple, List
 from ..models import AccountMeta
 
 
+FAST_TRADING_TARGET_PERCENTAGE_CHOICES = (*range(10, 101, 10), 120, 150)
+
+
 def iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -512,7 +515,7 @@ def parse_fast_trading_settings(
     selections: Dict[str, int] = {}
     for field, choices, error in (
         ("book_levels", (1, 2, 3, 4, 5), fast_book_levels_invalid),
-        ("target_percentage", tuple(range(10, 101, 10)), fast_target_percentage_invalid),
+        ("target_percentage", FAST_TRADING_TARGET_PERCENTAGE_CHOICES, fast_target_percentage_invalid),
         ("cycle_seconds", (5, 10, 15, 30, 60), fast_cycle_seconds_invalid),
     ):
         try:

@@ -63,6 +63,10 @@ class AccountLiveUpdateTests(unittest.TestCase):
         self.assertEqual(source, "kafka")
 
     def test_store_update_emits_fresh_account_details_event(self):
+        webserver.MD_STORE.upsert_stock_quote(StockQuote(
+            symbol="TSLA", last=125, trade_time=1_700_000_000, observed_at=1_700_000_001,
+        ))
+
         async def exercise_stream() -> tuple[dict, dict]:
             webserver.store.upsert(
                 AccountSnapshot(
@@ -91,8 +95,10 @@ class AccountLiveUpdateTests(unittest.TestCase):
         first, updated = asyncio.run(exercise_stream())
         self.assertIn("$100.00", first["html"])
         self.assertIn("5.00", first["html"])
+        self.assertIn("id='portfolio-market-value-total'>625.00</div>", first["html"])
         self.assertIn("$250.00", updated["html"])
         self.assertIn("8.00", updated["html"])
+        self.assertIn("id='portfolio-market-value-total'>1,000.00</div>", updated["html"])
         self.assertIn("data-account-order='market'", updated["html"])
         self.assertIn("data-account-order='limit'", updated["html"])
         self.assertNotEqual(first["html"], updated["html"])
@@ -138,8 +144,10 @@ class AccountLiveUpdateTests(unittest.TestCase):
 
         self.assertIn("100.0000", first["html"])
         self.assertIn("1,000.00", first["html"])
+        self.assertIn("id='portfolio-market-value-total'>1,000.00</div>", first["html"])
         self.assertIn("125.0000", updated["html"])
         self.assertIn("1,250.00", updated["html"])
+        self.assertIn("id='portfolio-market-value-total'>1,250.00</div>", updated["html"])
         self.assertEqual(heartbeat, ": keep-alive\n\n")
 
     def test_stream_route_requires_auth_and_disables_proxy_buffering(self):

@@ -337,6 +337,67 @@ class FastTradingCycleTests(unittest.TestCase):
                     self.assertEqual(command["fast_trading_target_qty"], 302)
                     self.assertEqual(command["type"], "LIMIT_ORDER_FOK")
 
+    def test_oversized_targets_preserve_depth_price_limits_rounding_and_allocation(self):
+        for mode, prices in (("E", (8, 9, 11, 12)), ("F", (12, 11, 9, 8))):
+            for percentage, target_qty, per_account_qty in ((120, 1211, 605), (150, 1514, 757)):
+                with self.subTest(mode=mode, percentage=percentage):
+                    levels = [
+                        BookLevel(price=price, quantity=quantity)
+                        for price, quantity in zip(prices, (501.4, 508.5, 1000, 2000))
+                    ]
+                    result = build_cycle(
+                        mode=mode,
+                        book=OrderBookSnapshot(
+                            symbol="AAPL",
+                            bids=levels if mode == "F" else [],
+                            asks=levels if mode == "E" else [],
+                        ),
+                        price_limit=10,
+                        account_ids=["A", "B"],
+                        book_levels=3,
+                        target_percentage=percentage,
+                        account_snapshots=snapshots(
+                            A={"cash": 20000, "positions": [("AAPL", 2000)]},
+                            B={"cash": 20000, "positions": [("AAPL", 2000)]},
+                        ),
+                    )
+
+                    self.assertEqual(result.total_resting_qty, 1009)
+                    self.assertEqual(result.target_quantity, target_qty)
+                    self.assertEqual(result.limit_price, 10)
+                    self.assertEqual(result.allocated_quantity, per_account_qty * 2)
+                    self.assertEqual([cmd["qty_shares"] for cmd in result.commands], [per_account_qty] * 2)
+                    for command in result.commands:
+                        self.assertEqual(command["side"], "BUY" if mode == "E" else "SELL")
+                        self.assertEqual(command["fast_trading_target_percentage"], percentage)
+                        self.assertEqual(command["fast_trading_target_qty"], target_qty)
+                        self.assertEqual(command["type"], "LIMIT_ORDER_FOK")
+                        self.assertEqual(command["limit_price"], 10)
+
+    def test_oversized_targets_require_capacity_for_the_full_scaled_quantity(self):
+        for mode in ("E", "F"):
+            for percentage in (120, 150):
+                with self.subTest(mode=mode, percentage=percentage):
+                    levels = [BookLevel(price=10, quantity=1000)]
+                    result = build_cycle(
+                        mode=mode,
+                        book=OrderBookSnapshot(symbol="AAPL", bids=levels, asks=levels),
+                        price_limit=10,
+                        account_ids=["A"],
+                        book_levels=1,
+                        target_percentage=percentage,
+                        account_snapshots=snapshots(A={
+                            "cash": 20000,
+                            "available_cash_by_currency": {"USD": 10000},
+                            "positions": [("AAPL", 2000, 1000)],
+                        }),
+                    )
+
+                    self.assertEqual(result.target_quantity, percentage * 10)
+                    self.assertEqual(result.commands, [])
+                    self.assertEqual(result.reason, "no_account_capacity")
+                    self.assertTrue(result.capacity_noop)
+
     def test_target_percentage_is_applied_before_rounding_whole_shares(self):
         result = build_cycle(
             mode="E",
@@ -968,22 +1029,30 @@ class FastTradingManagerTests(unittest.TestCase):
                 self.assertEqual(result.commands[0]["fast_trading_book_levels"], book_levels)
                 self.assertNotIn("fast_trading_aggression_level", result.commands[0])
 
-        for percentage in range(10, 101, 10):
-            with self.subTest(percentage=percentage):
-                store = MarketDataStore()
-                store.upsert_book(OrderBookSnapshot(
-                    symbol="AAPL", bids=[], asks=[BookLevel(price=10, quantity=1000)],
-                ))
-                manager = FastTradingStrategyManager(
-                    market_data_store=store,
-                    account_metas_provider=lambda: metas("A"),
-                    publish_command=lambda command, key: None,
-                )
+        for mode in ("E", "F"):
+            for percentage in (*range(10, 101, 10), 120, 150):
+                with self.subTest(mode=mode, percentage=percentage):
+                    store = MarketDataStore()
+                    levels = [BookLevel(price=10, quantity=1000)]
+                    store.upsert_book(OrderBookSnapshot(symbol="AAPL", bids=levels, asks=levels))
+                    publish = Mock()
+                    manager = FastTradingStrategyManager(
+                        market_data_store=store,
+                        account_metas_provider=lambda: metas("A"),
+                        account_snapshots_provider=lambda: snapshots(
+                            A={"cash": 20000, "positions": [("AAPL", 2000)]},
+                        ),
+                        publish_command=publish,
+                    )
 
-                result = manager.run_cycle(strategy_command(target_percentage=percentage))
+                    result = manager.run_cycle({
+                        **strategy_command(target_percentage=percentage), "trading_mode": mode,
+                    })
 
-                self.assertEqual(result.commands[0]["qty_shares"], percentage * 10)
-                self.assertEqual(result.commands[0]["fast_trading_target_percentage"], percentage)
+                    self.assertEqual(result.commands[0]["qty_shares"], percentage * 10)
+                    self.assertEqual(result.commands[0]["fast_trading_target_percentage"], percentage)
+                    self.assertEqual(result.commands[0]["side"], "BUY" if mode == "E" else "SELL")
+                    publish.assert_called_once_with(result.commands[0], "A")
 
     def test_manager_rejects_missing_or_invalid_controls_before_starting_or_publishing(self):
         publish = Mock()
@@ -994,7 +1063,7 @@ class FastTradingManagerTests(unittest.TestCase):
         )
         invalid_values = {
             "fast_trading_book_levels": [None, "", 0, 6, 1.5, True],
-            "fast_trading_target_percentage": [None, "", 0, 15, 110, True],
+            "fast_trading_target_percentage": [None, "", 0, 15, 110, 130, 140, 151, 120.5, 150.5, True],
             "fast_trading_cycle_seconds": [None, "", 0, 1, 20, 120, True],
         }
         for field, values in invalid_values.items():

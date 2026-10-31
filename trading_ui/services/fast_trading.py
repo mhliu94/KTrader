@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from ..models import AccountMeta, AccountSnapshot
 from .market_data import BookLevel, MarketDataStore, OrderBookSnapshot
 from .operations_log import OperationsLog
-from .orders import build_limit_order_fok_command
+from .orders import FAST_TRADING_TARGET_PERCENTAGE_CHOICES, build_limit_order_fok_command
 
 
 LOGGER = logging.getLogger("trading-ui.fast-trading")
@@ -19,7 +19,6 @@ FAST_TRADING_MODES = {"E", "F"}
 FAST_MIN_EXECUTABLE_SHARES = 100
 FAST_MAX_BOOK_LEVELS = 20
 FAST_TRADING_BOOK_LEVEL_CHOICES = (1, 2, 3, 4, 5)
-FAST_TRADING_TARGET_PERCENTAGE_CHOICES = tuple(range(10, 101, 10))
 FAST_TRADING_CYCLE_SECONDS_CHOICES = (5, 10, 15, 30, 60)
 FAST_MAX_CONSECUTIVE_CAPACITY_NOOPS = 10
 FAST_TRADING_DEFAULT_SETTINGS: Dict[str, Any] = {

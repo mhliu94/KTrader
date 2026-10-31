@@ -29,7 +29,7 @@ class FastTradingUiTests(unittest.TestCase):
         self.assertIn("data-fast-account-id='B'", html)
         for prefix, choices in (
             ("fast-book-levels", range(1, 6)),
-            ("fast-target-percentage", range(10, 101, 10)),
+            ("fast-target-percentage", (*range(10, 101, 10), 120, 150)),
             ("fast-cycle-seconds", (5, 10, 15, 30, 60)),
         ):
             for value in choices:
@@ -194,6 +194,34 @@ class FastTradingApiPayloadTests(unittest.TestCase):
         self.assertEqual(command["fast_trading_target_percentage"], 10)
         self.assertEqual(command["fast_trading_cycle_seconds"], 5)
         self.assertNotIn("price_target", command)
+
+    def test_both_endpoints_accept_oversized_targets_for_both_fast_modes(self):
+        client = TestClient(webserver.app)
+        try:
+            client.cookies.set("auth_token", "token")
+            for mode in ("E", "F"):
+                for percentage in (120, 150):
+                    with self.subTest(mode=mode, percentage=percentage):
+                        config = {"price_limit": 10, "account_ids": ["A"], "book_levels": 2,
+                                  "target_percentage": str(percentage), "cycle_seconds": 5}
+                        response = client.post(
+                            "/api/submit-algo",
+                            json={"trading_mode": mode, "symbol": "AAPL", "fast_trading_config": config},
+                        )
+                        self.assertEqual(response.status_code, 200)
+                        self.assertEqual(response.json()["command"]["fast_trading_target_percentage"], percentage)
+                        self.assertEqual(self.started_commands[-1]["trading_mode"], mode)
+                        response = client.post(
+                            "/submit-algo",
+                            data={"trading_mode": mode, "symbol": "AAPL", "fast_trading_config": json.dumps(config)},
+                            follow_redirects=False,
+                        )
+                        self.assertEqual(response.status_code, 303)
+                        self.assertEqual(self.started_commands[-1]["trading_mode"], mode)
+                        self.assertEqual(self.started_commands[-1]["fast_trading_target_percentage"], percentage)
+        finally:
+            client.close()
+        self.assertEqual(len(self.started_commands), 8)
 
     def test_both_endpoints_reject_missing_or_invalid_controls_without_starting_strategy(self):
         valid = {"price_limit": 100, "account_ids": ["A"], "book_levels": 2,

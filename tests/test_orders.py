@@ -254,7 +254,7 @@ class AlgoOrderValidationTests(unittest.TestCase):
         ]
         for field, invalid_values, error in (
             ("book_levels", (0, 6, 1.5), "bad levels"),
-            ("target_percentage", (0, 5, 25, 110, 10.5), "bad percentage"),
+            ("target_percentage", (0, 5, 25, 110, 130, 140, 151, 10.5, 120.5, 150.5), "bad percentage"),
             ("cycle_seconds", (0, 1, 20, 90, 5.5), "bad cycle"),
         ):
             cases.append(({key: value for key, value in valid.items() if key != field}, error))
@@ -272,7 +272,7 @@ class AlgoOrderValidationTests(unittest.TestCase):
                  "target_percentage": 100, "cycle_seconds": 30}
         for field, choices in (
             ("book_levels", range(1, 6)),
-            ("target_percentage", range(10, 101, 10)),
+            ("target_percentage", (*range(10, 101, 10), 120, 150)),
             ("cycle_seconds", (5, 10, 15, 30, 60)),
         ):
             for mode in ("E", "F"):

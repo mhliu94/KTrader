@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from .services.market_data import QuoteRow, StockQuote
+from .services.orders import FAST_TRADING_TARGET_PERCENTAGE_CHOICES
 from .i18n import t
 from .models import AccountMeta, AccountSnapshot
 from .store import AccountStore
@@ -283,6 +284,7 @@ def render_layout(
       .portfolio-card .ts {{ max-width:none; text-align:left; }}
       .portfolio-cash {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); }}
       .cash-total {{ min-width:0; }}
+      .portfolio-market-value {{ grid-column:1 / -1; }}
       .modal-actions {{ justify-content:stretch; }}
       .modal-actions .btn {{ width:100%; }}
     }}
@@ -519,6 +521,7 @@ def render_account_details_page(
         )
 
     portfolio_position_rows = []
+    total_market_value = 0.0
     for position in portfolio["positions"]:
         avg_price = position["avg_price"]
         quote = (quotes or {}).get(position["symbol"])
@@ -528,6 +531,8 @@ def render_account_details_page(
         market_value = position["qty"] * last if last is not None else None
         if market_value is not None and not math.isfinite(market_value):
             market_value = None
+        if market_value is not None:
+            total_market_value += market_value
         portfolio_position_rows.append(
             "<tr>"
             f"<td><b>{html_escape(position['symbol'])}</b></td>"
@@ -555,8 +560,13 @@ def render_account_details_page(
         f"<div class='ts'>{coverage_note}</div>"
         "</div>"
         f"<div class='meta'>{html_escape(t(lang, 'portfolio_summary'))}</div>"
-        f"<div class='section-heading'>{html_escape(t(lang, 'cash_holdings'))}</div>"
-        f"<div class='portfolio-cash'>{''.join(cash_totals) if cash_totals else '<em>—</em>'}</div>"
+        f"<div class='section-heading'>{html_escape(t(lang, 'portfolio_totals'))}</div>"
+        f"<div class='portfolio-cash'>{''.join(cash_totals) if cash_totals else '<em>—</em>'}"
+        "<div class='cash-total portfolio-market-value'>"
+        f"<div class='cash-total-label'>{html_escape(t(lang, 'portfolio_total_market_value'))}</div>"
+        f"<div class='cash-total-value' id='portfolio-market-value-total'>{total_market_value:,.2f}</div>"
+        f"<div class='portfolio-note'>{html_escape(t(lang, 'portfolio_total_market_value_help'))}</div>"
+        "</div></div>"
         f"<div class='section-heading'>{html_escape(t(lang, 'positions'))}</div>"
         "<div class='table-scroll'><table class='pos'>"
         f"<thead><tr><th>{html_escape(t(lang, 'symbol'))}</th>"
@@ -2064,7 +2074,7 @@ def render_control_panel_page(
             f'<input class="choice-input" type="radio" id="fast-target-percentage-{percentage}" name="fast_target_percentage" value="{percentage}" required>'
             f'<label class="choice-btn" for="fast-target-percentage-{percentage}">{percentage}%</label>'
         )
-        for percentage in range(10, 101, 10)
+        for percentage in FAST_TRADING_TARGET_PERCENTAGE_CHOICES
     )
     fast_cycle_seconds_buttons = "\n".join(
         (
@@ -2223,7 +2233,7 @@ def render_control_panel_page(
           }
           const targetPercentageEl = modal.querySelector("input[name='fast_target_percentage']:checked");
           const targetPercentage = targetPercentageEl ? Number(targetPercentageEl.value) : 0;
-          if (![10, 20, 30, 40, 50, 60, 70, 80, 90, 100].includes(targetPercentage)) {
+          if (!__FAST_TARGET_PERCENTAGE_CHOICES__.includes(targetPercentage)) {
             return { ok: false, error: labels.fastTargetPercentageInvalid };
           }
           const cycleSecondsEl = modal.querySelector("input[name='fast_cycle_seconds']:checked");
@@ -2317,6 +2327,8 @@ def render_control_panel_page(
       })();
     </script>
     """.replace("__FAST_LABELS__", fast_labels_json).replace(
+        "__FAST_TARGET_PERCENTAGE_CHOICES__", json.dumps(FAST_TRADING_TARGET_PERCENTAGE_CHOICES)
+    ).replace(
         "__ACCOUNT_BALANCE_HELPERS__", account_balance_helpers
     )
 

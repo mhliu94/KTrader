@@ -97,25 +97,45 @@ class AccountPortfolioTests(unittest.TestCase):
             ("zh", ["标的", "数量", "均价", "最新", "市值", "账户数"]),
         ):
             with self.subTest(lang=lang):
-                rows = portfolio_table_rows(render(accounts, metas("A", "B"), quotes=quotes, lang=lang))
+                html = render(accounts, metas("A", "B"), quotes=quotes, lang=lang)
+                rows = portfolio_table_rows(html)
                 self.assertEqual(rows, [
                     headers,
                     ["AAPL", "40.00", "115.0000", "125.5000", "5,020.00", "2"],
                     ["MSFT", "-2.50", "—", "400.0000", "-1,000.00", "1"],
                     ["UNKNOWN", "1.00", "—", "--", "--", "1"],
                 ])
+                summary = portfolio_fragment(html)
+                self.assertIn("id='portfolio-market-value-total'>4,020.00</div>", summary)
+                self.assertIn(
+                    "Estimated total market value of positions" if lang == "en" else "持仓预估总市值",
+                    summary,
+                )
 
     def test_portfolio_does_not_value_positions_using_invalid_quotes(self):
-        accounts = {"A": snapshot("A", positions=[Position("AAPL", 10, 100)])}
+        accounts = {"A": snapshot("A", positions=[Position("AAPL", 10, 100), Position("MSFT", 2)])}
         for last, error in (
             (None, None), (0, None), (-1, None),
             (float("nan"), None), (float("inf"), None), (float("-inf"), None),
             (125.5, "quote unavailable"),
         ):
             with self.subTest(last=last, error=error):
-                quotes = {"AAPL": market_quote("AAPL", last, error)}
-                rows = portfolio_table_rows(render(accounts, metas("A"), quotes=quotes))
+                quotes = {"AAPL": market_quote("AAPL", last, error), "MSFT": market_quote("MSFT", 400)}
+                html = render(accounts, metas("A"), quotes=quotes)
+                rows = portfolio_table_rows(html)
                 self.assertEqual(rows[1], ["AAPL", "10.00", "100.0000", "--", "--", "1"])
+                self.assertIn("id='portfolio-market-value-total'>800.00</div>", portfolio_fragment(html))
+
+    def test_total_market_value_is_zero_without_priced_holdings(self):
+        for accounts in (
+            {},
+            {"A": snapshot("A")},
+            {"A": snapshot("A", positions=[Position("AAPL", 10, 100)])},
+        ):
+            with self.subTest(accounts=accounts):
+                summary = portfolio_fragment(render(accounts, metas("A")))
+                self.assertIn("id='portfolio-market-value-total'>0.00</div>", summary)
+                self.assertIn("Excludes holdings without prices.", summary)
 
     def test_configured_symbols_are_normalized_and_deduplicated(self):
         self.assertEqual(
@@ -350,8 +370,10 @@ class AccountPortfolioTests(unittest.TestCase):
         self.assertEqual(portfolio["total_accounts"], 2)
         self.assertEqual([position["symbol"] for position in portfolio["positions"]], ["AAPL"])
 
-        summary = portfolio_fragment(render(accounts, account_metas))
+        quotes = {"AAPL": market_quote("AAPL", 100), "ZZZZ": market_quote("ZZZZ", 1)}
+        summary = portfolio_fragment(render(accounts, account_metas, quotes=quotes))
         self.assertIn("Latest snapshots: <b>1 / 2</b>", summary)
+        self.assertIn("id='portfolio-market-value-total'>200.00</div>", summary)
         self.assertIn("totals include available accounts only", summary)
         self.assertNotIn("1,000,000", summary)
         self.assertNotIn("ZZZZ", summary)

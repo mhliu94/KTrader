@@ -62,12 +62,12 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
           const submit = document.getElementById("fast-submit-config");
           const groups = {
             fast_book_levels: [1, 2, 3, 4, 5],
-            fast_target_percentage: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            fast_target_percentage: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150],
             fast_cycle_seconds: [5, 10, 15, 30, 60]
           };
           const chosen = mode === "E"
-            ? {fast_book_levels: 5, fast_target_percentage: 100, fast_cycle_seconds: 60}
-            : {fast_book_levels: 1, fast_target_percentage: 10, fast_cycle_seconds: 5};
+            ? {fast_book_levels: 5, fast_target_percentage: 120, fast_cycle_seconds: 60}
+            : {fast_book_levels: 1, fast_target_percentage: 150, fast_cycle_seconds: 5};
           const inputs = name => Array.from(modal.querySelectorAll("input[name='" + name + "']"));
           function choose(name, value) {
             const input = inputs(name).find(input => Number(input.value) === value);

@@ -40,6 +40,7 @@ nohup.out
 # Local application state and generated data
 *_state.json
 market_data/historical_prices.csv
+order_exports/
 
 # Local configuration
 **/config.local.json

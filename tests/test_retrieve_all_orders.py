@@ -2,6 +2,7 @@ import csv
 import importlib.util
 import io
 import json
+import logging
 import os
 import tempfile
 import unittest
@@ -33,6 +34,8 @@ class ExportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # main() silences logging process-wide; later tests rely on assertLogs.
+        self.addCleanup(logging.disable, logging.NOTSET)
         self.root = Path(self.temp.name)
         self.as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
 

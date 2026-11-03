@@ -117,6 +117,7 @@ def _extract_fast_trading_config(body: Dict) -> object:
         "book_levels": ("fast_trading_book_levels", "book_levels"),
         "target_percentage": ("fast_trading_target_percentage", "target_percentage"),
         "cycle_seconds": ("fast_trading_cycle_seconds", "cycle_seconds"),
+        "total_target_position": ("fast_trading_total_target_position", "total_target_position"),
         "test_mode": ("fast_trading_test_mode", "test_mode"),
     }
     found_alias = False
@@ -904,6 +905,7 @@ def submit_algo(
         fast_book_levels_invalid=t(lang, "fast_book_levels_invalid"),
         fast_target_percentage_invalid=t(lang, "fast_target_percentage_invalid"),
         fast_cycle_seconds_invalid=t(lang, "fast_cycle_seconds_invalid"),
+        fast_total_target_position_invalid=t(lang, "fast_total_target_position_invalid"),
     )
 
     if err:
@@ -1186,6 +1188,7 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         fast_book_levels_invalid=t(lang, "fast_book_levels_invalid"),
         fast_target_percentage_invalid=t(lang, "fast_target_percentage_invalid"),
         fast_cycle_seconds_invalid=t(lang, "fast_cycle_seconds_invalid"),
+        fast_total_target_position_invalid=t(lang, "fast_total_target_position_invalid"),
     )
 
     if err:

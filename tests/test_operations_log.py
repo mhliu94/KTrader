@@ -71,6 +71,7 @@ class OperationsLogTests(unittest.TestCase):
                     "trading_mode": "F",
                     "symbol": "AAPL",
                     "end_time_et": "2099-01-01T00:00:00Z",
+                    "fast_trading_total_target_position": 500,
                 },
                 strategy_key="F:AAPL",
             )
@@ -84,6 +85,7 @@ class OperationsLogTests(unittest.TestCase):
             event = events[0]
             self.assertEqual(event["ui_server_started_at"], "2026-07-08T01:02:03Z")
             self.assertEqual(event["session"]["command_id"], "algo-start-1")
+            self.assertEqual(event["session"]["fast_trading_total_target_position"], 500)
             self.assertEqual(event["holdings"]["source"], "unit-test")
             self.assertEqual(event["holdings"]["accounts"][0]["cash_by_currency"]["USD"], 1000)
             self.assertEqual(event["holdings"]["accounts"][0]["securities"][0]["symbol"], "AAPL")

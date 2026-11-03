@@ -27,6 +27,8 @@ class FastTradingUiTests(unittest.TestCase):
         self.assertIn("Lower Sell Limit Price", html)
         self.assertIn("data-fast-account-id='A'", html)
         self.assertIn("data-fast-account-id='B'", html)
+        self.assertIn('id="fast-total-target-position"', html)
+        self.assertIn("Total target position (shares)", html)
         for prefix, choices in (
             ("fast-book-levels", range(1, 6)),
             ("fast-target-percentage", (*range(10, 101, 10), 120, 150)),
@@ -44,6 +46,7 @@ class FastTradingUiTests(unittest.TestCase):
         self.assertIn("book_levels: bookLevels", html)
         self.assertIn("target_percentage: targetPercentage", html)
         self.assertIn("cycle_seconds: cycleSeconds", html)
+        self.assertIn("total_target_position: totalTargetPosition", html)
         self.assertNotIn("aggression_level", html)
         self.assertNotIn("allocation_pct", html)
         self.assertNotIn("payloadGroups", html)
@@ -109,6 +112,7 @@ class FastTradingApiPayloadTests(unittest.TestCase):
                 "fast_trading_target_percentage": 60,
                 "fast_trading_cycle_seconds": 15,
                 "fast_trading_test_mode": True,
+                "fast_trading_total_target_position": 1000,
             }
         )
 
@@ -121,24 +125,27 @@ class FastTradingApiPayloadTests(unittest.TestCase):
                 "target_percentage": 60,
                 "cycle_seconds": 15,
                 "test_mode": True,
+                "total_target_position": 1000,
             },
         )
 
     def test_nested_config_wins_and_can_be_completed_by_unprefixed_aliases(self):
         config = webserver._extract_fast_trading_config(
             {
-                "fast_trading_config": {"price_limit": 99, "account_ids": ["A"], "book_levels": 1},
+                "fast_trading_config": {"price_limit": 99, "account_ids": ["A"], "book_levels": 1,
+                                        "total_target_position": 1000},
                 "price_limit": 777,
                 "book_levels": 3,
                 "target_percentage": 80,
                 "cycle_seconds": 60,
+                "total_target_position": 2000,
             }
         )
 
         self.assertEqual(
             config,
             {"price_limit": 99, "account_ids": ["A"], "book_levels": 1,
-             "target_percentage": 80, "cycle_seconds": 60},
+             "target_percentage": 80, "cycle_seconds": 60, "total_target_position": 1000},
         )
 
     def test_api_accepts_top_level_fast_fields_without_generic_constraints(self):
@@ -223,10 +230,35 @@ class FastTradingApiPayloadTests(unittest.TestCase):
             client.close()
         self.assertEqual(len(self.started_commands), 8)
 
+    def test_both_endpoints_pass_position_targets_to_manager(self):
+        client = TestClient(webserver.app)
+        self.addCleanup(client.close)
+        client.cookies.set("auth_token", "token")
+        for mode in ("E", "F"):
+            for target in (0, 1000):
+                with self.subTest(mode=mode, target=target):
+                    config = {"price_limit": 10, "account_ids": ["A"], "book_levels": 1,
+                              "target_percentage": 100, "cycle_seconds": 5, "total_target_position": target}
+                    response = client.post(
+                        "/api/submit-algo",
+                        json={"trading_mode": mode, "symbol": "AAPL", **config},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["command"]["fast_trading_total_target_position"], target)
+                    self.assertEqual(self.started_commands[-1]["fast_trading_total_target_position"], target)
+                    response = client.post(
+                        "/submit-algo",
+                        data={"trading_mode": mode, "symbol": "AAPL", "fast_trading_config": json.dumps(config)},
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(response.status_code, 303)
+                    self.assertEqual(self.started_commands[-1]["fast_trading_total_target_position"], target)
+
     def test_both_endpoints_reject_missing_or_invalid_controls_without_starting_strategy(self):
         valid = {"price_limit": 100, "account_ids": ["A"], "book_levels": 2,
                  "target_percentage": 50, "cycle_seconds": 30}
         invalid_configs = [{"price_limit": 100, "account_ids": ["A"], "aggression_level": 1}]
+        invalid_configs.extend({**valid, "total_target_position": value} for value in (-1, 1.5, True, "NaN", "bad"))
         for field, invalid in (("book_levels", 6), ("target_percentage", 25), ("cycle_seconds", 20)):
             invalid_configs.append({key: value for key, value in valid.items() if key != field})
             invalid_configs.append({**valid, field: invalid})

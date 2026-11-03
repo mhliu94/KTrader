@@ -2097,6 +2097,9 @@ def render_control_panel_page(
         "fastBookLevelsInvalid": t(lang, "fast_book_levels_invalid"),
         "fastTargetPercentageInvalid": t(lang, "fast_target_percentage_invalid"),
         "fastCycleSecondsInvalid": t(lang, "fast_cycle_seconds_invalid"),
+        "fastTotalTargetPositionInvalid": t(lang, "fast_total_target_position_invalid"),
+        "fastTotalTargetPositionBuyHelp": t(lang, "fast_total_target_position_buy_help"),
+        "fastTotalTargetPositionSellHelp": t(lang, "fast_total_target_position_sell_help"),
     }
     fast_labels_json = json.dumps(fast_labels).replace("<", "\\u003c")
     fast_trading_modal = f"""
@@ -2119,6 +2122,11 @@ def render_control_panel_page(
           <div class="fast-account-list" id="fast-trading-accounts">
             {fast_account_buttons}
           </div>
+        </div>
+        <div style="margin-top:12px;">
+          <label for="fast-total-target-position">{html_escape(t(lang,'fast_total_target_position'))}</label>
+          <input id="fast-total-target-position" type="number" min="0" step="1" inputmode="numeric" aria-describedby="fast-total-target-position-help">
+          <div class="help" id="fast-total-target-position-help">{html_escape(t(lang,'fast_total_target_position_buy_help'))}</div>
         </div>
         <div style="margin-top:12px;">
           <label id="fast-book-levels-label">{html_escape(t(lang,'fast_book_levels'))}</label>
@@ -2163,6 +2171,8 @@ def render_control_panel_page(
         const symbolLabelEl = document.getElementById("fast-trading-symbol");
         const priceLabelEl = document.getElementById("fast-price-limit-label");
         const priceLimitEl = document.getElementById("fast-price-limit");
+        const totalTargetPositionEl = document.getElementById("fast-total-target-position");
+        const totalTargetPositionHelpEl = document.getElementById("fast-total-target-position-help");
         const errorEl = document.getElementById("fast-trading-error");
         const cancelBtn = document.getElementById("fast-cancel");
         const closeBtn = document.getElementById("fast-trading-close");
@@ -2241,6 +2251,12 @@ def render_control_panel_page(
           if (![5, 10, 15, 30, 60].includes(cycleSeconds)) {
             return { ok: false, error: labels.fastCycleSecondsInvalid };
           }
+          const totalTargetPositionRaw = totalTargetPositionEl ? totalTargetPositionEl.value.trim() : "";
+          const totalTargetPosition = totalTargetPositionRaw === "" ? null : Number(totalTargetPositionRaw);
+          if ((totalTargetPositionEl && totalTargetPositionEl.validity.badInput) ||
+              (totalTargetPosition !== null && (!Number.isSafeInteger(totalTargetPosition) || totalTargetPosition < 0))) {
+            return { ok: false, error: labels.fastTotalTargetPositionInvalid };
+          }
 
           return {
             ok: true,
@@ -2250,6 +2266,7 @@ def render_control_panel_page(
               book_levels: bookLevels,
               target_percentage: targetPercentage,
               cycle_seconds: cycleSeconds,
+              total_target_position: totalTargetPosition,
               test_mode: Boolean(testModeEl && testModeEl.checked)
             }
           };
@@ -2260,6 +2277,10 @@ def render_control_panel_page(
           if (modeLabelEl) modeLabelEl.textContent = (labels.fastSelectedMode || "Mode") + ": " + modeName(mode);
           if (priceLabelEl) {
             priceLabelEl.textContent = mode === "F" ? labels.fastSellPriceLimit : labels.fastBuyPriceLimit;
+          }
+          if (totalTargetPositionHelpEl) {
+            totalTargetPositionHelpEl.textContent = mode === "F"
+              ? labels.fastTotalTargetPositionSellHelp : labels.fastTotalTargetPositionBuyHelp;
           }
           setError("");
           modal.hidden = false;

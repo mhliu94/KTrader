@@ -8,6 +8,7 @@ from ..models import AccountMeta
 
 
 FAST_TRADING_TARGET_PERCENTAGE_CHOICES = (*range(10, 101, 10), 120, 150)
+FAST_TRADING_TOTAL_TARGET_POSITION_ERROR = "Enter a whole number of shares (0 or more), or leave blank."
 
 
 def iso_utc_now() -> str:
@@ -33,6 +34,18 @@ def safe_int(s: Optional[str]) -> Optional[int]:
     if not s:
         return None
     return int(s)
+
+
+def parse_total_target_position(value: object) -> Optional[int]:
+    try:
+        parsed = safe_float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(FAST_TRADING_TOTAL_TARGET_POSITION_ERROR) from None
+    if parsed is None:
+        return None
+    if parsed < 0 or not parsed.is_integer() or parsed > 2**53 - 1:
+        raise ValueError(FAST_TRADING_TOTAL_TARGET_POSITION_ERROR)
+    return int(parsed)
 
 
 # ---------------------------
@@ -422,6 +435,7 @@ def build_algo_start_command(
     fast_trading_target_percentage: Optional[int] = None,
     fast_trading_cycle_seconds: Optional[int] = None,
     fast_trading_test_mode: Optional[bool] = None,
+    fast_trading_total_target_position: Optional[int] = None,
 ) -> Dict:
     if trading_mode not in _FAST_MODES:
         raise ValueError("Algorithmic trading mode must be E or F.")
@@ -439,6 +453,8 @@ def build_algo_start_command(
         "fast_trading_cycle_seconds": fast_trading_cycle_seconds,
         "fast_trading_test_mode": bool(fast_trading_test_mode),
     }
+    if fast_trading_total_target_position is not None:
+        cmd["fast_trading_total_target_position"] = fast_trading_total_target_position
     return cmd
 
 
@@ -482,6 +498,7 @@ def parse_fast_trading_settings(
     fast_book_levels_invalid: str,
     fast_target_percentage_invalid: str,
     fast_cycle_seconds_invalid: str,
+    fast_total_target_position_invalid: str = FAST_TRADING_TOTAL_TARGET_POSITION_ERROR,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     payload, err = parse_fast_trading_config_payload(fast_trading_config_raw, fast_config_required)
     if err:
@@ -526,11 +543,17 @@ def parse_fast_trading_settings(
             return None, error
         selections[field] = int(value)
 
+    try:
+        total_target_position = parse_total_target_position(payload.get("total_target_position"))
+    except ValueError:
+        return None, fast_total_target_position_invalid
+
     return {
         "price_limit": float(price_limit),
         "account_ids": account_ids,
         **selections,
         "test_mode": _truthy_bool(payload.get("test_mode")),
+        "total_target_position": total_target_position,
     }, None
 
 
@@ -562,6 +585,7 @@ def validate_algo_start_inputs(
     fast_book_levels_invalid: str,
     fast_target_percentage_invalid: str,
     fast_cycle_seconds_invalid: str,
+    fast_total_target_position_invalid: str = FAST_TRADING_TOTAL_TARGET_POSITION_ERROR,
 ) -> Tuple[Optional[Dict], Optional[str]]:
     if trading_mode not in _FAST_MODES:
         return None, invalid_mode
@@ -580,6 +604,7 @@ def validate_algo_start_inputs(
         fast_book_levels_invalid=fast_book_levels_invalid,
         fast_target_percentage_invalid=fast_target_percentage_invalid,
         fast_cycle_seconds_invalid=fast_cycle_seconds_invalid,
+        fast_total_target_position_invalid=fast_total_target_position_invalid,
     )
     if err:
         return None, err
@@ -593,6 +618,7 @@ def validate_algo_start_inputs(
         fast_trading_target_percentage=fast_settings["target_percentage"],
         fast_trading_cycle_seconds=fast_settings["cycle_seconds"],
         fast_trading_test_mode=fast_settings["test_mode"],
+        fast_trading_total_target_position=fast_settings["total_target_position"],
     ), None
 
 

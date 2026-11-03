@@ -60,6 +60,7 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
           const modal = document.getElementById("fast-trading-modal");
           const error = document.getElementById("fast-trading-error");
           const submit = document.getElementById("fast-submit-config");
+          const positionTarget = document.getElementById("fast-total-target-position");
           const groups = {
             fast_book_levels: [1, 2, 3, 4, 5],
             fast_target_percentage: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 150],
@@ -94,6 +95,10 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
             document.getElementById("algo_symbol").value = "AAPL";
             form.requestSubmit();
             equal(modal.hidden, false, "fast configuration opened");
+            equal(positionTarget.value, "", "position target defaults to disabled");
+            equal(positionTarget.required, false, "position target is optional");
+            equal(document.getElementById("fast-total-target-position-help").textContent.includes(__POSITION_HELP__),
+                  true, "position target describes the selected mode boundary");
             equal(document.getElementById("algo-generic-constraints"), null, "obsolete generic controls removed");
             equal(submissions.length, 0, "opening configuration does not submit");
             equal(modal.querySelectorAll("input[name='fast_aggression_level']").length, 0, "aggression selector removed");
@@ -125,6 +130,14 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
               choose(name, chosen[name]);
             }
 
+            for (const value of ["-1", "1.5", "9007199254740992"]) {
+              positionTarget.value = value;
+              submit.click();
+              equal(submissions.length, 0, "invalid position target prevents submission");
+              equal(modal.hidden, false, "invalid position target keeps the dialog open");
+              equal(error.textContent.trim().length > 0, true, "invalid position target shows an error");
+            }
+            positionTarget.value = "1000";
             submit.click();
             equal(submissions.length, 1, "complete configuration submits once");
             equal(modal.hidden, true, "complete configuration closes the dialog");
@@ -133,11 +146,12 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
             equal(submitted.symbol, "AAPL", "submitted symbol");
             const config = JSON.parse(submitted.fast_trading_config);
             equal(Object.keys(config).sort(),
-                  ["account_ids", "book_levels", "cycle_seconds", "price_limit", "target_percentage", "test_mode"],
+                  ["account_ids", "book_levels", "cycle_seconds", "price_limit", "target_percentage", "test_mode", "total_target_position"],
                   "configuration contains the new fields and no aggression preset");
             equal(config.book_levels, chosen.fast_book_levels, "submitted levels");
             equal(config.target_percentage, chosen.fast_target_percentage, "submitted target percentage");
             equal(config.cycle_seconds, chosen.fast_cycle_seconds, "submitted minimum cycle time");
+            equal(config.total_target_position, 1000, "submitted total target position");
             equal(config.price_limit, price, "existing price limit preserved");
             equal(config.account_ids, ["A", "C"], "only selected accounts submitted");
             equal(config.test_mode, mode === "E", "existing test mode preserved");
@@ -152,6 +166,16 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
             stopForm.requestSubmit();
             equal(submissions.length, 2, "stop can be submitted without any selection");
             equal(submissions[1], {reason: ""}, "stop submits only the optional reason");
+
+            for (const [value, expected] of [["", null], ["0", 0]]) {
+              form.requestSubmit();
+              positionTarget.value = value;
+              const previousCount = submissions.length;
+              submit.click();
+              equal(submissions.length, previousCount + 1, "blank and zero targets are accepted");
+              equal(JSON.parse(submissions.at(-1).fast_trading_config).total_target_position, expected,
+                    "blank disables the target while zero remains enabled");
+            }
           } catch (error) {
             failures.push(error.stack || String(error));
           }
@@ -159,7 +183,12 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
           document.getElementById("test-result").textContent = JSON.stringify(failures.concat(uiErrors));
         })();
         </script>
-        """.replace("__MODE__", json.dumps(mode))
+        """.replace("__MODE__", json.dumps(mode)).replace(
+            "__POSITION_HELP__", json.dumps(
+                ("at least" if mode == "E" else "fewer than") if lang == "en"
+                else ("达到或超过" if mode == "E" else "低于")
+            ),
+        )
         page = render_layout(lang, "control-panel", render_control_panel_page(lang, metas, ["AAPL"]))
         page = page.replace("<head>", "<head>" + prelude).replace("</body>", checks + "</body>")
         with tempfile.TemporaryDirectory(prefix="ktrader-fast-controls-test-") as directory:

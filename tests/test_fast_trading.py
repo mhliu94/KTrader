@@ -6,6 +6,7 @@ from unittest.mock import Mock
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
 from trading_ui.services.fast_trading import (
     FastTradingStrategyManager,
+    STOP_REASON_TARGET_POSITION,
     _FastStrategy,
     build_fast_trading_cycle_commands,
 )
@@ -146,6 +147,7 @@ def build_cycle(
     last_actions=None,
     now=100.0,
     cycle_id="test-cycle",
+    total_target_position=None,
 ):
     return build_fast_trading_cycle_commands(
         trading_mode=mode,
@@ -161,10 +163,87 @@ def build_cycle(
         last_action_monotonic_by_account=last_actions or {},
         now_monotonic=now,
         cycle_id=cycle_id,
+        total_target_position=total_target_position,
     )
 
 
 class FastTradingCycleTests(unittest.TestCase):
+    def test_position_target_uses_all_participants_actual_holdings_and_mode_boundaries(self):
+        levels = [BookLevel(price=10, quantity=200)]
+        for mode in ("E", "F"):
+            for target in (599, 600, 601):
+                with self.subTest(mode=mode, target=target):
+                    result = build_cycle(
+                        mode=mode,
+                        book=OrderBookSnapshot(symbol="AAPL", bids=levels, asks=levels),
+                        price_limit=10, account_ids=["A", "B"], book_levels=1,
+                        total_target_position=target,
+                        account_snapshots=snapshots(
+                            A={"cash": 10000, "positions": [("US.AAPL", 400.25, 200), ("MSFT", 999999)]},
+                            B={"cash": 0, "positions": [(" aapl/USD ", 199.75, 0)]},
+                            OUTSIDE={"cash": 999999, "positions": [("AAPL", 999999)]},
+                        ),
+                        last_actions={"B": 100}, now=100,
+                    )
+                    should_stop = 600 >= target if mode == "E" else 600 < target
+                    self.assertEqual(result.total_position, 600)
+                    self.assertEqual(result.target_position_reached, should_stop)
+                    self.assertFalse(result.capacity_noop)
+                    if should_stop:
+                        self.assertEqual(result.commands, [])
+                        self.assertEqual(result.reason, STOP_REASON_TARGET_POSITION)
+                    else:
+                        self.assertEqual([cmd["account_id"] for cmd in result.commands], ["A"])
+                        self.assertEqual(result.commands[0]["fast_trading_total_target_position"], target)
+
+    def test_target_uses_signed_holdings_without_rounding_and_deduplicates_accounts(self):
+        for mode, target in (("E", 300), ("F", 301)):
+            with self.subTest(mode=mode):
+                result = build_cycle(
+                    mode=mode, book=OrderBookSnapshot(symbol="AAPL", bids=[], asks=[], error="no data yet"),
+                    price_limit=10, account_ids=["A", "A", "B"], book_levels=1,
+                    total_target_position=target,
+                    account_snapshots=snapshots(
+                        A={"positions": [("AAPL", 200.25), ("AAPL", 200.25)]},
+                        B={"positions": [("AAPL", -100)]},
+                    ),
+                )
+                self.assertEqual(result.total_position, 300.5)
+                self.assertTrue(result.target_position_reached)
+                self.assertEqual(result.commands, [])
+                self.assertEqual(result.reason, STOP_REASON_TARGET_POSITION)
+
+    def test_position_target_waits_for_complete_valid_participant_snapshots(self):
+        levels = [BookLevel(price=10, quantity=200)]
+        a = {"cash": 10000, "positions": [("AAPL", 600)]}
+        for mode in ("E", "F"):
+            for data in (
+                None, {}, snapshots(A=a), {**snapshots(A=a), "B": None},
+                *[snapshots(A=a, B={"positions": [("AAPL", qty)]})
+                  for qty in (float("nan"), float("inf"), float("-inf"))],
+            ):
+                with self.subTest(mode=mode, data=data):
+                    result = build_cycle(
+                        mode=mode, book=OrderBookSnapshot(symbol="AAPL", bids=levels, asks=levels),
+                        price_limit=10, account_ids=["A", "B"], book_levels=1,
+                        total_target_position=600, account_snapshots=data,
+                    )
+                    self.assertEqual(result.commands, [])
+                    self.assertFalse(result.target_position_reached)
+                    self.assertFalse(result.capacity_noop)
+                    self.assertEqual(result.reason, "total_position_unavailable")
+
+    def test_zero_holdings_are_known_and_zero_target_is_enabled(self):
+        for mode, target, should_stop in (("E", 0, True), ("F", 1, True), ("F", 0, False)):
+            with self.subTest(mode=mode, target=target):
+                result = build_cycle(
+                    mode=mode, book=OrderBookSnapshot(symbol="AAPL", bids=[], asks=[]),
+                    price_limit=10, account_ids=["A"], book_levels=1,
+                    total_target_position=target, account_snapshots=snapshots(A={}),
+                )
+                self.assertEqual(result.total_position, 0)
+                self.assertEqual(result.target_position_reached, should_stop)
+
     def test_mode_e_sums_only_top_n_asks(self):
         book = OrderBookSnapshot(
             symbol="MSFT",
@@ -789,6 +868,70 @@ class FastTradingCycleTests(unittest.TestCase):
 
 
 class FastTradingManagerTests(unittest.TestCase):
+    def test_strategy_auto_stops_using_fresh_participant_positions_and_reports_reason(self):
+        for mode in ("E", "F"):
+            for initially_met in (False, True):
+                with self.subTest(mode=mode, initially_met=initially_met):
+                    initial_qty = (600 if initially_met else 400) if mode == "E" else (400 if initially_met else 600)
+                    accounts = snapshots(
+                        A={"cash": 10000, "positions": [("AAPL", initial_qty / 2)]},
+                        B={"cash": 10000, "positions": [("AAPL", initial_qty / 2)]},
+                        OUTSIDE={"positions": [("AAPL", 999999)]},
+                    )
+                    published = []
+
+                    def publish(command, account_id):
+                        published.append(command)
+                        accounts[account_id].positions[0].qty += command["qty_shares"] * (1 if mode == "E" else -1)
+
+                    store = MarketDataStore()
+                    levels = [BookLevel(price=10, quantity=200)]
+                    store.upsert_book(OrderBookSnapshot(symbol="AAPL", bids=levels, asks=levels))
+                    clock = SimulatedCycleClock()
+                    reporting, operations_log = Mock(), Mock()
+                    manager = FastTradingStrategyManager(
+                        market_data_store=store, account_metas_provider=lambda: metas("A", "B", "OUTSIDE"),
+                        account_snapshots_provider=lambda: accounts, publish_command=publish,
+                        reporting=reporting, operations_log=operations_log, monotonic=clock.monotonic,
+                    )
+                    command = {
+                        **strategy_command(), "trading_mode": mode,
+                        "fast_trading_account_ids": ["A", "B"], "fast_trading_total_target_position": 600,
+                    }
+                    strategy = clock.run_strategy(manager, command)
+
+                    self.assertEqual(len(published), 0 if initially_met else 2)
+                    self.assertEqual(strategy.cycles, 1 if initially_met else 2)
+                    self.assertEqual(clock.waits, [] if initially_met else [5])
+                    self.assertEqual(strategy.last_reason, STOP_REASON_TARGET_POSITION)
+                    self.assertEqual(strategy.consecutive_capacity_noops, 0)
+                    self.assertFalse(manager.has_active_session())
+                    reporting.end_session.assert_called_once_with(
+                        command["command_id"], status="stopped", reason=STOP_REASON_TARGET_POSITION,
+                    )
+                    self.assertEqual(operations_log.record_algo_ended.call_args.kwargs["reason"], STOP_REASON_TARGET_POSITION)
+
+    def test_missing_target_position_data_neither_publishes_nor_auto_stops(self):
+        for mode in ("E", "F"):
+            with self.subTest(mode=mode):
+                store = MarketDataStore()
+                levels = [BookLevel(price=10, quantity=200)]
+                store.upsert_book(OrderBookSnapshot(symbol="AAPL", bids=levels, asks=levels))
+                clock, publish = SimulatedCycleClock(), Mock()
+                manager = FastTradingStrategyManager(
+                    market_data_store=store, account_metas_provider=lambda: metas("A", "B"),
+                    account_snapshots_provider=lambda: snapshots(A={"cash": 10000}),
+                    publish_command=publish, monotonic=clock.monotonic,
+                )
+                strategy = clock.run_strategy(manager, {
+                    **strategy_command(), "trading_mode": mode,
+                    "fast_trading_account_ids": ["A", "B"], "fast_trading_total_target_position": 600,
+                }, max_cycles=12)
+                self.assertEqual(strategy.cycles, 12)
+                self.assertEqual(strategy.consecutive_capacity_noops, 0)
+                self.assertEqual(strategy.last_reason, "total_position_unavailable")
+                publish.assert_not_called()
+
     def test_stop_all_stops_both_modes_all_symbols_and_accounts_outside_current_config(self):
         publish = Mock()
         manager = FastTradingStrategyManager(
@@ -799,7 +942,9 @@ class FastTradingManagerTests(unittest.TestCase):
         self.addCleanup(manager.stop_all)
         # Keep worker cycles inert while exercising real worker shutdown.
         # Include accounts outside the current configuration to check scope.
-        manager.run_cycle = Mock(return_value=Mock(commands=[], capacity_noop=False, reason="test cycle"))
+        manager.run_cycle = Mock(return_value=Mock(
+            commands=[], capacity_noop=False, target_position_reached=False, reason="test cycle",
+        ))
         strategies = []
         for mode, symbol, account in (("E", "AAPL", "A"), ("F", "AAPL", "B"), ("E", "MSFT", "REMOVED")):
             command = {**strategy_command(), "trading_mode": mode, "symbol": symbol,
@@ -846,7 +991,7 @@ class FastTradingManagerTests(unittest.TestCase):
         def blocked_cycle(command):
             entered.set()
             release.wait(10)
-            return Mock(commands=[], capacity_noop=False, reason="test cycle")
+            return Mock(commands=[], capacity_noop=False, target_position_reached=False, reason="test cycle")
         manager.run_cycle = blocked_cycle
         key = manager.start_strategy(strategy_command())
         strategy = manager._strategies[key]
@@ -1065,6 +1210,7 @@ class FastTradingManagerTests(unittest.TestCase):
             "fast_trading_book_levels": [None, "", 0, 6, 1.5, True],
             "fast_trading_target_percentage": [None, "", 0, 15, 110, 130, 140, 151, 120.5, 150.5, True],
             "fast_trading_cycle_seconds": [None, "", 0, 1, 20, 120, True],
+            "fast_trading_total_target_position": [-1, 1.5, True, False, "bad", "NaN", "Infinity", 2**53, [], {}],
         }
         for field, values in invalid_values.items():
             for value in values:

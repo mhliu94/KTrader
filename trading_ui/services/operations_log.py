@@ -168,6 +168,7 @@ class OperationsLog:
             "fast_trading_book_levels",
             "fast_trading_target_percentage",
             "fast_trading_cycle_seconds",
+            "fast_trading_total_target_position",
         ):
             if field_name in command:
                 out[field_name] = command.get(field_name)

@@ -10,7 +10,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from ..models import AccountMeta, AccountSnapshot
 from .market_data import BookLevel, MarketDataStore, OrderBookSnapshot
 from .operations_log import OperationsLog
-from .orders import FAST_TRADING_TARGET_PERCENTAGE_CHOICES, build_limit_order_fok_command
+from .orders import (
+    FAST_TRADING_TARGET_PERCENTAGE_CHOICES,
+    build_limit_order_fok_command,
+    parse_total_target_position,
+)
 
 
 LOGGER = logging.getLogger("trading-ui.fast-trading")
@@ -39,6 +43,7 @@ FAST_TRADING_DEFAULT_SETTINGS: Dict[str, Any] = {
 
 STOP_REASON_MANUAL = "Manual stop"
 STOP_REASON_CAPACITY_NOOPS = "10 consecutive purchasing-power no-ops"
+STOP_REASON_TARGET_POSITION = "Total target position reached"
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,9 @@ class FastTradingCycleResult:
     commands: List[Dict[str, Any]] = field(default_factory=list)
     capacity_noop: bool = False
     reason: str = ""
+    total_position: Optional[float] = None
+    total_target_position: Optional[int] = None
+    target_position_reached: bool = False
 
 
 @dataclass
@@ -209,6 +217,30 @@ def _symbol_position_qty(snapshot: AccountSnapshot, symbol: str) -> int:
         if position_qty is not None:
             qty += position_qty
     return int(math.floor(max(0.0, qty)))
+
+
+def _total_position(
+    account_ids: Sequence[str],
+    symbol: str,
+    account_snapshots: Optional[Mapping[str, AccountSnapshot]],
+) -> Optional[float]:
+    """Sum actual holdings for every participant, independent of sellable quantity."""
+    if account_snapshots is None:
+        return None
+    target_symbol = _normalize_symbol(symbol)
+    total = 0.0
+    for account_id in account_ids:
+        snapshot = account_snapshots.get(account_id)
+        if snapshot is None:
+            return None
+        for position in snapshot.positions:
+            if _normalize_symbol(position.symbol) != target_symbol:
+                continue
+            qty = _as_finite_float(position.qty)
+            if qty is None:
+                return None
+            total += qty
+    return total if math.isfinite(total) else None
 
 
 def _account_capacity(
@@ -363,6 +395,7 @@ def build_fast_trading_cycle_commands(
     last_action_monotonic_by_account: Optional[Mapping[str, float]] = None,
     now_monotonic: Optional[float] = None,
     cycle_id: Optional[str] = None,
+    total_target_position: Optional[int] = None,
 ) -> FastTradingCycleResult:
     mode = str(trading_mode or "").strip().upper()
     clean_symbol = str(symbol or "").strip().upper()
@@ -377,6 +410,7 @@ def build_fast_trading_cycle_commands(
     clean_target_percentage = _selected_int(
         target_percentage, FAST_TRADING_TARGET_PERCENTAGE_CHOICES, "fast trading target percentage",
     )
+    clean_total_target_position = parse_total_target_position(total_target_position)
     clean_account_ids = _deduplicated_account_ids(account_ids)
     if not clean_account_ids:
         raise ValueError("fast trading account_ids must be non-empty")
@@ -393,7 +427,22 @@ def build_fast_trading_cycle_commands(
         order_side=order_side,
         book_levels=clean_book_levels,
         target_percentage=clean_target_percentage,
+        total_target_position=clean_total_target_position,
     )
+    if clean_total_target_position is not None:
+        result.total_position = _total_position(clean_account_ids, clean_symbol, account_snapshots)
+        if result.total_position is None:
+            # An incomplete total must not trigger a stop or allow new orders.
+            result.reason = "total_position_unavailable"
+            return result
+        result.target_position_reached = (
+            result.total_position >= clean_total_target_position
+            if mode == "E"
+            else result.total_position < clean_total_target_position
+        )
+        if result.target_position_reached:
+            result.reason = STOP_REASON_TARGET_POSITION
+            return result
     if book.error:
         result.reason = str(book.error)
         return result
@@ -491,6 +540,8 @@ def build_fast_trading_cycle_commands(
                 "fast_trading_price_limit": clean_price_limit,
             }
         )
+        if clean_total_target_position is not None:
+            cmd["fast_trading_total_target_position"] = clean_total_target_position
         result.commands.append(cmd)
     return result
 
@@ -571,7 +622,7 @@ class FastTradingStrategyManager:
     def _validated_strategy_values(
         self,
         command: Mapping[str, Any],
-    ) -> tuple[str, str, float, List[str], int, int, int]:
+    ) -> tuple[str, str, float, List[str], int, int, int, Optional[int]]:
         mode = str(command.get("trading_mode") or "").strip().upper()
         symbol = str(command.get("symbol") or "").strip().upper()
         if mode not in FAST_TRADING_MODES:
@@ -600,11 +651,14 @@ class FastTradingStrategyManager:
             FAST_TRADING_CYCLE_SECONDS_CHOICES,
             "fast trading cycle seconds",
         )
-        return mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds
+        total_target_position = parse_total_target_position(command.get("fast_trading_total_target_position"))
+        return mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds, total_target_position
 
     def start_strategy(self, start_command: Dict[str, Any]) -> str:
-        mode, symbol, _, _, book_levels, target_percentage, cycle_seconds = self._validated_strategy_values(start_command)
+        mode, symbol, _, _, book_levels, target_percentage, cycle_seconds, total_target_position = self._validated_strategy_values(start_command)
         strategy_command = dict(start_command)
+        if total_target_position is not None:
+            strategy_command["fast_trading_total_target_position"] = total_target_position
         if self._reporting is not None and not strategy_command.get("command_id"):
             strategy_command["command_id"] = uuid.uuid4().hex
         key = self._strategy_key(mode, symbol)
@@ -643,7 +697,7 @@ class FastTradingStrategyManager:
                 raise
         LOGGER.info(
             "Algo trading started successfully mode=%s symbol=%s key=%s command_id=%s "
-            "book_levels=%s target_percentage=%s cycle_seconds=%s test_mode=%s",
+            "book_levels=%s target_percentage=%s cycle_seconds=%s total_target_position=%s test_mode=%s",
             mode,
             symbol,
             key,
@@ -651,6 +705,7 @@ class FastTradingStrategyManager:
             book_levels,
             target_percentage,
             cycle_seconds,
+            total_target_position,
             _truthy_bool(strategy_command.get("fast_trading_test_mode")),
         )
         return key
@@ -765,7 +820,7 @@ class FastTradingStrategyManager:
 
     def _run_strategy(self, strategy: _FastStrategy) -> None:
         try:
-            _, _, _, _, _, _, cycle_seconds = self._validated_strategy_values(strategy.command)
+            _, _, _, _, _, _, cycle_seconds, _ = self._validated_strategy_values(strategy.command)
             while not strategy.stop_event.is_set():
                 self._report("heartbeat_session", strategy.command.get("command_id"))
                 cycle_start = self._monotonic()
@@ -773,7 +828,7 @@ class FastTradingStrategyManager:
                 test_mode = _truthy_bool(strategy.command.get("fast_trading_test_mode"))
                 published_count = 0 if test_mode else len(result.commands)
 
-                reached_noop_limit = False
+                auto_stop_reason = ""
                 with self._lock:
                     strategy.cycles += 1
                     strategy.published_commands += published_count
@@ -783,20 +838,23 @@ class FastTradingStrategyManager:
                         strategy.consecutive_capacity_noops += 1
                     # A cycle may finish after stop; retain the stop reason.
                     if not strategy.stop_event.is_set():
-                        if strategy.consecutive_capacity_noops >= FAST_MAX_CONSECUTIVE_CAPACITY_NOOPS:
+                        if result.target_position_reached:
+                            strategy.last_reason = STOP_REASON_TARGET_POSITION
+                            auto_stop_reason = strategy.last_reason
+                        elif strategy.consecutive_capacity_noops >= FAST_MAX_CONSECUTIVE_CAPACITY_NOOPS:
                             strategy.last_reason = STOP_REASON_CAPACITY_NOOPS
-                            reached_noop_limit = True
+                            auto_stop_reason = strategy.last_reason
                         else:
                             strategy.last_reason = result.reason
 
-                if reached_noop_limit:
+                if auto_stop_reason:
                     LOGGER.info(
                         "Algo trading automatically stopped mode=%s symbol=%s key=%s command_id=%s reason=%s",
                         strategy.command.get("trading_mode"),
                         strategy.command.get("symbol"),
                         strategy.key,
                         strategy.command.get("command_id"),
-                        STOP_REASON_CAPACITY_NOOPS,
+                        auto_stop_reason,
                     )
                     break
 
@@ -830,7 +888,7 @@ class FastTradingStrategyManager:
             )
 
     def run_cycle(self, command: Dict[str, Any]) -> FastTradingCycleResult:
-        mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds = self._validated_strategy_values(command)
+        mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds, total_target_position = self._validated_strategy_values(command)
         book = self._market_data_store.get_book(symbol, depth_limit=book_levels)
         account_metas = self._account_metas_provider()
         account_snapshots = (
@@ -855,6 +913,7 @@ class FastTradingStrategyManager:
                 account_ids=account_ids,
                 book_levels=book_levels,
                 target_percentage=target_percentage,
+                total_target_position=total_target_position,
                 account_metas=account_metas,
                 account_snapshots=account_snapshots,
                 minimum_cycle_seconds_by_medium=self._settings.minimum_cycle_seconds_by_medium,
@@ -899,7 +958,8 @@ class FastTradingStrategyManager:
 
         LOGGER.info(
             "Fast trading cycle mode=%s symbol=%s resting_side=%s book_levels=%s target_percentage=%s "
-            "total_qty=%s target_qty=%s allocated_qty=%s price=%s commands=%s capacity_noop=%s reason=%s",
+            "total_qty=%s target_qty=%s allocated_qty=%s price=%s commands=%s capacity_noop=%s "
+            "total_position=%s total_target_position=%s reason=%s",
             result.trading_mode,
             result.symbol,
             result.resting_side,
@@ -911,6 +971,8 @@ class FastTradingStrategyManager:
             result.limit_price,
             len(result.commands),
             result.capacity_noop,
+            result.total_position,
+            result.total_target_position,
             result.reason,
         )
         return result

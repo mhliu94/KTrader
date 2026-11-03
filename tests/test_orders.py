@@ -173,6 +173,7 @@ class AlgoOrderValidationTests(unittest.TestCase):
             "fast_book_levels_invalid": "invalid levels",
             "fast_target_percentage_invalid": "invalid percentage",
             "fast_cycle_seconds_invalid": "invalid cycle",
+            "fast_total_target_position_invalid": "invalid total target position",
         }
         values.update(overrides)
         return validate_algo_start_inputs(**values)
@@ -231,6 +232,25 @@ class AlgoOrderValidationTests(unittest.TestCase):
         self.assertEqual(cmd["fast_trading_target_percentage"], 10)
         self.assertEqual(cmd["fast_trading_cycle_seconds"], 60)
         self.assertFalse(cmd["fast_trading_test_mode"])
+
+    def test_optional_total_target_position_is_validated_for_both_modes(self):
+        valid = {"price_limit": 10, "account_ids": ["A"], "book_levels": 2,
+                 "target_percentage": 100, "cycle_seconds": 30}
+        for mode in ("E", "F"):
+            for value, expected in ((0, 0), (1000, 1000), (1000.0, 1000), (" 1000 ", 1000),
+                                    (None, None), ("", None), ("  ", None)):
+                with self.subTest(mode=mode, value=value):
+                    command, error = self._validate(mode=mode, fast_config={**valid, "total_target_position": value})
+                    self.assertIsNone(error)
+                    if expected is None:
+                        self.assertNotIn("fast_trading_total_target_position", command)
+                    else:
+                        self.assertEqual(command["fast_trading_total_target_position"], expected)
+            for value in (-1, 1.5, True, False, [], {}, "bad", "NaN", "Infinity", 2**53):
+                with self.subTest(mode=mode, invalid=value):
+                    command, error = self._validate(mode=mode, fast_config={**valid, "total_target_position": value})
+                    self.assertIsNone(command)
+                    self.assertEqual(error, "invalid total target position")
 
     def test_fast_settings_reject_invalid_price_accounts_and_controls(self):
         common = {

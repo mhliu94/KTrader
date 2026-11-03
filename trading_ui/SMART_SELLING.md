@@ -121,10 +121,11 @@ rejected before publication rather than rounded silently.
 Recent account snapshots, enabled trading for every selected account, sufficient
 available holdings, and a reconciled order-status feed are required to start.
 Known open orders and unacknowledged manual commands for the selected account and
-instrument must resolve before starting. Only one algorithm session may run at a
-time across E, F, and G, including scheduled sessions and sessions still reconciling
-a stop. Stop the current session and allow its outstanding orders to resolve before
-starting another.
+instrument must resolve before starting. Several algorithm sessions may run at the
+same time across E, F, and G, but each account participates in at most one session.
+A scheduled session, or a session still reconciling a stop, keeps its accounts. Stop
+the session that owns an account and allow its outstanding orders to resolve before
+using that account in another session; other accounts can start a session right away.
 
 Manual order instructions, including cancellations and orders for other symbols,
 are rejected for accounts owned by an algorithm session. Other accounts remain

@@ -78,8 +78,9 @@ class SimulatedCycleClock:
         stop_event.is_set.return_value = False
         stop_event.wait.side_effect = wait
         key = manager._strategy_key(command["trading_mode"], command["symbol"])
-        strategy = _FastStrategy(key=key, command=command, stop_event=stop_event)
-        manager._strategies[key] = strategy
+        strategy = _FastStrategy(key=key, command=command, stop_event=stop_event,
+                                 session_id=command["command_id"])
+        manager._strategies[strategy.session_id] = strategy
         manager._run_strategy(strategy)
         return strategy
 
@@ -947,15 +948,10 @@ class FastTradingManagerTests(unittest.TestCase):
         ))
         strategies = []
         for mode, symbol, account in (("E", "AAPL", "A"), ("F", "AAPL", "B"), ("E", "MSFT", "REMOVED")):
-            command = {**strategy_command(), "trading_mode": mode, "symbol": symbol,
-                       "fast_trading_account_ids": [account]}
-            # Simulate legacy state: new starts now allow only one session.
-            key = manager._strategy_key(mode, symbol)
-            strategy = _FastStrategy(key=key, command=command, stop_event=threading.Event())
-            strategy.thread = threading.Thread(target=manager._run_strategy, args=(strategy,))
-            manager._strategies[key] = strategy
-            strategy.thread.start()
-            strategies.append(strategy)
+            command = {**strategy_command(), "command_id": f"{mode}-{symbol}", "trading_mode": mode,
+                       "symbol": symbol, "fast_trading_account_ids": [account]}
+            manager.start_strategy(command)
+            strategies.append(manager._strategies[command["command_id"]])
         self.assertEqual(manager.stop_all(), 3)
         self.assertEqual(manager._strategies, {})
         self.assertTrue(all(strategy.stop_event.is_set() for strategy in strategies))
@@ -963,7 +959,32 @@ class FastTradingManagerTests(unittest.TestCase):
         self.assertEqual(manager.stop_all(), 0)
         publish.assert_not_called()
 
-    def test_start_requires_previous_session_to_stop_even_for_other_accounts_and_symbols(self):
+    def test_sessions_run_at_once_unless_they_share_an_account(self):
+        manager = FastTradingStrategyManager(
+            market_data_store=MarketDataStore(),
+            account_metas_provider=lambda: metas("A", "B", "C"),
+            publish_command=Mock(),
+        )
+        self.addCleanup(manager.stop_all)
+        manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["A", "B"]})
+        for mode, symbol, accounts in (("F", "MSFT", ["B"]), ("E", "AAPL", ["C", "A"])):
+            with self.subTest(mode=mode, symbol=symbol, accounts=accounts):
+                with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
+                    manager.start_strategy({**strategy_command(), "command_id": "second",
+                                            "trading_mode": mode, "symbol": symbol,
+                                            "fast_trading_account_ids": accounts})
+        self.assertFalse(manager.owns_account("C"))
+        # Free accounts may start in any mode and symbol, including the same mode and symbol.
+        manager.start_strategy({**strategy_command(), "command_id": "second",
+                                "fast_trading_account_ids": ["C"]})
+        self.assertEqual(len(manager._strategies), 2)
+        self.assertTrue(all(manager.owns_account(account) for account in ("A", "B", "C")))
+        self.assertEqual(manager.stop_strategy("E", "AAPL"), 2)
+        self.assertFalse(manager.has_active_session())
+        manager.start_strategy({**strategy_command(), "trading_mode": "F", "symbol": "MSFT",
+                                "fast_trading_account_ids": ["A", "C"]})
+
+    def test_duplicate_start_command_id_is_rejected_while_its_session_is_active(self):
         manager = FastTradingStrategyManager(
             market_data_store=MarketDataStore(),
             account_metas_provider=lambda: metas("A", "B"),
@@ -971,15 +992,26 @@ class FastTradingManagerTests(unittest.TestCase):
         )
         self.addCleanup(manager.stop_all)
         manager.start_strategy(strategy_command())
-        for mode, symbol, account in (("E", "AAPL", "A"), ("F", "MSFT", "B")):
-            with self.assertRaisesRegex(ValueError, "Stop the existing"):
-                manager.start_strategy({**strategy_command(), "trading_mode": mode,
-                                        "symbol": symbol, "fast_trading_account_ids": [account]})
-        self.assertTrue(manager.owns_account("A"))
+        with self.assertRaisesRegex(ValueError, "command id is already active"):
+            manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["B"]})
         self.assertFalse(manager.owns_account("B"))
         manager.stop_all()
+        manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["B"]})
+
+    def test_accounts_owned_by_smart_selling_cannot_join_a_fast_session(self):
+        smart_owned = {"B"}
+        manager = FastTradingStrategyManager(
+            market_data_store=MarketDataStore(),
+            account_metas_provider=lambda: metas("A", "B"),
+            publish_command=Mock(),
+            smart_owns_account=smart_owned.__contains__,
+        )
+        self.addCleanup(manager.stop_all)
+        with self.assertRaisesRegex(ValueError, r"Account\(s\) B already belong"):
+            manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["A", "B"]})
         self.assertFalse(manager.has_active_session())
-        manager.start_strategy({**strategy_command(), "trading_mode": "F", "symbol": "MSFT"})
+        smart_owned.clear()
+        manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["A", "B"]})
 
     def test_stopping_worker_reserves_session_until_inflight_cycle_exits(self):
         entered, release = threading.Event(), threading.Event()
@@ -993,16 +1025,19 @@ class FastTradingManagerTests(unittest.TestCase):
             release.wait(10)
             return Mock(commands=[], capacity_noop=False, target_position_reached=False, reason="test cycle")
         manager.run_cycle = blocked_cycle
-        key = manager.start_strategy(strategy_command())
-        strategy = manager._strategies[key]
+        manager.start_strategy(strategy_command())
+        strategy = manager._strategies[strategy_command()["command_id"]]
         try:
             self.assertTrue(entered.wait(2))
             self.assertEqual(manager.stop_all(), 1)
             self.assertTrue(manager.has_active_session())
             self.assertTrue(manager.owns_account("A"))
             self.assertFalse(manager.has_running_strategy("A", "AAPL"))
-            with self.assertRaisesRegex(ValueError, "Stop the existing"):
-                manager.start_strategy(strategy_command())
+            with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
+                manager.start_strategy({**strategy_command(), "command_id": "retry"})
+            # The stopping session reserves only its own accounts.
+            manager.start_strategy({**strategy_command(), "command_id": "other",
+                                    "fast_trading_account_ids": ["B"]})
         finally:
             release.set()
             strategy.thread.join(2)

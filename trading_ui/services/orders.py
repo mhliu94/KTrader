@@ -622,6 +622,15 @@ def validate_algo_start_inputs(
     ), None
 
 
+def algo_account_conflict_error(account_ids: List[str]) -> str:
+    """Each account may participate in at most one algorithm session (E, F or G)."""
+    accounts = ", ".join(str(account_id) for account_id in account_ids)
+    return (
+        f"Account(s) {accounts} already belong to an algorithm session; "
+        "stop it and await outstanding order confirmations before starting another"
+    )
+
+
 def build_algo_stop_command(reason: str | None = None) -> Dict:
     """An unfiltered stop notification for all modes, symbols, and accounts."""
     cmd_id = f"algo_stop_{iso_utc_now()}_{int(time.time() * 1_000_000)}"

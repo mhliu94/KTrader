@@ -209,24 +209,46 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no available position"):
             self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
 
-    def test_global_active_session_and_stopping_reservation_block_other_starts(self):
+    def test_stopping_parent_reserves_its_account_while_other_accounts_may_start(self):
         self.add_account()
         command = self.submit()
         self.runtime.stop_all()
         self.flush()
         self.assertTrue(self.runtime.has_active_session())
         self.assertTrue(self.runtime.owns_account("A"))
-        with self.assertRaisesRegex(ValueError, "active session"):
-            self.runtime.start_parent(dict(account_ids=["B"], symbol="OTHER"))
+        for settings in (dict(account_ids=["A"], symbol="OTHER"),
+                         dict(account_ids=["B", "A"], symbol="XYZ")):
+            with self.subTest(settings=settings):
+                with self.assertRaisesRegex(ValueError, r"Account\(s\) A already belong"):
+                    self.runtime.start_parent(settings)
+        other = self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
+        self.assertTrue(self.runtime.owns_account("B"))
         self.runtime.on_order_payload(self.snapshot(command, status="CANCELED", sequence=2))
-        self.assertFalse(self.runtime.has_active_session())
         self.assertFalse(self.runtime.owns_account("A"))
-        self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
+        self.assertTrue(self.runtime.has_active_session())
+        self.runtime.stop_parent(other["parent_id"])
+        self.assertFalse(self.runtime.has_active_session())
+        self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
 
-    def test_any_fast_session_blocks_start_even_on_different_account_or_symbol(self):
-        self.runtime.fast_active = lambda: True
-        with self.assertRaisesRegex(ValueError, "existing algorithm"):
-            self.start()
+    def test_parents_on_disjoint_accounts_run_at_once_across_symbols(self):
+        self.add_account()
+        self.snapshots["B"].positions.append(Position("US.OTHER", 300, available_qty=300))
+        first = self.start()
+        second = self.runtime.start_parent(dict(account_ids=["B"], symbol="OTHER", deadline=None))
+        self.assertEqual(
+            {first["parent_id"], second["parent_id"]},
+            {parent["parent_id"] for parent in self.engine.list_parents(active_only=True)},
+        )
+        with self.assertRaisesRegex(ValueError, r"Account\(s\) B already belong"):
+            self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
+        self.assertEqual(self.runtime.stop_all(), 2)
+
+    def test_fast_sessions_block_only_the_accounts_they_own(self):
+        self.add_account()
+        self.runtime.fast_owns_account = {"B"}.__contains__
+        with self.assertRaisesRegex(ValueError, r"Account\(s\) B already belong"):
+            self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
+        self.start()
 
     def test_no_deadline_publishes_and_does_not_request_completion_forecast(self):
         self.start(deadline=None)
@@ -514,12 +536,12 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         self.assertEqual(self.engine._load(parent["parent_id"])["tick_size"], "0.01")
 
     def test_one_account_symbol_and_conflicting_fast_strategy_are_rejected(self):
-        self.runtime.fast_conflict = lambda a, s: True
-        with self.assertRaisesRegex(ValueError, "existing algorithm"):
+        self.runtime.fast_owns_account = lambda account: True
+        with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
             self.start()
-        self.runtime.fast_conflict = lambda a, s: False
+        self.runtime.fast_owns_account = lambda account: False
         self.start()
-        with self.assertRaisesRegex(ValueError, "already owns"):
+        with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
             self.start(symbol="XYZ")
 
     def test_api_authentication_origin_validation_status_and_stop(self):

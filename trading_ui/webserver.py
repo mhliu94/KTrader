@@ -41,6 +41,7 @@ from .services.orders import (
     validate_limit_order_inputs,
     validate_cancel_open_orders_inputs,
     validate_algo_start_inputs,
+    algo_account_conflict_error,
     build_algo_stop_command,
     validate_currency_conversion_inputs,
     validate_trading_status_inputs,
@@ -253,8 +254,10 @@ def _publish_fast_trading_command(command: Dict, key: str) -> None:
         ):
             return
         if SMART_SELLING_MANAGER:
-            if SMART_SELLING_MANAGER.has_active_session():
-                raise ValueError("Stop Smart selling before starting another algorithm")
+            # Sessions never share an account, so a Smart selling owner here is a fault.
+            account_id = str(command.get("account_id") or "")
+            if SMART_SELLING_MANAGER.owns_account(account_id):
+                raise ValueError(algo_account_conflict_error([account_id]))
             SMART_SELLING_MANAGER.track_external_order(command)
         _publish_trading_command(command, key)
 
@@ -293,26 +296,17 @@ def _publish_trading_command(command: Dict, key: str) -> None:
     COMMANDS_PRODUCER.publish_order(command, key=key)
 
 
-def _require_idle_algorithms():
-    if any(
-        manager and manager.has_active_session()
-        for manager in (FAST_TRADING_MANAGER, SMART_SELLING_MANAGER)
-    ):
-        raise ValueError(
-            "Stop the existing algorithm session and await outstanding order confirmations "
-            "before starting another"
-        )
-
-
+# Several algorithm sessions may run at once, across modes E, F and G, but each
+# account participates in at most one. The managers check ownership across modes
+# through the callbacks wired in _start_services; one lock serializes starts so
+# two sessions cannot claim the same account at the same time.
 def _start_fast_strategy(command):
     with ALGO_CONTROL_LOCK:
-        _require_idle_algorithms()
         return FAST_TRADING_MANAGER.start_strategy(command)
 
 
 def _start_smart_parent(settings):
     with ALGO_CONTROL_LOCK:
-        _require_idle_algorithms()
         return SMART_SELLING_MANAGER.start_parent(settings)
 
 
@@ -380,6 +374,9 @@ def _start_services() -> None:
         reporting=ACTIVITY_REPORTING,
         publish_command=_publish_fast_trading_command,
         fast_trading_settings=APP_CONFIG.get("fast_trading"),
+        smart_owns_account=lambda account: (
+            SMART_SELLING_MANAGER is not None and SMART_SELLING_MANAGER.owns_account(account)
+        ),
     )
     if APP_CONFIG["smart_selling"]["enabled"]:
         SMART_SELLING_MANAGER = SmartSellingRuntime(
@@ -388,10 +385,7 @@ def _start_services() -> None:
             account_metas_provider=lambda: ACCOUNT_METAS,
             snapshots_provider=lambda: get_served_snapshots()[0],
             publish_command=_publish_trading_command,
-            fast_active=lambda: FAST_TRADING_MANAGER.has_active_session(),
-            fast_conflict=lambda account, symbol: FAST_TRADING_MANAGER.has_strategy(
-                account, symbol
-            ),
+            fast_owns_account=lambda account: FAST_TRADING_MANAGER.owns_account(account),
         )
         SMART_SELLING_CONSUMER = SmartSellingConsumer(APP_CONFIG, SMART_SELLING_MANAGER)
         SMART_SELLING_CONSUMER.start()

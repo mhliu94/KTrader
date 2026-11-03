@@ -12,6 +12,7 @@ from .market_data import BookLevel, MarketDataStore, OrderBookSnapshot
 from .operations_log import OperationsLog
 from .orders import (
     FAST_TRADING_TARGET_PERCENTAGE_CHOICES,
+    algo_account_conflict_error,
     build_limit_order_fok_command,
     parse_total_target_position,
 )
@@ -86,6 +87,8 @@ class _FastStrategy:
     key: str
     command: Dict[str, Any]
     stop_event: threading.Event
+    # The start command id; sessions sharing a key (mode and symbol) stay distinct.
+    session_id: str = ""
     thread: Optional[threading.Thread] = None
     started_at: str = ""
     cycles: int = 0
@@ -557,6 +560,7 @@ class FastTradingStrategyManager:
         fast_trading_settings: Optional[Mapping[str, Any]] = None,
         monotonic: Callable[[], float] = time.monotonic,
         reporting=None,
+        smart_owns_account: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self._market_data_store = market_data_store
         self._account_metas_provider = account_metas_provider
@@ -566,7 +570,11 @@ class FastTradingStrategyManager:
         self._publish_command = publish_command
         self._settings = _runtime_settings(fast_trading_settings)
         self._monotonic = monotonic
+        # Smart selling (mode G) sessions own accounts too; no account may be in two sessions.
+        self._smart_owns_account = smart_owns_account or (lambda account_id: False)
         self._lock = threading.RLock()
+        # Running sessions keyed by session id. Several may run at once as
+        # long as no account participates in more than one of them.
         self._strategies: Dict[str, _FastStrategy] = {}
         # Stopping workers still own their session until their last handoff ends.
         self._stopping_strategies: Dict[str, _FastStrategy] = {}
@@ -581,16 +589,6 @@ class FastTradingStrategyManager:
     def _strategy_key(trading_mode: str, symbol: str) -> str:
         return f"{str(trading_mode).strip().upper()}:{str(symbol).strip().upper()}"
 
-    def has_strategy(self, account_id: str, symbol: str) -> bool:
-        """Used by the control server to reserve an instrument for Smart selling."""
-        target = _normalize_symbol(symbol)
-        with self._lock:
-            return any(
-                _normalize_symbol(strategy.command.get("symbol")) == target
-                and account_id in self._strategy_accounts(strategy.command)
-                for strategy in (*self._strategies.values(), *self._stopping_strategies.values())
-            ) or account_id in self._inflight_account_ids
-
     def has_active_session(self) -> bool:
         with self._lock:
             return bool(self._strategies or self._stopping_strategies or self._inflight_account_ids)
@@ -601,6 +599,19 @@ class FastTradingStrategyManager:
                 account_id in self._strategy_accounts(strategy.command)
                 for strategy in (*self._strategies.values(), *self._stopping_strategies.values())
             )
+
+    def _require_accounts_available(self, account_ids: Sequence[str]) -> None:
+        """Each account may participate in at most one algorithm session (E, F or G).
+
+        Stopping sessions and in-flight handoffs keep their accounts reserved.
+        """
+        owned = [
+            account_id
+            for account_id in account_ids
+            if self.owns_account(account_id) or self._smart_owns_account(account_id)
+        ]
+        if owned:
+            raise ValueError(algo_account_conflict_error(owned))
 
     def has_running_strategy(self, account_id: str, symbol: str) -> bool:
         """Only a running worker may hand off a new order after a stop request."""
@@ -655,16 +666,19 @@ class FastTradingStrategyManager:
         return mode, symbol, price_limit, account_ids, book_levels, target_percentage, cycle_seconds, total_target_position
 
     def start_strategy(self, start_command: Dict[str, Any]) -> str:
-        mode, symbol, _, _, book_levels, target_percentage, cycle_seconds, total_target_position = self._validated_strategy_values(start_command)
+        mode, symbol, _, account_ids, book_levels, target_percentage, cycle_seconds, total_target_position = self._validated_strategy_values(start_command)
         strategy_command = dict(start_command)
         if total_target_position is not None:
             strategy_command["fast_trading_total_target_position"] = total_target_position
-        if self._reporting is not None and not strategy_command.get("command_id"):
+        # The start command id identifies the session here, in reports and in logs.
+        if not strategy_command.get("command_id"):
             strategy_command["command_id"] = uuid.uuid4().hex
+        session_id = str(strategy_command["command_id"])
         key = self._strategy_key(mode, symbol)
 
         strategy = _FastStrategy(
             key=key,
+            session_id=session_id,
             command=strategy_command,
             stop_event=threading.Event(),
             started_at=_utc_now_iso(),
@@ -677,9 +691,10 @@ class FastTradingStrategyManager:
         )
         strategy.thread = thread
         with self._lock:
-            if self.has_active_session():
-                raise ValueError("Stop the existing algorithm session before starting another")
-            self._strategies[key] = strategy
+            if session_id in self._strategies or session_id in self._stopping_strategies:
+                raise ValueError("An algorithm session with this command id is already active")
+            self._require_accounts_available(account_ids)
+            self._strategies[session_id] = strategy
             self._report(
                 "start_session", strategy.command.get("command_id"),
                 dict(strategy.command), sorted(self._strategy_accounts(strategy.command)),
@@ -689,7 +704,7 @@ class FastTradingStrategyManager:
             try:
                 thread.start()
             except BaseException:
-                self._strategies.pop(key, None)
+                self._strategies.pop(session_id, None)
                 self._report(
                     "end_session", strategy.command.get("command_id"),
                     status="failed", reason="Strategy worker failed to start",
@@ -711,39 +726,42 @@ class FastTradingStrategyManager:
         return key
 
     def stop_strategy(self, trading_mode: str, symbol: str) -> int:
-        return self._stop_keys(
-            [self._strategy_key(trading_mode, symbol)],
-            reason=STOP_REASON_MANUAL,
-        )
+        """Stop every running session for this mode and symbol."""
+        key = self._strategy_key(trading_mode, symbol)
+        with self._lock:
+            session_ids = [
+                session_id for session_id, strategy in self._strategies.items() if strategy.key == key
+            ]
+        return self._stop_sessions(session_ids, reason=STOP_REASON_MANUAL)
 
     def stop_matching(self, trading_mode: str, account_ids: Optional[List[str]] = None) -> int:
         mode = str(trading_mode or "").strip().upper()
         account_filter = set(_deduplicated_account_ids(account_ids or []))
-        keys: List[str] = []
+        session_ids: List[str] = []
         with self._lock:
-            for key, strategy in self._strategies.items():
+            for session_id, strategy in self._strategies.items():
                 strategy_mode = str(strategy.command.get("trading_mode") or "").strip().upper()
                 if strategy_mode != mode:
                     continue
                 if account_filter and not (self._strategy_accounts(strategy.command) & account_filter):
                     continue
-                keys.append(key)
-        return self._stop_keys(keys, reason=STOP_REASON_MANUAL)
+                session_ids.append(session_id)
+        return self._stop_sessions(session_ids, reason=STOP_REASON_MANUAL)
 
     def stop_all(self) -> int:
         with self._lock:
-            keys = list(self._strategies)
-        return self._stop_keys(keys, reason=STOP_REASON_MANUAL)
+            session_ids = list(self._strategies)
+        return self._stop_sessions(session_ids, reason=STOP_REASON_MANUAL)
 
-    def _stop_keys(self, keys: List[str], reason: str) -> int:
+    def _stop_sessions(self, session_ids: List[str], reason: str) -> int:
         strategies: List[_FastStrategy] = []
         with self._lock:
-            for key in keys:
-                strategy = self._strategies.pop(key, None)
+            for session_id in session_ids:
+                strategy = self._strategies.pop(session_id, None)
                 if strategy is not None:
                     strategy.last_reason = reason
                     strategy.stop_event.set()
-                    self._stopping_strategies[key] = strategy
+                    self._stopping_strategies[session_id] = strategy
                     self._report("heartbeat_session", strategy.command.get("command_id"), status="stopping")
                     strategies.append(strategy)
 
@@ -752,7 +770,7 @@ class FastTradingStrategyManager:
                 strategy.thread.join(timeout=2.0)
             with self._lock:
                 if strategy.thread is None or not strategy.thread.is_alive():
-                    self._stopping_strategies.pop(strategy.key, None)
+                    self._stopping_strategies.pop(strategy.session_id, None)
             LOGGER.info(
                 "Algo trading stopped mode=%s symbol=%s key=%s command_id=%s reason=%s",
                 strategy.command.get("trading_mode"),
@@ -868,11 +886,11 @@ class FastTradingStrategyManager:
             LOGGER.exception("Fast trading strategy failed key=%s", strategy.key)
         finally:
             with self._lock:
-                existing = self._strategies.get(strategy.key)
+                existing = self._strategies.get(strategy.session_id)
                 if existing is strategy:
-                    self._strategies.pop(strategy.key, None)
-                if self._stopping_strategies.get(strategy.key) is strategy:
-                    self._stopping_strategies.pop(strategy.key, None)
+                    self._strategies.pop(strategy.session_id, None)
+                if self._stopping_strategies.get(strategy.session_id) is strategy:
+                    self._stopping_strategies.pop(strategy.session_id, None)
                 reason = strategy.last_reason or "Strategy stopped"
                 cycles = strategy.cycles
                 published_commands = strategy.published_commands

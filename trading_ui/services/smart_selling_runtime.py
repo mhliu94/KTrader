@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 import time
 
+from .orders import algo_account_conflict_error
 from .smart_selling import SmartSellingEngine
 from .smart_selling_feedback import SmartSellingFeedback
 from .smart_selling_market import SmartSellingMarketAdapter
@@ -27,8 +28,7 @@ class SmartSellingRuntime:
         account_metas_provider,
         snapshots_provider,
         publish_command,
-        fast_conflict=None,
-        fast_active=None,
+        fast_owns_account=None,
         engine=None,
         clock=time.monotonic,
         wall_clock=time.time,
@@ -41,8 +41,8 @@ class SmartSellingRuntime:
         self._reporting = reporting
         self._reported_sessions = set()
         self._reported_terminal = set()
-        self.fast_conflict = fast_conflict or (lambda account, symbol: False)
-        self.fast_active = fast_active or (lambda: False)
+        # Fast trading (modes E/F) sessions own accounts too; no account may be in two sessions.
+        self.fast_owns_account = fast_owns_account or (lambda account_id: False)
         self.clock, self.wall_clock = clock, wall_clock
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -215,10 +215,14 @@ class SmartSellingRuntime:
         if type(settings.get("imminent_event", False)) is not bool:
             raise ValueError("imminent_event must be boolean")
         with self._lock:
-            if self.has_active_session():
-                raise ValueError("Smart selling already owns an active session; stop it before starting another")
-            if self.fast_active() or any(self.fast_conflict(account, symbol) for account in accounts):
-                raise ValueError("Stop the existing algorithm before starting another session")
+            # Each account may participate in at most one algorithm session (E, F or G).
+            # Stopping and reconciling sessions keep their accounts reserved.
+            owned = [
+                account for account in accounts
+                if self.owns_account(account) or self.fast_owns_account(account)
+            ]
+            if owned:
+                raise ValueError(algo_account_conflict_error(owned))
             if self.feeds["orders"] != "live":
                 raise ValueError(
                     "Wait for the order-status feed to finish reconciliation before starting Smart selling"

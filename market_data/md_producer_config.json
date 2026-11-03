@@ -15,7 +15,8 @@
     "POM",
     "TANH",
     "UZX",
-    "CHSN"
+    "CHSN",
+    "BDMD"
   ],
   "trading_volume_topic": "trading-volume",
   "trading_volume_symbols": [
@@ -30,7 +31,8 @@
     "POM",
     "TANH",
     "UZX",
-    "CHSN"
+    "CHSN",
+    "BDMD"
   ],
   "trading_volume_poll_interval_seconds": 5
 }

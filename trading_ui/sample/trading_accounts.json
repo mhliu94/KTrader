@@ -84,14 +84,13 @@
       "hidden": true
     },
     {
-      "ip_address": "209.250.240.250",
-      "machine_alias": "Vultr-BareMetal-NL2",
+      "ip_address": "158.69.212.242",
+      "machine_alias": "OVH-CA-East3",
       "numeric_id": 10,
       "string_id": "ZR-WJY",
       "owner_type": "individual",
       "broker": "Zhuorui",
-      "trading_medium": "API",
-      "monitor": true
+      "trading_medium": "API"
     },
     {
       "ip_address": "149.56.209.7",
@@ -136,14 +135,13 @@
       "monitor": false
     },
     {
-      "ip_address": "57.128.235.101",
-      "machine_alias": "OVH-BareMetal-PL1",
+      "ip_address": "57.131.202.105",
+      "machine_alias": "OVH-PL2",
       "numeric_id": 18,
       "string_id": "ZR-HWK",
       "owner_type": "individual",
       "broker": "Zhuorui",
-      "trading_medium": "API",
-      "monitor": true
+      "trading_medium": "API"
     },
     {
       "ip_address": "148.113.190.49",

@@ -108,7 +108,7 @@ class AccountPortfolioTests(unittest.TestCase):
                 summary = portfolio_fragment(html)
                 self.assertIn("id='portfolio-market-value-total'>4,020.00</div>", summary)
                 self.assertIn(
-                    "Estimated total market value of positions" if lang == "en" else "持仓预估总市值",
+                    "Est. positions value" if lang == "en" else "持仓预估总市值",
                     summary,
                 )
 

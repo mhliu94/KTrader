@@ -24,7 +24,7 @@ I18N: Dict[str, Dict[str, str]] = {
         "portfolio_market_value": "Market Value",
         "portfolio_market_value_help": "Estimated Market Value (quantity × latest price)",
         "portfolio_totals": "Portfolio totals",
-        "portfolio_total_market_value": "Estimated total market value of positions",
+        "portfolio_total_market_value": "Est. positions value",
         "portfolio_total_market_value_help": "Excludes holdings without prices.",
         "trading_accounts": "Trading accounts",
         "sort_accounts": "Sort accounts",

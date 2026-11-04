@@ -50,8 +50,8 @@ class SmartSellingTemplateTests(unittest.TestCase):
         self.assertNotIn("best ask", urgency)
 
     def test_all_smart_selling_labels_have_both_translations(self):
-        english = {key for key in I18N["en"] if key.startswith("smart_") or key == "mode_g"}
-        chinese = {key for key in I18N["zh"] if key.startswith("smart_") or key == "mode_g"}
+        english = {key for key in I18N["en"] if key.startswith("smart_") or key in ("mode_g", "mode_h")}
+        chinese = {key for key in I18N["zh"] if key.startswith("smart_") or key in ("mode_g", "mode_h")}
         self.assertEqual(english, chinese)
         for key in english:
             self.assertTrue(I18N["en"][key])
@@ -60,6 +60,25 @@ class SmartSellingTemplateTests(unittest.TestCase):
         self.assertIn("G 智能卖出", page)
         self.assertIn("不保证在截止时间前全部成交", page)
         self.assertIn("浏览器本地时区", page)
+
+
+class SmartBuyingTemplateTests(unittest.TestCase):
+    def test_buying_configuration_is_localized_and_execution_is_disabled(self):
+        for language in ("en", "zh"):
+            with self.subTest(language=language):
+                page = render_control_panel_page(language, account_metas(), ["AAPL"])
+                self.assertIn(I18N[language]["mode_h"], page)
+                self.assertIn(I18N[language]["smart_buying_config_title"], page)
+                self.assertIn(I18N[language]["smart_maximum_price"], page)
+                self.assertIn(I18N[language]["smart_buying_unavailable"], page)
+                self.assertIn('id="smart-buying-modal" hidden', page)
+                self.assertIn('id="smart-buying-settings" disabled', page)
+                self.assertRegex(page, r'id="smart-buying-confirm"[^>]* disabled')
+                form = re.search(r'<form[^>]*id="algo-form".*?</form>', page, re.S).group()
+                self.assertNotIn('id="smart-buying-settings"', form)
+                for account in ("A", "B", "C"):
+                    self.assertIn(f'type="checkbox" data-smart-buying-account-id="{account}"', page)
+                    self.assertIn(f'data-smart-buying-account-balance="{account}"', page)
 
 
 @unittest.skipUnless(CHROME, "Chrome/Chromium is required for UI behavior tests")

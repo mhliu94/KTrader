@@ -360,11 +360,11 @@ class FastTradingApiPayloadTests(unittest.TestCase):
         self.assertIn("could not be confirmed", query["err"][0])
         self.assertEqual(self.published_commands, [])
 
-    def test_retired_modes_cannot_be_started_from_either_endpoint(self):
+    def test_unavailable_modes_cannot_be_started_from_either_endpoint(self):
         client = TestClient(webserver.app)
         self.addCleanup(client.close)
         client.cookies.set("auth_token", "token")
-        for mode in "ABCD":
+        for mode in "ABCDH":
             with self.subTest(mode=mode):
                 payload = {"trading_mode": mode, "symbol": "AAPL"}
                 response = client.post("/api/submit-algo", json=payload)

@@ -1525,80 +1525,92 @@ def render_trading_status_page(
 """
 
 
-def _smart_selling_controls(
-    lang: str, account_metas: Dict[str, AccountMeta], account_balance_helpers: str
-) -> tuple[str, str, str]:
+def _smart_trading_settings(
+    lang: str, account_metas: Dict[str, AccountMeta], *, buying: bool = False
+) -> str:
+    modal_prefix = "smart-buying" if buying else "smart-selling"
+    prefix = "smart-buying" if buying else "smart"
+    label_prefix = "smart_buying" if buying else "smart"
+    price_bound = "maximum" if buying else "minimum"
+    help_key = "smart_buying_unavailable" if buying else "smart_completion_help"
+    confirm_disabled = ' disabled aria-describedby="smart-buying-help"' if buying else ""
     account_options = "\n".join(
         f'<label class="fast-account-row">'
-        f'<input type="checkbox" data-smart-account-id="{html_escape(account.id)}">'
+        f'<input type="checkbox" data-{prefix}-account-id="{html_escape(account.id)}">'
         f'<span class="fast-account-label">#{account.num_id} '
         f'{html_escape(account.id)} ({html_escape(account.broker)}) '
-        f'<b data-smart-account-balance="{html_escape(account.id)}">—</b></span></label>'
+        f'<b data-{prefix}-account-balance="{html_escape(account.id)}">—</b></span></label>'
         for account in sorted(account_metas.values(), key=lambda account: account.num_id)
     )
-    settings = f"""
-    <div class="modal-backdrop" id="smart-selling-modal" hidden>
-      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="smart-selling-title">
+    return f"""
+    <div class="modal-backdrop" id="{modal_prefix}-modal" hidden>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="{modal_prefix}-title">
         <div class="modal-header">
           <div>
-            <div class="acct" id="smart-selling-title">{html_escape(t(lang, 'smart_config_title'))}</div>
-            <div class="help">{html_escape(t(lang, 'symbol'))}: <b id="smart-selling-symbol">—</b></div>
+            <div class="acct" id="{modal_prefix}-title">{html_escape(t(lang, f'{label_prefix}_config_title'))}</div>
+            <div class="help">{html_escape(t(lang, 'symbol'))}: <b id="{modal_prefix}-symbol">—</b></div>
           </div>
-          <button class="modal-close" id="smart-selling-close" type="button" aria-label="{html_escape(t(lang, 'fast_config_cancel'))}">&times;</button>
+          <button class="modal-close" id="{modal_prefix}-close" type="button" aria-label="{html_escape(t(lang, 'fast_config_cancel'))}">&times;</button>
         </div>
-      <fieldset id="smart-selling-settings" disabled style="border:0;padding:0;margin:0;min-width:0;">
-        <p class="help">{html_escape(t(lang, 'smart_description'))}</p>
+      <fieldset id="{modal_prefix}-settings" disabled style="border:0;padding:0;margin:0;min-width:0;">
+        <p class="help">{html_escape(t(lang, f'{label_prefix}_description'))}</p>
         <div>
-          <label id="smart-accounts-label">{html_escape(t(lang, 'fast_accounts'))}</label>
-          <div class="fast-account-list" id="smart-selling-accounts" role="group" aria-labelledby="smart-accounts-label">{account_options}</div>
+          <label id="{prefix}-accounts-label">{html_escape(t(lang, 'fast_accounts'))}</label>
+          <div class="fast-account-list" id="{modal_prefix}-accounts" role="group" aria-labelledby="{prefix}-accounts-label">{account_options}</div>
         </div>
         <div class="row" style="margin-top:12px;">
           <div>
-            <label id="smart-start-label">{html_escape(t(lang, 'smart_start'))}</label>
-            <div class="choice-grid" role="radiogroup" aria-labelledby="smart-start-label">
-              <input class="choice-input" id="smart-start-now" type="radio" name="smart_start_mode" value="now" checked>
-              <label class="choice-btn" for="smart-start-now">{html_escape(t(lang, 'smart_start_now'))}</label>
-              <input class="choice-input" id="smart-start-scheduled" type="radio" name="smart_start_mode" value="scheduled">
-              <label class="choice-btn" for="smart-start-scheduled">{html_escape(t(lang, 'smart_start_scheduled'))}</label>
+            <label id="{prefix}-start-label">{html_escape(t(lang, 'smart_start'))}</label>
+            <div class="choice-grid" role="radiogroup" aria-labelledby="{prefix}-start-label">
+              <input class="choice-input" id="{prefix}-start-now" type="radio" name="{prefix}_start_mode" value="now" checked>
+              <label class="choice-btn" for="{prefix}-start-now">{html_escape(t(lang, 'smart_start_now'))}</label>
+              <input class="choice-input" id="{prefix}-start-scheduled" type="radio" name="{prefix}_start_mode" value="scheduled">
+              <label class="choice-btn" for="{prefix}-start-scheduled">{html_escape(t(lang, 'smart_start_scheduled'))}</label>
             </div>
-            <input id="smart-start" type="datetime-local" step="1" disabled hidden aria-label="{html_escape(t(lang, 'smart_start'))}" aria-describedby="smart-local-time">
+            <input id="{prefix}-start" type="datetime-local" step="1" disabled hidden aria-label="{html_escape(t(lang, 'smart_start'))}" aria-describedby="{prefix}-local-time">
           </div>
           <div>
-            <label id="smart-deadline-label">{html_escape(t(lang, 'smart_deadline'))}</label>
-            <div class="choice-grid" role="radiogroup" aria-labelledby="smart-deadline-label">
-              <input class="choice-input" id="smart-no-deadline" type="radio" name="smart_deadline_mode" value="none">
-              <label class="choice-btn" for="smart-no-deadline">{html_escape(t(lang, 'smart_no_deadline'))}</label>
-              <input class="choice-input" id="smart-set-deadline" type="radio" name="smart_deadline_mode" value="scheduled" checked>
-              <label class="choice-btn" for="smart-set-deadline">{html_escape(t(lang, 'smart_set_deadline'))}</label>
+            <label id="{prefix}-deadline-label">{html_escape(t(lang, 'smart_deadline'))}</label>
+            <div class="choice-grid" role="radiogroup" aria-labelledby="{prefix}-deadline-label">
+              <input class="choice-input" id="{prefix}-no-deadline" type="radio" name="{prefix}_deadline_mode" value="none">
+              <label class="choice-btn" for="{prefix}-no-deadline">{html_escape(t(lang, 'smart_no_deadline'))}</label>
+              <input class="choice-input" id="{prefix}-set-deadline" type="radio" name="{prefix}_deadline_mode" value="scheduled" checked>
+              <label class="choice-btn" for="{prefix}-set-deadline">{html_escape(t(lang, 'smart_set_deadline'))}</label>
             </div>
-            <input id="smart-deadline" type="datetime-local" step="1" aria-label="{html_escape(t(lang, 'smart_deadline'))}" aria-describedby="smart-local-time">
+            <input id="{prefix}-deadline" type="datetime-local" step="1" aria-label="{html_escape(t(lang, 'smart_deadline'))}" aria-describedby="{prefix}-local-time">
           </div>
         </div>
-        <p class="help" id="smart-local-time">{html_escape(t(lang, 'smart_local_time'))}</p>
+        <p class="help" id="{prefix}-local-time">{html_escape(t(lang, f'{label_prefix}_local_time'))}</p>
         <div class="row">
           <div>
-            <label for="smart-mode">{html_escape(t(lang, 'smart_mode'))}</label>
-            <select id="smart-mode">
+            <label for="{prefix}-mode">{html_escape(t(lang, 'smart_mode'))}</label>
+            <select id="{prefix}-mode">
               <option value="patient">{html_escape(t(lang, 'smart_patient'))}</option>
               <option value="normal" selected>{html_escape(t(lang, 'smart_normal'))}</option>
               <option value="urgent">{html_escape(t(lang, 'smart_urgent'))}</option>
             </select>
           </div>
           <div>
-            <label for="smart-minimum-price">{html_escape(t(lang, 'smart_minimum_price'))}</label>
-            <input id="smart-minimum-price" type="number" min="0" step="any" inputmode="decimal">
+            <label for="{prefix}-{price_bound}-price">{html_escape(t(lang, f'smart_{price_bound}_price'))}</label>
+            <input id="{prefix}-{price_bound}-price" type="number" min="0" step="any" inputmode="decimal">
           </div>
         </div>
-        <p class="help">{html_escape(t(lang, 'smart_completion_help'))}</p>
-        <div class="warn" id="smart-selling-error" role="alert"></div>
+        <p class="help" id="{modal_prefix}-help">{html_escape(t(lang, help_key))}</p>
+        <div class="warn" id="{modal_prefix}-error" role="alert"></div>
         <div class="modal-actions">
-          <button class="btn" id="smart-selling-cancel" type="button" style="background:#64748b;">{html_escape(t(lang, 'fast_config_cancel'))}</button>
-          <button class="btn btn-green" id="smart-selling-confirm" type="button">{html_escape(t(lang, 'smart_submit'))}</button>
+          <button class="btn" id="{modal_prefix}-cancel" type="button" style="background:#64748b;">{html_escape(t(lang, 'fast_config_cancel'))}</button>
+          <button class="btn btn-green" id="{modal_prefix}-confirm" type="button"{confirm_disabled}>{html_escape(t(lang, f'{label_prefix}_submit'))}</button>
         </div>
       </fieldset>
       </div>
     </div>
     """
+
+
+def _smart_selling_controls(
+    lang: str, account_metas: Dict[str, AccountMeta], account_balance_helpers: str
+) -> tuple[str, str, str]:
+    settings = _smart_trading_settings(lang, account_metas)
     status = f"""
       <div class="help" id="smart-selling-message" role="status"></div>
       <div class="divider"></div>
@@ -1908,6 +1920,127 @@ def _smart_selling_controls(
     return settings, status, script
 
 
+def _smart_buying_controls(
+    lang: str, account_metas: Dict[str, AccountMeta], account_balance_helpers: str
+) -> tuple[str, str]:
+    settings = _smart_trading_settings(lang, account_metas, buying=True)
+    labels = json.dumps({key: t(lang, key) for key in ("usd_cash", "smart_no_accounts")}).replace("<", "\\u003c")
+    script = """
+    <script>
+      (function() {
+        const labels = __SMART_BUYING_LABELS__;
+        const form = document.getElementById("algo-form");
+        const modal = document.getElementById("smart-buying-modal");
+        const settings = document.getElementById("smart-buying-settings");
+        const symbolInput = document.getElementById("algo_symbol");
+        const startNow = document.getElementById("smart-buying-start-now");
+        const noDeadline = document.getElementById("smart-buying-no-deadline");
+        const start = document.getElementById("smart-buying-start");
+        const deadline = document.getElementById("smart-buying-deadline");
+        const message = document.getElementById("smart-buying-message");
+        let lastFocused = null;
+        let accountsCache = null;
+
+        __ACCOUNT_BALANCE_HELPERS__
+
+        function isBuyingMode() {
+          const selected = form.querySelector("input[name='trading_mode']:checked");
+          return selected && selected.value === "H";
+        }
+
+        function renderAccountBalances() {
+          document.getElementById("smart-buying-symbol").textContent = symbolInput.value.trim().toUpperCase() || "—";
+          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
+          modal.querySelectorAll("[data-smart-buying-account-balance]").forEach(function(element) {
+            const account = accounts.find(row => row.account_id === element.dataset.smartBuyingAccountBalance);
+            element.textContent = "— " + labels.usd_cash + ": " + formatAccountBalance(account, false, "");
+          });
+        }
+
+        async function refreshAccountBalances() {
+          if (modal.hidden) return;
+          try {
+            const response = await fetch("/api/accounts", {cache: "no-store", credentials: "same-origin"});
+            if (response.ok) accountsCache = await response.json();
+          } catch (failure) {
+            // Retain the last snapshot during temporary account-data failures.
+          }
+          renderAccountBalances();
+        }
+
+        function localDateTime(date) {
+          const pad = value => String(value).padStart(2, "0");
+          return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
+            + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+        }
+
+        function updateTimes() {
+          start.disabled = startNow.checked;
+          start.hidden = startNow.checked;
+          deadline.disabled = noDeadline.checked;
+          deadline.hidden = noDeadline.checked;
+        }
+
+        function closeModal() {
+          modal.hidden = true;
+          settings.disabled = true;
+          document.body.classList.remove("modal-open");
+          if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
+        }
+
+        function updateMode() {
+          if (!isBuyingMode()) {
+            if (!modal.hidden) closeModal();
+            message.textContent = "";
+            return;
+          }
+          const hasAccounts = !!modal.querySelector("[data-smart-buying-account-id]");
+          document.getElementById("algo-submit").disabled = !hasAccounts;
+          message.textContent = hasAccounts ? "" : labels.smart_no_accounts;
+        }
+
+        form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
+          input.addEventListener("change", updateMode);
+        });
+        form.addEventListener("submit", function(event) {
+          if (!isBuyingMode()) return;
+          event.preventDefault();
+          if (!modal.querySelector("[data-smart-buying-account-id]")) return;
+          lastFocused = document.activeElement;
+          if (!start.value) {
+            const now = new Date();
+            start.value = localDateTime(now);
+            deadline.value = localDateTime(new Date(now.getTime() + 2 * 60 * 60 * 1000));
+          }
+          settings.disabled = false;
+          modal.hidden = false;
+          updateTimes();
+          renderAccountBalances();
+          refreshAccountBalances();
+          document.body.classList.add("modal-open");
+          modal.querySelector("[data-smart-buying-account-id]").focus();
+        });
+        document.getElementById("smart-buying-close").addEventListener("click", closeModal);
+        document.getElementById("smart-buying-cancel").addEventListener("click", closeModal);
+        modal.addEventListener("click", function(event) {
+          if (event.target === modal) closeModal();
+        });
+        document.addEventListener("keydown", function(event) {
+          if (event.key === "Escape" && !modal.hidden) closeModal();
+        });
+        modal.querySelectorAll("input[type='radio']").forEach(function(input) {
+          input.addEventListener("change", updateTimes);
+        });
+        symbolInput.addEventListener("change", renderAccountBalances);
+        updateMode();
+        setInterval(refreshAccountBalances, 5000);
+        // Configuration only: Smart buying has no execution or submission handler yet.
+      })();
+    </script>
+    """.replace("__SMART_BUYING_LABELS__", labels).replace("__ACCOUNT_BALANCE_HELPERS__", account_balance_helpers)
+    return settings, script
+
+
 def render_control_panel_page(
     lang: str,
     account_metas: Dict[str, AccountMeta],
@@ -1951,6 +2084,7 @@ def render_control_panel_page(
         }
     """
     smart_settings, smart_status, smart_script = _smart_selling_controls(lang, account_metas, account_balance_helpers)
+    buying_settings, buying_script = _smart_buying_controls(lang, account_metas, account_balance_helpers)
     order_summary_helpers = f"""
         {account_balance_helpers}
 
@@ -2299,7 +2433,7 @@ def render_control_panel_page(
 
         form.addEventListener("submit", function(event) {
           const mode = selectedMode();
-          if (mode === "G") {
+          if (mode === "G" || mode === "H") {
             event.preventDefault();
             return;
           }
@@ -2544,6 +2678,8 @@ def render_control_panel_page(
             <label class="choice-btn" for="algo-mode-f">{html_escape(t(lang,'mode_f'))}</label>
             <input class="choice-input" type="radio" id="algo-mode-g" name="trading_mode" value="G">
             <label class="choice-btn" for="algo-mode-g">{html_escape(t(lang,'mode_g'))}</label>
+            <input class="choice-input" type="radio" id="algo-mode-h" name="trading_mode" value="H">
+            <label class="choice-btn" for="algo-mode-h">{html_escape(t(lang,'mode_h'))}</label>
           </div>
         </div>
         <div>
@@ -2557,10 +2693,12 @@ def render_control_panel_page(
       <button class="btn btn-green" id="algo-submit" type="submit">{html_escape(t(lang,'algo_submit'))}</button>
     </form>
       {smart_status}
+      <div class="help" id="smart-buying-message" role="status"></div>
       </section>
 
       {fast_trading_modal}
       {smart_settings}
+      {buying_settings}
 
       <section class="card control-panel-section">
     <div class="hdr">
@@ -2913,6 +3051,7 @@ def render_control_panel_page(
 
     {fast_trading_script}
     {smart_script}
+    {buying_script}
 
   <datalist id="symbol-suggestions">
     {symbol_opts}

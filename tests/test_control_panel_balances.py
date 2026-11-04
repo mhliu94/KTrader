@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -56,6 +57,8 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
         prelude = """
         <script>
           window.uiErrors = [];
+          window.orderRequests = [];
+          window.nativeSubmissions = [];
           window.addEventListener("error", event => uiErrors.push(event.message));
           window.addEventListener("unhandledrejection", event => uiErrors.push(String(event.reason)));
           window.accountData = { accounts: [
@@ -70,7 +73,8 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
           ]};
           window.quoteData = {rows: {AAPL: {last: 100}, MSFT: {last: 250}}};
           window.failAccounts = false;
-          window.fetch = async url => {
+          window.fetch = async (url, options = {}) => {
+            if (options.method === "POST") orderRequests.push({url, options});
             if (url === "/api/accounts") {
               if (failAccounts) throw new Error("offline");
               return {ok: true, json: async () => structuredClone(accountData)};
@@ -80,6 +84,7 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
           };
           window.refreshCallbacks = [];
           window.setInterval = callback => refreshCallbacks.push(callback);
+          HTMLFormElement.prototype.submit = function() { nativeSubmissions.push(this.action); };
           localStorage.clear();
           localStorage.setItem("trading_ui.limit_order.symbol", "MSFT");
           localStorage.setItem("trading_ui.limit_order.account_ids", JSON.stringify(["A", "B"]));
@@ -144,6 +149,12 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
               side(prefix, "BUY");
             }
             const algoForm = document.getElementById("algo-form");
+            algoForm.addEventListener("submit", event => {
+              if (!event.defaultPrevented) {
+                event.preventDefault();
+                algoForm.submit();
+              }
+            });
             const algoSymbol = document.getElementById("algo_symbol");
             const modal = document.getElementById("fast-trading-modal");
             const balance = account => modal.querySelector("[data-fast-account-balance='" + account + "']").textContent;
@@ -187,6 +198,89 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
             }
             equal(text("quick-selected-balance"), "#1: 15.5", "quick live holdings");
             equal(text("limit-selected-balance"), "#1: 15.5", "limit live holdings");
+            document.getElementById("fast-cancel").click();
+            const buyingModal = document.getElementById("smart-buying-modal");
+            const buyingSettings = document.getElementById("smart-buying-settings");
+            const buyingBalance = account => buyingModal.querySelector("[data-smart-buying-account-balance='" + account + "']").textContent;
+            document.querySelector("label[for='algo-mode-h']").click();
+            equal(buyingModal.hidden, true, "selecting H waits for Start");
+            equal(buyingSettings.disabled, true, "hidden H settings disabled");
+            accountData.accounts[1].cash_by_currency.USD = 0;
+            algoForm.requestSubmit();
+            await refresh();
+            equal(buyingModal.hidden, false, "H opens buying configuration");
+            equal(buyingSettings.disabled, false, "H settings enabled");
+            equal(modal.hidden, true, "H does not open fast configuration");
+            equal(document.getElementById("smart-selling-modal").hidden, true, "H does not open selling configuration");
+            equal(text("smart-buying-symbol"), "AAPL", "H ticker shown");
+            equal(buyingBalance("A").endsWith(": $1,250.50"), true, "H total USD cash");
+            equal(buyingBalance("B").endsWith(": $0.00"), true, "H zero cash");
+            equal(buyingBalance("C").endsWith(": $-25.00"), true, "H legacy cash");
+            equal(buyingBalance("MISSING").endsWith(": —"), true, "H unknown cash");
+            const buyingAccounts = Array.from(buyingModal.querySelectorAll("[data-smart-buying-account-id]"));
+            equal(buyingAccounts.filter(input => input.checked).length, 0, "H accounts initially unselected");
+            buyingAccounts[0].click();
+            buyingAccounts[1].click();
+            equal(buyingAccounts.filter(input => input.checked).length, 2, "H accounts support multi-select");
+            equal(document.querySelectorAll("[data-smart-account-id]:checked").length, 0, "H selection independent of G");
+            const buyingStart = document.getElementById("smart-buying-start");
+            const buyingDeadline = document.getElementById("smart-buying-deadline");
+            equal(Math.abs(new Date(buyingStart.value).getTime() - Date.now()) < 2000, true, "H start defaults to local now");
+            equal(new Date(buyingDeadline.value) - new Date(buyingStart.value), 7200000, "H default deadline two hours later");
+            equal(document.getElementById("smart-buying-start-now").checked, true, "H Now selected");
+            equal(buyingStart.disabled && buyingStart.hidden, true, "H Now hides and disables start time");
+            equal(document.getElementById("smart-buying-set-deadline").checked, true, "H deadline selected");
+            equal(buyingDeadline.disabled || buyingDeadline.hidden, false, "H deadline editable");
+            document.querySelector("label[for='smart-buying-start-scheduled']").click();
+            equal(buyingStart.disabled || buyingStart.hidden, false, "H scheduled start editable");
+            const scheduledStart = buyingStart.value;
+            const scheduledDeadline = buyingDeadline.value;
+            document.querySelector("label[for='smart-buying-no-deadline']").click();
+            equal(buyingDeadline.disabled && buyingDeadline.hidden, true, "H no deadline hides and disables time");
+            equal(document.getElementById("smart-buying-set-deadline").checked, false, "H deadline options exclusive");
+            document.querySelector("label[for='smart-buying-set-deadline']").click();
+            equal(buyingDeadline.disabled || buyingDeadline.hidden, false, "H deadline re-enabled");
+            equal(buyingDeadline.value, scheduledDeadline, "H deadline value preserved");
+            const urgency = document.getElementById("smart-buying-mode");
+            equal(urgency.value, "normal", "H default normal urgency");
+            equal(Array.from(urgency.options, option => option.value).join(","), "patient,normal,urgent", "H urgency choices");
+            equal(Array.from(urgency.options, option => option.textContent).join(","),
+              Array.from(document.getElementById("smart-mode").options, option => option.textContent).join(","), "H localized urgency matches G");
+            const maximumPrice = document.getElementById("smart-buying-maximum-price");
+            equal(maximumPrice.value, "", "H price blank by default");
+            equal(maximumPrice.required, false, "H price optional");
+            maximumPrice.value = "125.5";
+            urgency.value = "urgent";
+            equal(document.getElementById("smart-buying-confirm").disabled, true, "H execution disabled");
+            document.getElementById("smart-buying-confirm").click();
+            equal(orderRequests.length, 0, "H never sends an order request");
+            equal(nativeSubmissions.length, 0, "H never falls through to native submission");
+            accountData.accounts[1].cash_by_currency.USD = 600;
+            await refresh();
+            equal(buyingBalance("B").endsWith(": $600.00"), true, "H live USD refresh");
+            failAccounts = true;
+            await refresh();
+            equal(buyingBalance("B").endsWith(": $600.00"), true, "H keeps last cash on transient failure");
+            failAccounts = false;
+            document.getElementById("smart-buying-cancel").click();
+            equal(buyingModal.hidden && buyingSettings.disabled, true, "H cancel closes and disables settings");
+            algoForm.requestSubmit();
+            equal(buyingStart.value, scheduledStart, "H start preserved on reopen");
+            equal(maximumPrice.value, "125.5", "H price preserved on reopen");
+            equal(urgency.value, "urgent", "H urgency preserved on reopen");
+            document.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape"}));
+            equal(buyingModal.hidden, true, "H Escape closes settings");
+            algoForm.requestSubmit();
+            buyingModal.click();
+            equal(buyingModal.hidden, true, "H backdrop closes settings");
+            algoForm.requestSubmit();
+            document.getElementById("smart-buying-close").click();
+            equal(buyingModal.hidden, true, "H close button closes settings");
+            algoForm.requestSubmit();
+            document.querySelector("label[for='algo-mode-f']").click();
+            equal(buyingModal.hidden && buyingSettings.disabled, true, "leaving H closes its settings");
+            open("F", "AAPL");
+            await refresh();
             accountData.accounts[0].positions[0].qty = null;
             accountData.accounts[0].cash_by_currency[" usd "] = null;
             await refresh();
@@ -198,6 +292,13 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
             await refresh();
             equal(text("quick-selected-balance"), "#1: —", "failed refresh preserves display");
             equal(document.querySelectorAll("form[action='/submit-delayed-order']").length, 0, "delayed form removed");
+            document.getElementById("fast-cancel").click();
+            document.getElementById("smart-buying-accounts").replaceChildren();
+            document.querySelector("label[for='algo-mode-h']").click();
+            equal(document.getElementById("algo-submit").disabled, true, "H cannot start without configured accounts");
+            equal(text("smart-buying-message").length > 0, true, "H missing accounts explained");
+            document.querySelector("label[for='algo-mode-e']").click();
+            equal(document.getElementById("algo-submit").disabled, false, "leaving empty H restores fast Start");
           } catch (error) {
             failures.push(error.stack || String(error));
           }
@@ -215,6 +316,7 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
                  "--disable-background-networking", "--no-first-run", "--no-default-browser-check",
                  "--lang=en-US", "--user-data-dir=" + str(Path(directory) / "profile"),
                  "--virtual-time-budget=1000", "--dump-dom", path.as_uri()],
+                env={**os.environ, "TZ": "Asia/Shanghai"},
                 capture_output=True, text=True, timeout=30,
             )
         self.assertEqual(result.returncode, 0, result.stderr)

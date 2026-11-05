@@ -180,7 +180,19 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cfg["kafka"].setdefault("group_id", os.getenv("KAFKA_GROUP_ID", "account-dashboard"))
     cfg["kafka"].setdefault("market_data_group_id", os.getenv("KAFKA_MARKET_DATA_GROUP_ID", "market-data-dashboard"))
     cfg["kafka"].setdefault("auto_offset_reset", os.getenv("KAFKA_AUTO_OFFSET_RESET", "latest"))
-    cfg["kafka"].setdefault("market_data_auto_offset_reset", os.getenv("KAFKA_MARKET_DATA_AUTO_OFFSET_RESET", "earliest"))
+    cfg["kafka"].setdefault("market_data_auto_offset_reset", os.getenv("KAFKA_MARKET_DATA_AUTO_OFFSET_RESET", "latest"))
+    replay_records_raw = cfg["kafka"].get(
+        "market_data_replay_records", os.getenv("KAFKA_MARKET_DATA_REPLAY_RECORDS", "100"),
+    )
+    try:
+        if isinstance(replay_records_raw, bool) or not isinstance(replay_records_raw, (int, str)):
+            raise ValueError
+        replay_records = int(replay_records_raw)
+        if replay_records < 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Config kafka.market_data_replay_records must be a non-negative integer.") from None
+    cfg["kafka"]["market_data_replay_records"] = replay_records
     cfg["kafka"].setdefault("poll_timeout_sec", 1.0)
 
     cfg["kafka"].setdefault("producer", {})
@@ -189,10 +201,15 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cfg["kafka"]["producer"].setdefault("linger_ms", 5)
 
     cfg.setdefault("market_data", {})
-    cfg["market_data"].setdefault(
-        "historical_prices_csv",
-        os.getenv("MARKET_DATA_HISTORICAL_PRICES_CSV", "./market_data/historical_prices.csv"),
-    )
+    publisher_config = cfg["market_data"].get("publisher_config")
+    if publisher_config:
+        publisher_config = _resolve_path(str(publisher_config))
+        publisher = load_json_file(publisher_config)
+        symbols = publisher.get("symbols")
+        if not isinstance(symbols, list) or not symbols or not all(isinstance(s, str) and s.strip() for s in symbols):
+            raise ValueError("Market-data publisher config requires a non-empty symbols list.")
+        cfg["market_data"]["publisher_config"] = publisher_config
+        cfg["market_data"]["symbols"] = list(dict.fromkeys(s.strip().upper() for s in symbols))
     max_levels_raw = os.getenv(
         "MARKET_INSIGHTS_MAX_LEVELS",
         str(cfg["market_data"].get("market_insights_max_levels", 20)),
@@ -202,9 +219,6 @@ def load_config(config_path: str) -> Dict[str, Any]:
     except (TypeError, ValueError):
         raise ValueError(f"Invalid MARKET_INSIGHTS_MAX_LEVELS: {max_levels_raw!r}")
     cfg["market_data"]["market_insights_max_levels"] = max(1, min(max_levels, 20))
-    cfg["market_data"]["historical_prices_csv"] = _resolve_path(
-        str(cfg["market_data"]["historical_prices_csv"])
-    )
 
     cfg["fast_trading"] = _normalize_fast_trading_config(cfg.get("fast_trading"))
 

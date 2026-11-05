@@ -44,6 +44,9 @@ class FakeMarketDataStore:
             for symbol in symbols
         }
 
+    def get_market_rows(self, symbols: list[str]) -> dict[str, QuoteRow]:
+        return self.get_for_symbols(symbols)
+
 
 class AccountOrderRenderingTests(unittest.TestCase):
     def test_each_account_card_has_actions_and_dialogs_are_shared(self):

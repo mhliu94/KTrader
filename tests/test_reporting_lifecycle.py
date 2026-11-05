@@ -30,7 +30,7 @@ def lifecycle(monkeypatch, tmp_path):
         "MARKET_DATA_CONSUMER", "COMMANDS_PRODUCER", "FAST_TRADING_MANAGER",
         "SMART_SELLING_MANAGER", "SMART_SELLING_CONSUMER", "OPERATIONS_LOG",
         "SMART_BUYING_MANAGER", "SMART_BUYING_CONSUMER",
-        "ACTIVITY_REPORTING", "SYSTEM_SNAPSHOTS", "HIST_CLOSE_STORE",
+        "ACTIVITY_REPORTING", "SYSTEM_SNAPSHOTS",
     ):
         monkeypatch.setattr(webserver, name, None)
     store = AccountStore()
@@ -39,7 +39,7 @@ def lifecycle(monkeypatch, tmp_path):
     monkeypatch.setattr(webserver, "store", store)
     events, factories = [], {}
     for name in (
-        "HistoricalCloseStore", "OperationsLog", "ActivityReporting", "SystemSnapshotRecorder",
+        "OperationsLog", "ActivityReporting", "SystemSnapshotRecorder",
         "AccountDetailsConsumer", "TradingCommandsProducer", "FastTradingStrategyManager",
         "SmartSellingRuntime", "SmartSellingConsumer", "PriceBookConsumer",
         "SmartBuyingRuntime",

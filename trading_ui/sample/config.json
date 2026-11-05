@@ -21,6 +21,7 @@
     "account_details_topic": "account-details",
     "trading_commands_topic": "trading-commands",
     "market_data_topic": "price-books",
+    "market_data_replay_records": 100,
     "group_id": "account-dashboard",
     "auto_offset_reset": "latest",
     "poll_timeout_sec": 1.0,
@@ -31,7 +32,7 @@
     }
   },
   "market_data": {
-    "historical_prices_csv": "../../market_data/historical_prices.csv",
+    "publisher_config": "../../market_data/md_producer_config.json",
     "market_insights_max_levels": 20
   },
   "smart_selling": {

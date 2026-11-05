@@ -3089,7 +3089,7 @@ def render_market_data_page(lang: str, symbols: List[str]) -> str:
             if (chgpxEl) chgpxEl.textContent = "—";
             if (shortIntEl) shortIntEl.textContent = "—";
             if (volEl) volEl.textContent = "—";
-            if (asofEl) asofEl.textContent = "—";
+            if (asofEl) asofEl.textContent = fmtAsOf(row.asof_epoch);
             continue;
           }}
 

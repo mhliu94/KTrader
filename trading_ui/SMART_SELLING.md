@@ -153,6 +153,18 @@ Kafka cluster, using the fixed `symbols` list in
 requests and interval (five seconds by default). Volume-only symbols are not
 automatically added to this topic.
 
+The **Market Data** tab also uses these snapshots: `PreviousClose` supplies the
+previous trading day's close, `Last` supplies the actual last trade, and `Volume`
+supplies daily volume. Change and percentage change are calculated from that same
+snapshot. No historical CSV or daily updater is required. Missing optional fields
+stay unavailable; they never reuse an earlier day's values. The tab marks quotes
+stale after 30 seconds without a new observation, even if depth still updates.
+Short interest is not supplied by this quote feed and remains unavailable.
+
+The UI's `market_data.publisher_config` points to `md_producer_config.json` so
+the tab follows the publisher's subscribed symbols rather than the trading forms'
+symbol list. Restart the UI after changing that subscription configuration.
+
 The topic has been provisioned on the configured market-data cluster with one
 partition and one replica, matching `price-books`.
 
@@ -175,6 +187,22 @@ prices separately from depth-derived prices. Its account summary uses only
 trade prices for **Last / 最新** and **Market Value / 市值**; holdings with no
 usable trade quote show `--` for both. Unavailable observations clear a previous
 price, and older observations cannot overwrite newer ones.
+
+On startup and partition reassignment, this shared consumer reads only the last
+100 records **per partition** of `price-books` and `stock-quotes`, then continues
+with live updates. These feeds carry complete snapshots, so replaying their full
+history is unnecessary. The limit is across symbols, not per symbol; a symbol
+absent from the recent window appears when its next snapshot arrives.
+
+Set `kafka.market_data_replay_records` to change the window, or
+`KAFKA_MARKET_DATA_REPLAY_RECORDS` when the JSON setting is absent. The default is
+100; zero skips history and waits for new data. Short or empty partitions start at
+their earliest retained offset. If Kafka cannot return offsets within five
+seconds per partition, the consumer logs a warning and waits for new data on
+that partition. `market_data_auto_offset_reset` now defaults to `latest` as a
+fallback for invalid offsets; it does not control this initial replay window.
+Restart the dashboard to apply changes. Order-status and trading-volume recovery
+still use their existing retained history.
 
 The producer setting `stock_quotes_topic` and dashboard Kafka setting of the
 same name default to `stock-quotes`; the dashboard also accepts

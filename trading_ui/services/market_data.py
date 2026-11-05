@@ -1,6 +1,7 @@
 import threading
 import csv
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,8 @@ class StockQuote:
     is_delayed: Optional[bool] = None
     is_halted: Optional[bool] = None
     error: Optional[str] = None
+    prev_close: Optional[float] = None
+    volume: Optional[int] = None
 
 
 def _quote_timestamp(value: object) -> float:
@@ -73,6 +76,15 @@ def stock_quote_from_payload(payload: dict) -> Optional[StockQuote]:
     except (ValueError, TypeError, OverflowError):
         return quote
     quote.last, quote.trade_time, quote.error = last, trade_time, None
+    try:
+        previous_close = float(payload.get("prev_close"))
+        if not isinstance(payload.get("prev_close"), bool) and math.isfinite(previous_close) and previous_close > 0:
+            quote.prev_close = previous_close
+    except (ValueError, TypeError, OverflowError):
+        pass
+    volume = payload.get("volume")
+    if isinstance(volume, int) and not isinstance(volume, bool) and volume >= 0:
+        quote.volume = volume
     return quote
 
 
@@ -250,6 +262,29 @@ class MarketDataStore:
     def get_stock_quotes(self, symbols: list[str]) -> Dict[str, StockQuote]:
         with self._lock:
             return {symbol: self._stock_quotes[symbol] for symbol in symbols if symbol in self._stock_quotes}
+
+    def get_market_rows(self, symbols: list[str], *, max_age_seconds: float = 30) -> Dict[str, QuoteRow]:
+        """Market Data uses complete trade snapshots, independent of depth and CSVs."""
+        now = time.time()
+        quotes = self.get_stock_quotes(symbols)
+        rows = {}
+        for symbol in symbols:
+            quote = quotes.get(symbol)
+            error = "no live quote yet" if quote is None else quote.error
+            if quote is not None and now - quote.observed_at > max_age_seconds:
+                error = "quote feed is stale"
+            last = quote.last if quote is not None and not error else None
+            previous_close = quote.prev_close if quote is not None and not error else None
+            change = last - previous_close if last is not None and previous_close is not None else None
+            rows[symbol] = QuoteRow(
+                symbol=symbol, prev_close=previous_close, last=last, change=change,
+                change_pct=change / previous_close * 100 if change is not None else None,
+                short_interest=None,
+                volume=quote.volume if quote is not None and not error else None,
+                asof_epoch=int(quote.observed_at) if quote is not None else None,
+                error=error,
+            )
+        return rows
 
     def upsert(self, row: QuoteRow) -> None:
         with self._lock:

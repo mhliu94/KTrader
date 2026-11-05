@@ -5,6 +5,8 @@ import re
 import unittest
 from unittest.mock import Mock, patch
 
+from fastapi.testclient import TestClient
+
 from market_data.price_book_producer import TSQuotePoller
 from market_data.stock_quotes import StockQuotePublisher
 from market_data.trading_volume import TradingVolumePublisher, utc_iso
@@ -21,7 +23,7 @@ NOW = 1_792_858_400.0
 def quote(symbol="AAPL", **overrides):
     result = {
         "Symbol": symbol, "Last": "125.1250", "LastSize": "7", "Volume": "1000",
-        "TradeTime": utc_iso(NOW - 2), "Bid": "120", "Ask": "130",
+        "TradeTime": utc_iso(NOW - 2), "Bid": "120", "Ask": "130", "PreviousClose": "120",
         "MarketFlags": {"IsDelayed": False, "IsHalted": False},
     }
     result.update(overrides)
@@ -46,6 +48,8 @@ class StockQuotePublisherTests(unittest.TestCase):
         self.assertEqual(event["trade_time"], utc_iso(NOW - 2))
         self.assertTrue(event["healthy"])
         self.assertEqual(event["source"], "TradeStation")
+        self.assertEqual(event["prev_close"], "120")
+        self.assertEqual(event["volume"], 1000)
         call = self.producer.send.call_args.kwargs
         self.assertEqual((call["topic"], call["key"]), ("stock-quotes", "AAPL"))
         self.assertEqual(json.loads(call["value"]), event)
@@ -85,6 +89,16 @@ class StockQuotePublisherTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.publish()
 
+    def test_optional_reference_fields_do_not_invalidate_a_trade(self):
+        for value in (None, "bad", "NaN", "Infinity", 0, -1, True):
+            with self.subTest(value=value):
+                event = self.publish(quote(PreviousClose=value, Volume=None))
+                self.assertTrue(event["healthy"])
+                parsed = stock_quote_from_payload(event)
+                self.assertIsNone(parsed.prev_close)
+                self.assertIsNone(parsed.volume)
+                self.assertEqual(parsed.last, 125.125)
+
 
 class StockQuotePipelineTests(unittest.TestCase):
     def setUp(self):
@@ -119,6 +133,82 @@ class StockQuotePipelineTests(unittest.TestCase):
     def consume_quotes(self):
         for event in self.emitted_quotes():
             self.consumer._handle_payload(event, topic="stock-quotes")
+
+    def market_rows(self, *, now=NOW):
+        with patch.multiple(
+            webserver, MD_STORE=self.store, SYMBOLS=["IGNORED"],
+            APP_CONFIG={"market_data": {"symbols": ["AAPL", "MSFT", "UNKNOWN"]}},
+            SESSIONS={"test-market-token": "trader"},
+        ), patch("trading_ui.services.market_data.time.time", return_value=now):
+            # No lifespan: this exercises the real authenticated endpoint without
+            # starting production services. No CSV or historical job is involved.
+            client = TestClient(webserver.app)
+            try:
+                client.cookies.set("auth_token", "test-market-token")
+                response = client.get("/api/market-data")
+                self.assertEqual(response.status_code, 200)
+                return response.json()["rows"]
+            finally:
+                client.close()
+
+    def test_market_tab_uses_quote_close_last_and_volume_independently_of_depth(self):
+        self.poll()
+        self.consume_quotes()
+        self.consumer._handle_payload({
+            "symbol": "AAPL", "volume": 999999,
+            "bid_side": {"levels": [{"price": 900}]},
+            "offer_side": {"levels": [{"price": 902}]},
+        }, topic="price-books")
+        rows = self.market_rows()
+        self.assertEqual(set(rows), {"AAPL", "MSFT", "UNKNOWN"})
+        row = rows["AAPL"]
+        self.assertEqual(row["prev_close"], 120)
+        self.assertEqual(row["last"], 125.125)
+        self.assertEqual(row["volume"], 1000)
+        self.assertEqual(row["change"], 5.125)
+        self.assertAlmostEqual(row["change_pct"], 5.125 / 120 * 100)
+        self.assertEqual(row["asof_epoch"], NOW)
+        self.assertIsNone(row["error"])
+        self.assertEqual(rows["UNKNOWN"]["error"], "no live quote yet")
+
+    def test_daily_rollover_and_missing_fields_replace_previous_snapshot(self):
+        self.poll()
+        self.consume_quotes()
+        for index, previous_close in enumerate(("125", None), start=1):
+            observed = NOW + index * 86400
+            self.producer.reset_mock()
+            self.session.get.return_value.json.return_value = {"Quotes": [quote(
+                PreviousClose=previous_close, Volume="0", TradeTime=utc_iso(observed - 1),
+            )]}
+            self.poll(observed)
+            self.consume_quotes()
+            row = self.market_rows(now=observed)["AAPL"]
+            self.assertEqual(row["volume"], 0)
+            self.assertEqual(row["prev_close"], 125 if previous_close else None)
+            self.assertEqual(row["change"], 0.125 if previous_close else None)
+            self.assertIsNone(row["error"])
+
+    def test_staleness_uses_observation_age_and_failure_clears_reference_fields(self):
+        self.session.get.return_value.json.return_value = {
+            "Quotes": [quote(TradeTime=utc_iso(NOW - 3 * 86400))],
+        }
+        self.poll()
+        self.consume_quotes()
+        self.assertIsNone(self.market_rows()["AAPL"]["error"])
+        stale = self.market_rows(now=NOW + 31)["AAPL"]
+        self.assertEqual(stale["error"], "quote feed is stale")
+        self.assertIsNone(stale["last"])
+        self.assertIsNone(stale["prev_close"])
+        old = self.emitted_quotes()[0]
+        self.producer.reset_mock()
+        self.session.get.side_effect = TimeoutError("provider unavailable")
+        self.poll(NOW + 5)
+        self.consume_quotes()
+        self.consumer._handle_payload(old, topic="stock-quotes")
+        failed = self.market_rows(now=NOW + 5)["AAPL"]
+        self.assertIsNotNone(failed["error"])
+        for key in ("prev_close", "last", "volume", "change", "change_pct"):
+            self.assertIsNone(failed[key])
 
     def summary_rows(self):
         accounts = AccountStore()

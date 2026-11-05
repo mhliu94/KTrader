@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 
 from urllib.parse import quote
 from .app_logging import configure_logging
-from .services.market_data import MarketDataStore, HistoricalCloseStore, QuoteRow
+from .services.market_data import MarketDataStore
 from .templates import render_market_data_page, render_market_insights_page
 from .models import AccountSnapshot
 
@@ -81,7 +81,6 @@ ACTIVITY_REPORTING = None
 SYSTEM_SNAPSHOTS = None
 
 MD_STORE = MarketDataStore()
-HIST_CLOSE_STORE = HistoricalCloseStore("./market_data/historical_prices.csv")
 
 ACCOUNT_SORT_COOKIE = "account_details_sort"
 ACCOUNT_SECURITY_COOKIE = "account_details_security"
@@ -107,6 +106,10 @@ def _normalized_configured_symbols() -> list[str]:
 
 def _market_insights_symbols() -> list[str]:
     return sorted(set(_normalized_configured_symbols()) | set(MD_STORE.get_book_symbols()))
+
+
+def _market_data_symbols() -> list[str]:
+    return APP_CONFIG.get("market_data", {}).get("symbols", _normalized_configured_symbols())
 
 
 def _smart_managers():
@@ -353,7 +356,7 @@ def on_startup() -> None:
 
 
 def _start_services() -> None:
-    global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG, HIST_CLOSE_STORE
+    global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG
     global SMART_SELLING_MANAGER, SMART_SELLING_CONSUMER, ACTIVITY_REPORTING, SYSTEM_SNAPSHOTS
     global SMART_BUYING_MANAGER, SMART_BUYING_CONSUMER
 
@@ -363,8 +366,6 @@ def _start_services() -> None:
     ACCOUNT_METAS = load_account_metas(APP_CONFIG)
     SYMBOLS = load_symbols(APP_CONFIG)
     AUTH_USERS = APP_CONFIG["auth"]["users"]
-    HIST_CLOSE_STORE = HistoricalCloseStore(APP_CONFIG["market_data"]["historical_prices_csv"])
-    LOGGER.info("market-data historical_prices_csv=%s", APP_CONFIG["market_data"]["historical_prices_csv"])
     OPERATIONS_LOG = OperationsLog(
         log_dir=os.getenv("OPERATIONS_LOG_DIR", "./logs"),
         server_started_at=server_started_at,
@@ -1443,7 +1444,7 @@ def market_data(request: Request) -> HTMLResponse:
     if gate is not None:
         return gate
     lang = resolve_lang(request)
-    inner = render_market_data_page(lang=lang, symbols=_normalized_configured_symbols())
+    inner = render_market_data_page(lang=lang, symbols=_market_data_symbols())
     return HTMLResponse(render_layout(lang, "market-data", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
 
 
@@ -1468,30 +1469,8 @@ async def api_market_data(request: Request, symbol: str | None = None) -> JSONRe
     if gate is not None:
         return gate
     clean_symbol = str(symbol or "").strip().upper()
-    requested_symbols = [clean_symbol] if clean_symbol else _normalized_configured_symbols()
-    rows = MD_STORE.get_for_symbols(requested_symbols)
-    enriched_rows: Dict[str, QuoteRow] = {}
-    for symbol, row in rows.items():
-        prev_close = HIST_CLOSE_STORE.get_prev_close(symbol)
-
-        change = None
-        change_pct = None
-        if prev_close is not None and row.last is not None:
-            change = row.last - prev_close
-            if prev_close != 0:
-                change_pct = (change / prev_close) * 100.0
-
-        enriched_rows[symbol] = QuoteRow(
-            symbol=row.symbol,
-            prev_close=prev_close,
-            last=row.last,
-            change=change,
-            change_pct=change_pct,
-            short_interest=row.short_interest,
-            volume=row.volume,
-            asof_epoch=row.asof_epoch,
-            error=row.error,
-        )
+    requested_symbols = [clean_symbol] if clean_symbol else _market_data_symbols()
+    rows = MD_STORE.get_market_rows(requested_symbols)
 
     return JSONResponse(
         {
@@ -1507,7 +1486,7 @@ async def api_market_data(request: Request, symbol: str | None = None) -> JSONRe
                     "asof_epoch": v.asof_epoch,
                     "error": v.error,
                 }
-                for k, v in enriched_rows.items()
+                for k, v in rows.items()
             }
         }
     )

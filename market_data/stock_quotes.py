@@ -46,6 +46,18 @@ class StockQuotePublisher:
             event["last"] = str(price)
             event["trade_time"] = utc_iso(trade_time)
             event["healthy"] = True
+            # Reference close and daily volume arrive in the same live snapshot.
+            # Missing optional fields must not invalidate an otherwise valid trade.
+            try:
+                previous_close = Decimal(str(quote.get("PreviousClose")))
+                if previous_close.is_finite() and previous_close > 0 and math.isfinite(float(previous_close)) and float(previous_close) > 0:
+                    event["prev_close"] = str(previous_close)
+            except (InvalidOperation, ValueError, TypeError, OverflowError):
+                pass
+            try:
+                event["volume"] = daily_volume(quote.get("Volume"))
+            except ValueError:
+                pass
             try:
                 event["last_size"] = daily_volume(quote.get("LastSize"))
             except ValueError:
@@ -76,6 +88,8 @@ class StockQuotePublisher:
             "source": "TradeStation",
             "last": None,
             "last_size": None,
+            "prev_close": None,
+            "volume": None,
             "trade_time": None,
             "observed_at": utc_iso(observed_at),
             "is_delayed": None,

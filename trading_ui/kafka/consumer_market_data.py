@@ -4,7 +4,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING
+from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition, OFFSET_END
 
 from ..services.market_data import (
     MarketDataStore, order_book_from_price_book, quote_row_from_price_book, stock_quote_from_payload,
@@ -123,8 +123,29 @@ class PriceBookConsumer:
                     self._health_callback(False)
 
     def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
+        replay_records = int(self._kafka_cfg.get("market_data_replay_records", 100))
         for partition in partitions:
-            partition.offset = OFFSET_BEGINNING
+            # These records are complete snapshots. Bound the warm-up on every
+            # assignment, including restarts and rebalances, regardless of commits.
+            partition.offset = OFFSET_END
+            if replay_records == 0:
+                continue
+            try:
+                watermarks = consumer.get_watermark_offsets(partition, timeout=5.0, cached=False)
+            except KafkaException as error:
+                LOGGER.warning(
+                    "market-data offsets unavailable for %s[%s]; waiting for new data: %s",
+                    partition.topic, partition.partition, error,
+                )
+                continue
+            if watermarks is None:
+                LOGGER.warning(
+                    "market-data offsets timed out for %s[%s]; waiting for new data",
+                    partition.topic, partition.partition,
+                )
+                continue
+            low, high = watermarks  # high is the next offset after the latest record.
+            partition.offset = max(low, high - replay_records)
         assigned = ", ".join(f"{p.topic}[{p.partition}]@{p.offset}" for p in partitions)
         LOGGER.info("market-data assigned: %s", assigned)
         consumer.assign(partitions)

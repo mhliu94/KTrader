@@ -435,7 +435,7 @@ class SmartSellingMarketAdapter:
             )
             recovering = state.reset_quote or state.quote_gap
             bid, bid_size = _best(payload.get("bid_side"), bid=True)
-            ask, _ = _best(payload.get("offer_side"), bid=False)
+            ask, ask_size = _best(payload.get("offer_side"), bid=False)
             quote_healthy = (
                 self._fresh(book_time)
                 and not gap
@@ -453,6 +453,7 @@ class SmartSellingMarketAdapter:
                 ask,
                 bid_size,
                 source_time=book_time,
+                ask_size=ask_size,
                 sequence=strict_sequence,
                 healthy=state.quote_healthy and self._volume_is_healthy(state),
                 accessible=accessible,

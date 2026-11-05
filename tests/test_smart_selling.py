@@ -800,7 +800,7 @@ class SmartSellingTests(unittest.TestCase):
             )
         )
 
-    def test_round_robin_uses_one_shared_slice_and_participation_budget(self):
+    def test_unknown_costs_keep_round_robin_and_one_shared_participation_budget(self):
         self.start(
             account_ids=["A", "B", "C"], account_quantities={"A": "400", "B": "400", "C": "400"}
         )
@@ -819,10 +819,90 @@ class SmartSellingTests(unittest.TestCase):
             self.assertEqual(Decimal(first["quantity"]), 100)
             self.status()
 
-    def test_short_inventory_spills_only_remainder_and_retires_empty_accounts(self):
+    def test_closest_cost_account_is_used_until_exhausted_before_farther_cost(self):
         self.start(
-            account_ids=["empty", "A", "B", "C"],
+            account_ids=["A", "B"], account_quantities={"A": "850", "B": "150"},
+            account_average_costs={"A": "11.00", "B": "11.50"},
+        )
+        self.tape("3000")
+        for now, account, quantity in [(0, "B", "100"), (5, "B", "50"), (10, "A", "50")]:
+            self.clock.now = now
+            self.quote(bid=12, ask="12.01")
+            child = self.child()
+            self.assertEqual((child["account_id"], child["quantity"]), (account, quantity))
+            self.report(child, "FILLED", quantity, final=True)
+            self.status()
+
+    def test_cost_refresh_changes_next_account_without_retargeting_working_child(self):
+        self.start(
+            account_ids=["A", "B"], account_quantities={"A": "500", "B": "500"},
+            account_average_costs={"A": "11.00", "B": "11.50"},
+        )
+        self.quote(bid="11.99", ask="12.01")
+        self.tape("2000")
+        first = self.child()
+        self.assertEqual(first["account_id"], "B")
+        self.engine.set_account_costs(self.parent, {"A": "12.10", "B": "11.50"})
+        self.assertEqual(self.status()["active_order"]["account_id"], "B")
+        self.assertEqual(self.engine.tick(), [])
+        self.report(first, "FILLED", first["quantity"], final=True)
+        self.clock.now = 5
+        self.quote(bid=12, ask="12.01")
+        self.assertEqual(self.child()["account_id"], "A")
+
+    def test_closest_cost_uses_absolute_distance_on_either_side_of_market(self):
+        self.start(
+            account_ids=["highest", "below", "above"],
+            account_quantities={"highest": "400", "below": "300", "above": "300"},
+            account_average_costs={"highest": "13", "below": "11.5", "above": "12.1"},
+        )
+        self.quote(bid="11.99", ask="12.01")
+        self.tape("2000")
+        first = self.child()
+        self.assertEqual(first["account_id"], "above")
+        self.report(first, "FILLED", first["quantity"], final=True)
+        self.clock.now = 5
+        # A market-price move alone changes priority; costs have not changed.
+        self.quote(bid="11.39", ask="11.41")
+        self.assertEqual(self.child()["account_id"], "below")
+
+    def test_equal_distances_above_and_below_market_rotate_using_midpoint(self):
+        self.start(
+            account_ids=["above", "below"],
+            account_quantities={"above": "500", "below": "500"},
+            account_average_costs={"above": "12.5", "below": "11.5"},
+            minimum_price="13",
+        )
+        self.quote(bid="11.9", ask="12.1")
+        self.tape("2000")
+        first = self.child()
+        self.assertEqual(first["account_id"], "above")
+        self.assertGreaterEqual(Decimal(first["limit_price"]), Decimal("13"))
+        self.report(first, "FILLED", first["quantity"], final=True)
+        self.clock.now = 5
+        self.quote(bid="11.9", ask="12.1")
+        self.assertEqual(self.child()["account_id"], "below")
+
+    def test_known_costs_rank_before_unknown_and_equal_costs_rotate(self):
+        self.start(
+            account_ids=["unknown", "A", "B"],
+            account_quantities={"unknown": "200", "A": "400", "B": "400"},
+            account_average_costs={"A": "11.5", "B": "11.50"},
+        )
+        self.tape("2000")
+        first = self.child()
+        self.assertEqual(first["account_id"], "A")
+        self.report(first, "FILLED", first["quantity"], final=True)
+        self.clock.now = 5
+        self.quote()
+        self.assertEqual(self.child()["account_id"], "B")
+
+    def test_short_inventory_sells_available_then_spills_to_next_closest_account(self):
+        self.start(
+            # Input order deliberately differs from distance priority.
+            account_ids=["empty", "C", "B", "A"],
             account_quantities={"empty": "0", "A": "40", "B": "30", "C": "930"},
+            account_average_costs={"empty": "12", "A": "12.10", "B": "11.50", "C": "13"},
         )
         self.tape("2000")
         for now, expected_account, expected_quantity in [
@@ -832,7 +912,7 @@ class SmartSellingTests(unittest.TestCase):
             (15, "C", "100"),
         ]:
             self.clock.now = now
-            self.quote()
+            self.quote(bid="11.99", ask="12.01")
             child = self.child()
             self.assertEqual(
                 (child["account_id"], child["quantity"]), (expected_account, expected_quantity)

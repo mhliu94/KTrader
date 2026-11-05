@@ -28,7 +28,7 @@ def build_smart_selling_command(action, account_metas):
         command = build_limit_order_command(
             account_id=account_id,
             symbol=symbol,
-            side="SELL",
+            side=action.get("side", "SELL"),
             shares=_wire_number(action["quantity"], "Quantity", allow_integer=True),
             limit_price=_wire_number(action["limit_price"], "Limit price"),
             account_metas=account_metas,
@@ -46,5 +46,5 @@ def build_smart_selling_command(action, account_metas):
         command = build_cancel_open_orders_command(account_id, account_metas, symbol)
     else:
         raise ValueError("Only submit/cancel intents translate to trading commands")
-    command.update(parent_id=action["parent_id"], trading_mode="G")
+    command.update(parent_id=action["parent_id"], trading_mode=action.get("trading_mode", "G"))
     return command

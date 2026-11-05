@@ -132,6 +132,39 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(parent["quantity"], "125")
 
+    def test_average_holding_cost_controls_selection_and_refreshes_from_snapshots(self):
+        second = self.add_account()
+        self.snap.positions = [Position("XYZ", 500, 11), Position("US.XYZ", 500, 12)]
+        second.positions[0].avg_price = 11.25
+        parent = self.runtime.start_parent(dict(account_ids=["B", "A"], symbol="XYZ", mode="urgent", deadline=self.iso(300)))
+        self.assertEqual(Decimal(parent["accounts"]["A"]["average_cost"]), Decimal("11.5"))
+        self.engine.on_quote("XYZ", 12, 12.01, 1000, source_time=self.epoch)
+        self.engine.on_trade("XYZ", 2000, "cost-volume", source_time=self.epoch)
+        self.runtime.tick()
+        self.flush()
+        command = self.publish.call_args.args[0]
+        self.assertEqual(command["account_id"], "A")
+        second.positions[0].avg_price = 11.75
+        self.runtime.tick()
+        self.flush()
+        updated = self.engine.get_parent(parent["parent_id"])
+        self.assertEqual(Decimal(updated["accounts"]["B"]["average_cost"]), Decimal("11.75"))
+        self.assertEqual(updated["active_order"]["account_id"], "A")
+
+    def test_incomplete_or_invalid_average_cost_is_unknown(self):
+        for cost in (None, "NaN", "Infinity", -1, True):
+            self.snap.positions = [Position("XYZ", 100, 11), Position("US.XYZ", 100, cost)]
+            self.assertIsNone(self.runtime._account_average_cost("A", "XYZ"))
+
+    def test_weighted_average_cost_accepts_recurring_decimal_and_ignores_client_override(self):
+        self.snap.positions = [Position("XYZ", 100, 11), Position("US.XYZ", 200, 12)]
+        parent = self.runtime.start_parent(dict(
+            account_ids=["A"], symbol="XYZ", account_average_costs={"A": "999"},
+        ))
+        self.assertEqual(Decimal(parent["accounts"]["A"]["average_cost"]), Decimal(3500) / 300)
+        self.runtime.tick()
+        self.assertEqual(self.engine.get_parent(parent["parent_id"])["accounts"], parent["accounts"])
+
     def test_all_inventory_floors_each_account_to_its_sellable_quantity_step(self):
         self.snap.positions[0].qty = self.snap.positions[0].available_qty = 1000.5
         self.add_account(quantity=400.75)

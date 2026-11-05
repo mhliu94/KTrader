@@ -1532,8 +1532,8 @@ def _smart_trading_settings(
     prefix = "smart-buying" if buying else "smart"
     label_prefix = "smart_buying" if buying else "smart"
     price_bound = "maximum" if buying else "minimum"
-    help_key = "smart_buying_unavailable" if buying else "smart_completion_help"
-    confirm_disabled = ' disabled aria-describedby="smart-buying-help"' if buying else ""
+    help_key = "smart_buying_pov_help" if buying else "smart_completion_help"
+    confirm_disabled = ""
     account_options = "\n".join(
         f'<label class="fast-account-row">'
         f'<input type="checkbox" data-{prefix}-account-id="{html_escape(account.id)}">'
@@ -1710,8 +1710,12 @@ def _smart_selling_controls(
           const smart = isSmartMode();
           if (!smart && !modal.hidden) closeModal();
           const hasAccounts = !!modal.querySelector("[data-smart-account-id]");
-          submit.textContent = labels.algo_submit;
-          submit.disabled = submitting || (smart && !hasAccounts);
+          if (smart) {
+            submit.textContent = labels.algo_submit;
+            submit.disabled = submitting || !hasAccounts;
+          } else if (!["G", "H"].includes(form.querySelector("input[name='trading_mode']:checked").value)) {
+            submit.disabled = false;
+          }
           confirm.disabled = submitting || !hasAccounts;
           if (smart && !hasAccounts) message.textContent = labels.smart_no_accounts;
         }
@@ -1922,123 +1926,37 @@ def _smart_selling_controls(
 
 def _smart_buying_controls(
     lang: str, account_metas: Dict[str, AccountMeta], account_balance_helpers: str
-) -> tuple[str, str]:
-    settings = _smart_trading_settings(lang, account_metas, buying=True)
-    labels = json.dumps({key: t(lang, key) for key in ("usd_cash", "smart_no_accounts")}).replace("<", "\\u003c")
-    script = """
-    <script>
-      (function() {
-        const labels = __SMART_BUYING_LABELS__;
-        const form = document.getElementById("algo-form");
-        const modal = document.getElementById("smart-buying-modal");
-        const settings = document.getElementById("smart-buying-settings");
-        const symbolInput = document.getElementById("algo_symbol");
-        const startNow = document.getElementById("smart-buying-start-now");
-        const noDeadline = document.getElementById("smart-buying-no-deadline");
-        const start = document.getElementById("smart-buying-start");
-        const deadline = document.getElementById("smart-buying-deadline");
-        const message = document.getElementById("smart-buying-message");
-        let lastFocused = null;
-        let accountsCache = null;
+) -> tuple[str, str, str]:
+    # Both sides share scheduling, authenticated submission, status and stop UI.
+    # Scope every DOM identifier so their independent dialogs cannot interfere.
+    _, status, script = _smart_selling_controls(lang, account_metas, account_balance_helpers)
 
-        __ACCOUNT_BALANCE_HELPERS__
+    def buying_namespace(text):
+        return (text.replace("smart-selling", "__BUYING_NAMESPACE__")
+                .replace("smart-", "smart-buying-")
+                .replace("__BUYING_NAMESPACE__", "smart-buying")
+                .replace("smart_start_mode", "smart-buying_start_mode")
+                .replace("smart_deadline_mode", "smart-buying_deadline_mode")
+                .replace("smartAccount", "smartBuyingAccount")
+                .replace("Smart selling", "Smart buying")
+                .replace("智能卖出", "智能买入"))
 
-        function isBuyingMode() {
-          const selected = form.querySelector("input[name='trading_mode']:checked");
-          return selected && selected.value === "H";
+    script = buying_namespace(script)
+    script = script.replace('selected.value === "G"', 'selected.value === "H"')
+    script = script.replace("minimum-price", "maximum-price").replace("minimum_price: floor", "maximum_price: floor")
+    script = script.replace('labels.owned_shares + " (" + symbol + "): "', json.dumps(t(lang, "smart_buying_cash")) + ' + ": "')
+    script = script.replace('formatAccountBalance(account, true, symbol)', 'formatAccountBalance(availableUsdAccount(account), false, "")')
+    script = script.replace('function renderAccountBalances()', '''function availableUsdAccount(account) {
+          if (!account) return account;
+          const balances = account.available_cash_by_currency || {};
+          const key = Object.keys(balances).find(value => value.trim().toUpperCase() === "USD");
+          return key === undefined ? account : Object.assign({}, account, {cash_by_currency: {USD: balances[key]}});
         }
 
-        function renderAccountBalances() {
-          document.getElementById("smart-buying-symbol").textContent = symbolInput.value.trim().toUpperCase() || "—";
-          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
-          modal.querySelectorAll("[data-smart-buying-account-balance]").forEach(function(element) {
-            const account = accounts.find(row => row.account_id === element.dataset.smartBuyingAccountBalance);
-            element.textContent = "— " + labels.usd_cash + ": " + formatAccountBalance(account, false, "");
-          });
-        }
-
-        async function refreshAccountBalances() {
-          if (modal.hidden) return;
-          try {
-            const response = await fetch("/api/accounts", {cache: "no-store", credentials: "same-origin"});
-            if (response.ok) accountsCache = await response.json();
-          } catch (failure) {
-            // Retain the last snapshot during temporary account-data failures.
-          }
-          renderAccountBalances();
-        }
-
-        function localDateTime(date) {
-          const pad = value => String(value).padStart(2, "0");
-          return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
-            + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
-        }
-
-        function updateTimes() {
-          start.disabled = startNow.checked;
-          start.hidden = startNow.checked;
-          deadline.disabled = noDeadline.checked;
-          deadline.hidden = noDeadline.checked;
-        }
-
-        function closeModal() {
-          modal.hidden = true;
-          settings.disabled = true;
-          document.body.classList.remove("modal-open");
-          if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
-        }
-
-        function updateMode() {
-          if (!isBuyingMode()) {
-            if (!modal.hidden) closeModal();
-            message.textContent = "";
-            return;
-          }
-          const hasAccounts = !!modal.querySelector("[data-smart-buying-account-id]");
-          document.getElementById("algo-submit").disabled = !hasAccounts;
-          message.textContent = hasAccounts ? "" : labels.smart_no_accounts;
-        }
-
-        form.querySelectorAll("input[name='trading_mode']").forEach(function(input) {
-          input.addEventListener("change", updateMode);
-        });
-        form.addEventListener("submit", function(event) {
-          if (!isBuyingMode()) return;
-          event.preventDefault();
-          if (!modal.querySelector("[data-smart-buying-account-id]")) return;
-          lastFocused = document.activeElement;
-          if (!start.value) {
-            const now = new Date();
-            start.value = localDateTime(now);
-            deadline.value = localDateTime(new Date(now.getTime() + 2 * 60 * 60 * 1000));
-          }
-          settings.disabled = false;
-          modal.hidden = false;
-          updateTimes();
-          renderAccountBalances();
-          refreshAccountBalances();
-          document.body.classList.add("modal-open");
-          modal.querySelector("[data-smart-buying-account-id]").focus();
-        });
-        document.getElementById("smart-buying-close").addEventListener("click", closeModal);
-        document.getElementById("smart-buying-cancel").addEventListener("click", closeModal);
-        modal.addEventListener("click", function(event) {
-          if (event.target === modal) closeModal();
-        });
-        document.addEventListener("keydown", function(event) {
-          if (event.key === "Escape" && !modal.hidden) closeModal();
-        });
-        modal.querySelectorAll("input[type='radio']").forEach(function(input) {
-          input.addEventListener("change", updateTimes);
-        });
-        symbolInput.addEventListener("change", renderAccountBalances);
-        updateMode();
-        setInterval(refreshAccountBalances, 5000);
-        // Configuration only: Smart buying has no execution or submission handler yet.
-      })();
-    </script>
-    """.replace("__SMART_BUYING_LABELS__", labels).replace("__ACCOUNT_BALANCE_HELPERS__", account_balance_helpers)
-    return settings, script
+        function renderAccountBalances()''')
+    script = script.replace("// quantity and imminent_event have no UI components. Omit them so the\n          // backend defaults to all sellable inventory and imminent_event=false.",
+                            "// The server derives the target from available USD cash and fixes the POV rate.")
+    return _smart_trading_settings(lang, account_metas, buying=True), buying_namespace(status), script
 
 
 def render_control_panel_page(
@@ -2084,7 +2002,7 @@ def render_control_panel_page(
         }
     """
     smart_settings, smart_status, smart_script = _smart_selling_controls(lang, account_metas, account_balance_helpers)
-    buying_settings, buying_script = _smart_buying_controls(lang, account_metas, account_balance_helpers)
+    buying_settings, buying_status, buying_script = _smart_buying_controls(lang, account_metas, account_balance_helpers)
     order_summary_helpers = f"""
         {account_balance_helpers}
 
@@ -2693,7 +2611,7 @@ def render_control_panel_page(
       <button class="btn btn-green" id="algo-submit" type="submit">{html_escape(t(lang,'algo_submit'))}</button>
     </form>
       {smart_status}
-      <div class="help" id="smart-buying-message" role="status"></div>
+      {buying_status}
       </section>
 
       {fast_trading_modal}

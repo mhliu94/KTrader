@@ -213,7 +213,7 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
             equal(modal.hidden, true, "H does not open fast configuration");
             equal(document.getElementById("smart-selling-modal").hidden, true, "H does not open selling configuration");
             equal(text("smart-buying-symbol"), "AAPL", "H ticker shown");
-            equal(buyingBalance("A").endsWith(": $1,250.50"), true, "H total USD cash");
+            equal(buyingBalance("A").endsWith(": $10.00"), true, "H available USD cash matches its buying budget");
             equal(buyingBalance("B").endsWith(": $0.00"), true, "H zero cash");
             equal(buyingBalance("C").endsWith(": $-25.00"), true, "H legacy cash");
             equal(buyingBalance("MISSING").endsWith(": —"), true, "H unknown cash");
@@ -251,9 +251,10 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
             equal(maximumPrice.required, false, "H price optional");
             maximumPrice.value = "125.5";
             urgency.value = "urgent";
-            equal(document.getElementById("smart-buying-confirm").disabled, true, "H execution disabled");
+            equal(document.getElementById("smart-buying-confirm").disabled, false, "H execution enabled");
+            buyingAccounts.forEach(input => { input.checked = false; });
             document.getElementById("smart-buying-confirm").click();
-            equal(orderRequests.length, 0, "H never sends an order request");
+            equal(orderRequests.length, 0, "H validates account selection before submitting");
             equal(nativeSubmissions.length, 0, "H never falls through to native submission");
             accountData.accounts[1].cash_by_currency.USD = 600;
             await refresh();

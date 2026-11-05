@@ -13,7 +13,7 @@ from .orders import algo_account_conflict_error
 from .smart_selling import SmartSellingEngine
 from .smart_selling_feedback import SmartSellingFeedback
 from .smart_selling_market import SmartSellingMarketAdapter
-from .smart_selling_policy import SMART_SELLING_DEFAULTS, round_down_to_step
+from .smart_selling_policy import SMART_SELLING_DEFAULTS, decimal_string, round_down_to_step
 from ..smart_selling_config import canonical_symbol, normalize_smart_selling_config
 from .smart_selling_commands import build_smart_selling_command
 
@@ -21,6 +21,11 @@ LOGGER = logging.getLogger("trading-ui.smart-selling")
 
 
 class SmartSellingRuntime:
+    engine_type = SmartSellingEngine
+    normalize_config = staticmethod(normalize_smart_selling_config)
+    trading_mode = "G"
+    command_builder = staticmethod(build_smart_selling_command)
+
     def __init__(
         self,
         config,
@@ -34,7 +39,7 @@ class SmartSellingRuntime:
         wall_clock=time.time,
         reporting=None,
     ):
-        self.config = normalize_smart_selling_config(config)
+        self.config = self.normalize_config(config)
         self.account_metas_provider = account_metas_provider
         self.snapshots_provider = snapshots_provider
         self.publish_command = publish_command
@@ -54,7 +59,7 @@ class SmartSellingRuntime:
             self._file_lock = open(str(path) + ".lock", "a")
             try:
                 fcntl.flock(self._file_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                engine = SmartSellingEngine(path, clock=clock, wall_clock=wall_clock)
+                engine = self.engine_type(path, clock=clock, wall_clock=wall_clock)
             except BaseException:
                 self._file_lock.close()
                 raise
@@ -101,7 +106,7 @@ class SmartSellingRuntime:
                     starting = {
                         key: parent.get(key) for key in (
                             "symbol", "quantity", "mode", "participation", "start",
-                            "deadline", "minimum_price", "child_cap",
+                            "deadline", "minimum_price", "maximum_price", "child_cap",
                         )
                     }
                     starting.update(
@@ -110,7 +115,7 @@ class SmartSellingRuntime:
                             account: values["quantity"]
                             for account, values in parent.get("accounts", {}).items()
                         },
-                        trading_mode="G",
+                        trading_mode=self.trading_mode,
                     )
                     starting.update(parameters or {})
                     if self._report(
@@ -189,6 +194,32 @@ class SmartSellingRuntime:
             # Available inventory must never permit selling more than is held.
             quantity += min(held, available)
         return max(Decimal(0), quantity)
+
+    def _account_average_cost(self, account_id, symbol):
+        """Weight matching long holdings; missing cost is unknown, never zero."""
+        snapshot = self.snapshots_provider().get(account_id)
+        if snapshot is None:
+            return None
+        total, cost = Decimal(0), Decimal(0)
+        for position in snapshot.positions:
+            if canonical_symbol(position.symbol) != symbol:
+                continue
+            try:
+                quantity = Decimal(str(position.qty))
+                if not quantity.is_finite():
+                    return None
+                if quantity <= 0:
+                    continue
+                if isinstance(position.avg_price, bool):
+                    return None
+                average = Decimal(str(position.avg_price))
+                if not average.is_finite() or average < 0:
+                    return None
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            total += quantity
+            cost += quantity * average
+        return cost / total if total else None
 
     def start_parent(self, settings):
         if not isinstance(settings, dict):
@@ -276,6 +307,10 @@ class SmartSellingRuntime:
                 participation_percentage=self.config["participation_percentages"].get(mode),
                 account_id=accounts[0],
                 account_ids=accounts,
+                account_average_costs={
+                    account: decimal_string(self._account_average_cost(account, symbol))
+                    for account in accounts
+                },
                 account_quantities={account: str(amount) for account, amount in quantities.items()},
                 quantity=str(quantity),
                 symbol=symbol,
@@ -379,6 +414,11 @@ class SmartSellingRuntime:
                         if balance and Decimal(balance["remaining"]) <= 0:
                             continue
                         self._available_position(account, parent["symbol"])
+                    if self.trading_mode == "G":
+                        self.engine.set_account_costs(parent["parent_id"], {
+                            account: self._account_average_cost(account, parent["symbol"])
+                            for account in self._parent_accounts(parent)
+                        })
                 except (ValueError, TypeError):
                     self.engine.set_feed_health(
                         parent["symbol"],
@@ -454,7 +494,7 @@ class SmartSellingRuntime:
                 identity = ("parent_id", "account_id", "symbol", "broker_order_id")
                 if any(context[key] != action[key] for key in identity):
                     return
-            command = build_smart_selling_command(action, self.account_metas_provider())
+            command = self.command_builder(action, self.account_metas_provider())
             if action["type"] == "submit":
                 self._report("register_command", action["parent_id"], dict(command))
             publish_started = True

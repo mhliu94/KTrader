@@ -47,6 +47,10 @@ class SmartSellingEngine:
     Pure sizing and pricing live in :mod:`smart_selling_policy`.
     """
 
+    side = "SELL"
+    liquidity_side = "bid"
+    child_policy = staticmethod(plan_child_order)
+
     def __init__(
         self, db_path, *, clock=time.monotonic, wall_clock=time.time, max_active_parents=100
     ):
@@ -384,8 +388,64 @@ class SmartSellingEngine:
         }
         if parent["time_in_force"] not in {"DAY", "GTC"}:
             raise ValueError("Smart selling requires ordinary DAY or GTC limits")
+        self._configure_parent(parent, settings)
         self._register_parent(parent)
         return self._public(parent)
+
+    def _configure_parent(self, parent, settings):
+        """Side-specific budget settings are persisted before parent registration."""
+        costs = settings.get("account_average_costs", {})
+        for account_id, account in parent["accounts"].items():
+            value = costs.get(account_id)
+            account["average_cost"] = (
+                decimal_string(parse_decimal(value, "average cost", nonnegative=True))
+                if value is not None else None
+            )
+
+    def set_account_costs(self, parent_id, costs):
+        """Refresh selection inputs without changing an outstanding child's account."""
+        with self._transaction():
+            parent = self._load(parent_id)
+            changed = False
+            for account_id, account in parent["accounts"].items():
+                value = costs.get(account_id)
+                value = decimal_string(parse_decimal(value, "average cost", nonnegative=True)) if value is not None else None
+                if account.get("average_cost") != value:
+                    account["average_cost"] = value
+                    changed = True
+            if changed:
+                self._save(parent)
+
+    def _depth_budget(self, quote):
+        return max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
+
+    def _dispatch_price(self, parent, order, quote):
+        floor = parse_decimal(parent["minimum_price"]) if parent["minimum_price"] else ZERO
+        price = round_up_to_step(
+            max(parse_decimal(order["limit_price"]), quote["bid"], floor),
+            parse_decimal(parent["tick_size"]),
+        )
+        return price, order["aggressive"] or parse_decimal(order["limit_price"]) <= quote["bid"]
+
+    def _account_capacity(self, parent, account_id, price, *, include_order=False):
+        account = parent["accounts"][account_id]
+        available = parse_decimal(account["quantity"]) - parse_decimal(account["F"]) - parse_decimal(account["R"])
+        if include_order and parent["order"] and parent["order"]["account_id"] == account_id:
+            available += parse_decimal(parent["order"]["quantity"])
+        return available
+
+    def _account_selection_indices(self, parent):
+        accounts = parent["account_ids"]
+        indices = [(parent["next_account_index"] + offset) % len(accounts) for offset in range(len(accounts))]
+        if self.side == "SELL":
+            quote = self._quotes[parent["symbol"]]
+            market_price = (quote["bid"] + quote["ask"]) / 2
+            def cost_priority(index):
+                cost = parent["accounts"][accounts[index]].get("average_cost")
+                return cost is None, abs(parse_decimal(cost) - market_price) if cost is not None else ZERO
+            # Stable sorting rotates ties in distance and accounts with unknown costs.
+            indices.sort(key=cost_priority)
+        return indices
 
     def _register_parent(self, parent):
         """Claim the account/instrument slot and persist the initial zero ledger."""
@@ -426,6 +486,7 @@ class SmartSellingEngine:
         bid_size,
         *,
         source_time=None,
+        ask_size=None,
         sequence=None,
         healthy=True,
         accessible=True,
@@ -467,7 +528,8 @@ class SmartSellingEngine:
             source = parse_timestamp(source_time)
             consumed = ZERO
             consumed_wall = None
-            if old and old["bid"] == bid and old.get("consumed_wall") is not None:
+            liquidity_price = ask if self.liquidity_side == "ask" else bid
+            if old and old[self.liquidity_side] == liquidity_price and old.get("consumed_wall") is not None:
                 if preserve_consumption or source is None or source <= old["consumed_wall"]:
                     consumed = old["consumed"]
                     consumed_wall = old["consumed_wall"]
@@ -475,6 +537,7 @@ class SmartSellingEngine:
                 "bid": bid,
                 "ask": ask,
                 "bid_size": size,
+                "ask_size": parse_decimal(ask_size or 0, "ask_size", nonnegative=True),
                 "consumed": consumed,
                 "consumed_wall": consumed_wall,
                 "received_at": now,
@@ -738,7 +801,7 @@ class SmartSellingEngine:
                 {
                     "quantity": order["quantity"],
                     "limit_price": order["limit_price"],
-                    "side": "SELL",
+                    "side": self.side,
                     "order_type": "LIMIT",
                     "time_in_force": parent["time_in_force"],
                     "send_time": utc_timestamp_string(order["send_wall"]),
@@ -807,13 +870,11 @@ class SmartSellingEngine:
                 remaining = (
                     parse_decimal(parent["quantity"]) - parse_decimal(parent["F"]) - other_reserved
                 )
-                depth = max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
+                depth = self._depth_budget(quote)
+                price, aggressive = self._dispatch_price(parent, order, quote)
                 account = parent["accounts"][order["account_id"]]
-                account_remaining = (
-                    parse_decimal(account["quantity"])
-                    - parse_decimal(account["F"])
-                    - parse_decimal(account["R"])
-                    + old_quantity
+                account_remaining = self._account_capacity(
+                    parent, order["account_id"], price, include_order=True
                 )
                 quantity = round_down_to_step(
                     min(
@@ -824,14 +885,6 @@ class SmartSellingEngine:
                         depth,
                     ),
                     step,
-                )
-                floor = parse_decimal(parent["minimum_price"]) if parent["minimum_price"] else ZERO
-                price = round_up_to_step(
-                    max(parse_decimal(order["limit_price"]), quote["bid"], floor),
-                    parse_decimal(parent["tick_size"]),
-                )
-                aggressive = (
-                    order["aggressive"] or parse_decimal(order["limit_price"]) <= quote["bid"]
                 )
                 age_limit = 2 if aggressive else 5
                 if not meets_order_minimum(parent, quantity, price):
@@ -1124,7 +1177,7 @@ class SmartSellingEngine:
                 parse_decimal(parent["fills_after_cancel"]) + delta
             )
         quote = self._quotes.get(parent["symbol"])
-        if quote and order["aggressive"] and quote["bid"] == parse_decimal(order["quote_bid"]):
+        if quote and order["aggressive"] and quote[self.liquidity_side] == parse_decimal(order["quote_" + self.liquidity_side]):
             quote["consumed"] += delta
             quote["consumed_wall"] = self.wall_clock()
 
@@ -1402,12 +1455,12 @@ class SmartSellingEngine:
                 parent,
                 child_cap=decimal_string(min(continuation, parse_decimal(parent["child_cap"]))),
             )
-        plan = plan_child_order(sizing_parent, self._quotes[parent["symbol"]], now)
+        plan = self.child_policy(sizing_parent, self._quotes[parent["symbol"]], now)
         if continuation and not meets_order_minimum(parent, continuation, plan.limit_price):
             # A split remainder below the broker minimum joins future volume
             # credit; it must never become an illegal child on another account.
             parent["slice_remaining"] = "0"
-            plan = plan_child_order(parent, self._quotes[parent["symbol"]], now)
+            plan = self.child_policy(parent, self._quotes[parent["symbol"]], now)
         if plan.depth_limited:
             parent["depth_cap_count"] += 1
         if plan.quantity is None:
@@ -1421,15 +1474,10 @@ class SmartSellingEngine:
         assert quantity is not None
         quote = self._quotes[parent["symbol"]]
         account_ids = parent["account_ids"]
-        for offset in range(len(account_ids)):
-            index = (parent["next_account_index"] + offset) % len(account_ids)
+        for index in self._account_selection_indices(parent):
             account_id = account_ids[index]
             account = parent["accounts"][account_id]
-            available = (
-                parse_decimal(account["quantity"])
-                - parse_decimal(account["F"])
-                - parse_decimal(account["R"])
-            )
+            available = self._account_capacity(parent, account_id, plan.limit_price)
             allocated = round_down_to_step(
                 min(quantity, available), parse_decimal(parent["quantity_step"])
             )
@@ -1483,7 +1531,7 @@ class SmartSellingEngine:
             "quote_source_time": quote["source_time"],
             "quote_received_at": quote["received_at"],
         }
-        if plan.aggressive and plan.limit_price > quote["bid"]:
+        if self.side == "SELL" and plan.aggressive and plan.limit_price > quote["bid"]:
             parent["reason"] = "minimum price blocks immediate execution"
         elif plan.aggressive:
             parent["reason"] = "aggressive child submitted"
@@ -1501,6 +1549,7 @@ class SmartSellingEngine:
             "accounts": {
                 account_id: {
                     "quantity": account["quantity"],
+                    "average_cost": account.get("average_cost"),
                     "filled": account["F"],
                     "reserved": account["R"],
                     "remaining": decimal_string(
@@ -1582,6 +1631,7 @@ class SmartSellingEngine:
                 "parent_id": parent["parent_id"],
                 "account_id": order.get("account_id", parent["account_id"]),
                 "symbol": parent["symbol"],
+                "side": self.side,
                 "quantity": order["quantity"],
                 "limit_price": order["limit_price"],
                 "broker_order_id": order["broker_order_id"],

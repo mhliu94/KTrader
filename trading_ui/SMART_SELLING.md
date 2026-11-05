@@ -5,10 +5,21 @@ server publishes existing `LIMIT_ORDER` and account/symbol-scoped
 `CANCEL_OPEN_ORDERS` commands. Trading-server and broker scripts are unchanged.
 Each parent owns one instrument and one or more selected accounts. It places one
 child at a time and waits for an authoritative terminal cumulative-fill snapshot
-before placing the next child. Accounts rotate in selection order; if an account
-has fewer shares than a planned slice, the remainder passes to the next account
-after that child's terminal report. Exhausted accounts are skipped, and sales are
-capped by each account's inventory. Short selling is not allowed.
+before placing the next child. Accounts are selected by **average holding cost
+closest to the current market price**, using the absolute distance from the live
+best bid/ask midpoint. Costs and market prices are refreshed before each new child.
+For example, at a market price of $12, an account with $11.50 average cost is chosen
+before one with $11.00; $12.10 would rank ahead of both, while $13.00 would rank
+behind $11.50. Costs above and below market are treated equally, and the configured
+minimum sale price still applies. Equal distances rotate in selection order; unknown costs rank last and rotate
+among themselves. Multiple long position rows for the same normalized symbol use
+their share-weighted average; incomplete or invalid costs remain unknown.
+If the closest account has fewer shares than a planned slice, sell its available
+inventory first, subject to the broker's order minimum. After that child's
+terminal report, send the unfilled slice remainder to the next closest eligible
+account. Repeat as needed until the slice is covered. Exhausted accounts are
+skipped, and sales are capped by each account's inventory. Short selling is not
+allowed.
 
 The implementation follows the supplied **POV liquidation research handoff v2.0
 (21 October 2026)**. Trend adaptation, automatic participation increases,
@@ -40,7 +51,7 @@ Broker-specific behavior remains in the trading servers.
 Choose mode G and click **Start** to open its settings dialog. Select one or more
 accounts, with holdings shown beside each account, and choose urgency,
 start time, and deadline. The UI sells all sellable inventory across the selected
-accounts; stop manually to end early. Each account's available inventory is capped
+accounts in cost-priority order; stop manually to end early. Each account's available inventory is capped
 by its holdings and rounded down to the configured quantity step, so unsellable
 fractional remainders stay in that account. The backend still accepts an explicit
 `quantity` for future callers and the legacy single `account_id` field. There is

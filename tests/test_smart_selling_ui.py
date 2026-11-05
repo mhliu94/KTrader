@@ -63,17 +63,18 @@ class SmartSellingTemplateTests(unittest.TestCase):
 
 
 class SmartBuyingTemplateTests(unittest.TestCase):
-    def test_buying_configuration_is_localized_and_execution_is_disabled(self):
+    def test_buying_configuration_is_localized_and_execution_is_enabled(self):
         for language in ("en", "zh"):
             with self.subTest(language=language):
                 page = render_control_panel_page(language, account_metas(), ["AAPL"])
                 self.assertIn(I18N[language]["mode_h"], page)
                 self.assertIn(I18N[language]["smart_buying_config_title"], page)
                 self.assertIn(I18N[language]["smart_maximum_price"], page)
-                self.assertIn(I18N[language]["smart_buying_unavailable"], page)
+                self.assertIn(I18N[language]["smart_buying_pov_help"], page)
                 self.assertIn('id="smart-buying-modal" hidden', page)
                 self.assertIn('id="smart-buying-settings" disabled', page)
-                self.assertRegex(page, r'id="smart-buying-confirm"[^>]* disabled')
+                self.assertNotRegex(page, r'id="smart-buying-confirm"[^>]* disabled')
+                self.assertIn('/api/smart-buying', page)
                 form = re.search(r'<form[^>]*id="algo-form".*?</form>', page, re.S).group()
                 self.assertNotIn('id="smart-buying-settings"', form)
                 for account in ("A", "B", "C"):
@@ -109,6 +110,8 @@ class SmartSellingBrowserTests(unittest.TestCase):
           window.addEventListener("error", event => uiErrors.push(event.message));
           window.addEventListener("unhandledrejection", event => uiErrors.push(String(event.reason)));
           window.fetch = async function(url, options = {}) {
+            if (url === "/api/smart-buying" && options.method !== "POST")
+              return {ok: true, json: async () => ({ok: true, parents: []})};
             if (url === "/api/accounts") return {ok: true, json: async () => ({accounts: accounts})};
             if (url === "/api/market-data") return {ok: true, json: async () => ({rows: {}})};
             if (url === "/api/smart-selling" && options.method !== "POST") {

@@ -29,6 +29,7 @@ def lifecycle(monkeypatch, tmp_path):
         "APP_CONFIG", "ACCOUNT_METAS", "SYMBOLS", "AUTH_USERS", "ACCOUNT_CONSUMER",
         "MARKET_DATA_CONSUMER", "COMMANDS_PRODUCER", "FAST_TRADING_MANAGER",
         "SMART_SELLING_MANAGER", "SMART_SELLING_CONSUMER", "OPERATIONS_LOG",
+        "SMART_BUYING_MANAGER", "SMART_BUYING_CONSUMER",
         "ACTIVITY_REPORTING", "SYSTEM_SNAPSHOTS", "HIST_CLOSE_STORE",
     ):
         monkeypatch.setattr(webserver, name, None)
@@ -41,6 +42,7 @@ def lifecycle(monkeypatch, tmp_path):
         "HistoricalCloseStore", "OperationsLog", "ActivityReporting", "SystemSnapshotRecorder",
         "AccountDetailsConsumer", "TradingCommandsProducer", "FastTradingStrategyManager",
         "SmartSellingRuntime", "SmartSellingConsumer", "PriceBookConsumer",
+        "SmartBuyingRuntime",
     ):
         instance = Mock(name=name + " instance")
         for method in ("start", "stop", "stop_all", "close", "flush"):
@@ -142,3 +144,30 @@ def test_shutdown_is_idempotent_and_disabled_restart_has_no_old_smart_callbacks(
         assert market_args["health_callback"] is None
     finally:
         webserver.on_shutdown()
+
+
+def test_buying_gets_independent_runtime_feeds_ownership_and_shutdown(lifecycle):
+    config, _, factories, _, _ = lifecycle
+    config["smart_buying"] = {"enabled": True}
+    try:
+        webserver.on_startup()
+        buying = factories["SmartBuyingRuntime"].return_value
+        selling = factories["SmartSellingRuntime"].return_value
+        assert buying is webserver.SMART_BUYING_MANAGER
+        buying.start.assert_called_once_with()
+        callbacks = factories["PriceBookConsumer"].call_args.kwargs
+        callbacks["payload_callback"]({"symbol": "AAPL"}, topic="price-books")
+        buying.on_price_book.assert_called_once_with({"symbol": "AAPL"}, topic="price-books")
+        selling.on_price_book.assert_called_once_with({"symbol": "AAPL"}, topic="price-books")
+        callbacks["health_callback"](False)
+        buying.on_price_book_health.assert_called_once_with(False)
+        factories["FastTradingStrategyManager"].return_value.owns_account.return_value = False
+        selling.owns_account.return_value = True
+        assert factories["SmartBuyingRuntime"].call_args.kwargs["fast_owns_account"]("A")
+        buying.owns_account.return_value = True
+        assert factories["SmartSellingRuntime"].call_args.kwargs["fast_owns_account"]("A")
+    finally:
+        webserver.on_shutdown()
+    buying.stop_all.assert_called_once_with()
+    buying.close.assert_called_once_with()
+    assert webserver.SMART_BUYING_MANAGER is None

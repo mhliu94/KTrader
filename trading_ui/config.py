@@ -215,6 +215,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
     if "state_db" in (smart_raw or {}):
         cfg["smart_selling"]["state_db"] = _resolve_path(cfg["smart_selling"]["state_db"])
 
+    from .services.smart_buying_runtime import normalize_smart_buying_config
+    buying_raw = cfg.get("smart_buying")
+    cfg["smart_buying"] = normalize_smart_buying_config(buying_raw)
+    if "state_db" in (buying_raw or {}):
+        cfg["smart_buying"]["state_db"] = _resolve_path(cfg["smart_buying"]["state_db"])
+    if os.path.abspath(cfg["smart_buying"]["state_db"]) == os.path.abspath(cfg["smart_selling"]["state_db"]):
+        raise ValueError("Smart buying and Smart selling require separate state databases")
+
     cfg.setdefault("auth", {})
     cfg["auth"].setdefault("users", {})
     users = cfg["auth"]["users"]

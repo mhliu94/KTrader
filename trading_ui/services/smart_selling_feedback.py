@@ -102,8 +102,8 @@ class SmartSellingFeedback:
             raise ValueError("Order snapshot account does not match the owned child")
         if canonical_order_symbol(payload["symbol"]) != canonical_order_symbol(context["symbol"]):
             raise ValueError("Order snapshot symbol does not match the owned child")
-        if payload["side"] != "SELL" or payload["order_type"] != "LIMIT":
-            raise ValueError("Smart selling feedback requires the owned ordinary sell limit")
+        if payload["side"] != context.get("side", "SELL") or payload["order_type"] != "LIMIT":
+            raise ValueError("Smart order feedback requires the owned side and ordinary limit")
         quantity = payload["quantity"]
         expected_quantity = Decimal(str(context["quantity"]))
         if quantity is None or Decimal(str(quantity)) != expected_quantity:

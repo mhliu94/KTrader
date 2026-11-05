@@ -48,6 +48,7 @@ from .services.orders import (
 )
 from .services.fast_trading import FastTradingStrategyManager
 from .services.smart_selling_runtime import SmartSellingRuntime
+from .services.smart_buying_runtime import SmartBuyingRuntime
 from .kafka.consumer_smart_selling import SmartSellingConsumer
 from .kafka.consumer_account_details import AccountDetailsConsumer
 from .kafka.consumer_market_data import PriceBookConsumer
@@ -72,6 +73,8 @@ COMMANDS_PRODUCER = None
 FAST_TRADING_MANAGER = None
 SMART_SELLING_MANAGER = None
 SMART_SELLING_CONSUMER = None
+SMART_BUYING_MANAGER = None
+SMART_BUYING_CONSUMER = None
 ALGO_CONTROL_LOCK = threading.RLock()
 OPERATIONS_LOG = None
 ACTIVITY_REPORTING = None
@@ -104,6 +107,20 @@ def _normalized_configured_symbols() -> list[str]:
 
 def _market_insights_symbols() -> list[str]:
     return sorted(set(_normalized_configured_symbols()) | set(MD_STORE.get_book_symbols()))
+
+
+def _smart_managers():
+    return [manager for manager in (SMART_SELLING_MANAGER, SMART_BUYING_MANAGER) if manager is not None]
+
+
+def _on_price_book(payload, **context):
+    for manager in _smart_managers():
+        manager.on_price_book(payload, **context)
+
+
+def _on_price_book_health(healthy):
+    for manager in _smart_managers():
+        manager.on_price_book_health(healthy)
 
 
 def _extract_fast_trading_config(body: Dict) -> object:
@@ -253,12 +270,12 @@ def _publish_fast_trading_command(command: Dict, key: str) -> None:
             command.get("account_id"), command.get("symbol")
         ):
             return
-        if SMART_SELLING_MANAGER:
-            # Sessions never share an account, so a Smart selling owner here is a fault.
+        for manager in _smart_managers():
+            # Sessions never share an account.
             account_id = str(command.get("account_id") or "")
-            if SMART_SELLING_MANAGER.owns_account(account_id):
+            if manager.owns_account(account_id):
                 raise ValueError(algo_account_conflict_error([account_id]))
-            SMART_SELLING_MANAGER.track_external_order(command)
+            manager.track_external_order(command)
         _publish_trading_command(command, key)
 
 
@@ -279,14 +296,15 @@ def _publish_control_command(command: Dict, key: str) -> None:
         ):
             if any(
                 manager and manager.owns_account(account_id)
-                for manager in (FAST_TRADING_MANAGER, SMART_SELLING_MANAGER)
+                for manager in (FAST_TRADING_MANAGER, SMART_SELLING_MANAGER, SMART_BUYING_MANAGER)
             ):
                 raise ValueError(
                     "An algorithm session owns this account; "
                     "stop it and await outstanding order confirmations first"
                 )
-        if SMART_SELLING_MANAGER and places_order:
-            SMART_SELLING_MANAGER.track_external_order(command)
+        if places_order:
+            for manager in _smart_managers():
+                manager.track_external_order(command)
         _publish_trading_command(command, key)
 
 
@@ -337,6 +355,7 @@ def on_startup() -> None:
 def _start_services() -> None:
     global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG, HIST_CLOSE_STORE
     global SMART_SELLING_MANAGER, SMART_SELLING_CONSUMER, ACTIVITY_REPORTING, SYSTEM_SNAPSHOTS
+    global SMART_BUYING_MANAGER, SMART_BUYING_CONSUMER
 
     server_started_at = datetime.now(timezone.utc)
     config_path = os.getenv("ACCOUNT_DASHBOARD_CONFIG", "./trading_ui/sample/config.json")
@@ -375,7 +394,7 @@ def _start_services() -> None:
         publish_command=_publish_fast_trading_command,
         fast_trading_settings=APP_CONFIG.get("fast_trading"),
         smart_owns_account=lambda account: (
-            SMART_SELLING_MANAGER is not None and SMART_SELLING_MANAGER.owns_account(account)
+            any(manager.owns_account(account) for manager in _smart_managers())
         ),
     )
     if APP_CONFIG["smart_selling"]["enabled"]:
@@ -385,18 +404,34 @@ def _start_services() -> None:
             account_metas_provider=lambda: ACCOUNT_METAS,
             snapshots_provider=lambda: get_served_snapshots()[0],
             publish_command=_publish_trading_command,
-            fast_owns_account=lambda account: FAST_TRADING_MANAGER.owns_account(account),
+            fast_owns_account=lambda account: FAST_TRADING_MANAGER.owns_account(account) or (
+                SMART_BUYING_MANAGER is not None and SMART_BUYING_MANAGER.owns_account(account)
+            ),
         )
         SMART_SELLING_CONSUMER = SmartSellingConsumer(APP_CONFIG, SMART_SELLING_MANAGER)
         SMART_SELLING_CONSUMER.start()
         SMART_SELLING_MANAGER.start()
+    if APP_CONFIG.get("smart_buying", {}).get("enabled", False):
+        SMART_BUYING_MANAGER = SmartBuyingRuntime(
+            APP_CONFIG["smart_buying"], market_data_store=MD_STORE,
+            reporting=ACTIVITY_REPORTING,
+            account_metas_provider=lambda: ACCOUNT_METAS,
+            snapshots_provider=lambda: get_served_snapshots()[0],
+            publish_command=_publish_trading_command,
+            fast_owns_account=lambda account: FAST_TRADING_MANAGER.owns_account(account) or (
+                SMART_SELLING_MANAGER is not None and SMART_SELLING_MANAGER.owns_account(account)
+            ),
+        )
+        SMART_BUYING_CONSUMER = SmartSellingConsumer(
+            {**APP_CONFIG, "smart_selling": APP_CONFIG["smart_buying"]}, SMART_BUYING_MANAGER,
+        )
+        SMART_BUYING_CONSUMER.start()
+        SMART_BUYING_MANAGER.start()
     MARKET_DATA_CONSUMER = PriceBookConsumer(
         APP_CONFIG["kafka"],
         MD_STORE,
-        payload_callback=SMART_SELLING_MANAGER.on_price_book if SMART_SELLING_MANAGER else None,
-        health_callback=(
-            SMART_SELLING_MANAGER.on_price_book_health if SMART_SELLING_MANAGER else None
-        ),
+        payload_callback=_on_price_book if _smart_managers() else None,
+        health_callback=_on_price_book_health if _smart_managers() else None,
     )
     MARKET_DATA_CONSUMER.start()
 
@@ -405,15 +440,19 @@ def _start_services() -> None:
 def on_shutdown() -> None:
     global SYSTEM_SNAPSHOTS, FAST_TRADING_MANAGER, SMART_SELLING_MANAGER
     global ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, SMART_SELLING_CONSUMER, COMMANDS_PRODUCER, ACTIVITY_REPORTING
+    global SMART_BUYING_MANAGER, SMART_BUYING_CONSUMER
     # Also used after partial startup. One failing service must not strand others.
     for service, method, args in (
         (SYSTEM_SNAPSHOTS, "stop", ()),
         (FAST_TRADING_MANAGER, "stop_all", ()),
         (SMART_SELLING_MANAGER, "stop_all", ()),
+        (SMART_BUYING_MANAGER, "stop_all", ()),
         (ACCOUNT_CONSUMER, "stop", ()),
         (MARKET_DATA_CONSUMER, "stop", ()),
         (SMART_SELLING_CONSUMER, "stop", ()),
+        (SMART_BUYING_CONSUMER, "stop", ()),
         (SMART_SELLING_MANAGER, "close", ()),
+        (SMART_BUYING_MANAGER, "close", ()),
         (COMMANDS_PRODUCER, "flush", (2.0,)),
         (ACTIVITY_REPORTING, "close", ()),
     ):
@@ -425,6 +464,7 @@ def on_shutdown() -> None:
     SYSTEM_SNAPSHOTS = FAST_TRADING_MANAGER = SMART_SELLING_MANAGER = None
     ACCOUNT_CONSUMER = MARKET_DATA_CONSUMER = SMART_SELLING_CONSUMER = None
     COMMANDS_PRODUCER = ACTIVITY_REPORTING = None
+    SMART_BUYING_MANAGER = SMART_BUYING_CONSUMER = None
 
 
 @app.get("/set-lang")
@@ -1255,6 +1295,58 @@ def api_stop_smart_selling(parent_id: str, request: Request):
         return JSONResponse({"ok": False, "error": "Unknown Smart selling parent"}, status_code=404)
 
 
+@app.get("/api/smart-buying")
+def api_smart_buying_status(request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    return JSONResponse(
+        {
+            "ok": True,
+            "parents": SMART_BUYING_MANAGER.list_parents() if SMART_BUYING_MANAGER else [],
+            "available": SMART_BUYING_MANAGER is not None,
+        }
+    )
+
+
+@app.post("/api/smart-buying")
+async def api_start_smart_buying(request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    if not _smart_origin_allowed(request):
+        return JSONResponse(
+            {"ok": False, "error": "Cross-origin submission is not allowed"}, status_code=403
+        )
+    if SMART_BUYING_MANAGER is None:
+        return JSONResponse({"ok": False, "error": "Smart buying is unavailable"}, status_code=503)
+    try:
+        payload = await request.json()
+        with ALGO_CONTROL_LOCK:
+            parent = SMART_BUYING_MANAGER.start_parent(payload)
+        return JSONResponse({"ok": True, "parent": parent})
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
+@app.post("/api/smart-buying/{parent_id}/stop")
+def api_stop_smart_buying(parent_id: str, request: Request):
+    _, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    if not _smart_origin_allowed(request):
+        return JSONResponse(
+            {"ok": False, "error": "Cross-origin submission is not allowed"}, status_code=403
+        )
+    if SMART_BUYING_MANAGER is None:
+        return JSONResponse({"ok": False, "error": "Smart buying is unavailable"}, status_code=503)
+    try:
+        with ALGO_CONTROL_LOCK:
+            return JSONResponse({"ok": True, "parent": SMART_BUYING_MANAGER.stop_parent(parent_id)})
+    except KeyError:
+        return JSONResponse({"ok": False, "error": "Unknown Smart buying parent"}, status_code=404)
+
+
 @app.post("/submit-algo-stop")
 def submit_algo_stop(
     request: Request,
@@ -1269,10 +1361,11 @@ def submit_algo_stop(
     # Keep new starts behind the stop notification as well as the local stop.
     with ALGO_CONTROL_LOCK:
         try:
-            if FAST_TRADING_MANAGER is None and SMART_SELLING_MANAGER is None:
+            if FAST_TRADING_MANAGER is None and not _smart_managers():
                 raise RuntimeError(t(lang, "algo_stop_unavailable"))
             stopped_count = FAST_TRADING_MANAGER.stop_all() if FAST_TRADING_MANAGER else 0
             smart_count = SMART_SELLING_MANAGER.stop_all() if SMART_SELLING_MANAGER else 0
+            buying_count = SMART_BUYING_MANAGER.stop_all() if SMART_BUYING_MANAGER else 0
         except Exception as e:
             return RedirectResponse(url=f"/control-panel?err={quote(str(e))}", status_code=303)
 
@@ -1282,6 +1375,11 @@ def submit_algo_stop(
                 f" 已请求停止 {smart_count} 个智能卖出任务，等待订单终态确认。"
                 if lang == "zh"
                 else f" Stop requested for {smart_count} Smart selling parent(s); awaiting final order confirmations."
+            )
+        if buying_count:
+            ok += (
+                f" 已请求停止 {buying_count} 个智能买入任务，等待订单终态确认。"
+                if lang == "zh" else f" Stop requested for {buying_count} Smart buying parent(s); awaiting final order confirmations."
             )
         cmd = build_algo_stop_command(reason=reason)
         try:

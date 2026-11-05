@@ -19,6 +19,7 @@ import uuid
 
 from .smart_selling_policy import (
     ZERO,
+    MIN_ORDER_QUANTITY,
     PARTICIPATION_PERCENTAGES,
     SMART_SELLING_DEFAULTS,
     ChildPlan,
@@ -29,6 +30,7 @@ from .smart_selling_policy import (
     parse_participation_percentage,
     parse_timestamp,
     plan_child_order,
+    price_distance_reason,
     round_down_to_step,
     round_up_to_step,
     utc_timestamp_string,
@@ -162,6 +164,13 @@ class SmartSellingEngine:
         )
         parent.setdefault("next_account_index", 0)
         parent.setdefault("slice_remaining", "0")
+        minimum = round_up_to_step(
+            max(MIN_ORDER_QUANTITY, parse_decimal(parent["min_quantity"])),
+            parse_decimal(parent["quantity_step"]),
+        )
+        parent["min_quantity"] = decimal_string(minimum)
+        for key in ("child_cap", "base_child_cap"):
+            parent[key] = decimal_string(max(minimum, parse_decimal(parent[key])))
         if parent["order"]:
             parent["order"].setdefault("account_id", account)
         return parent
@@ -262,7 +271,7 @@ class SmartSellingEngine:
         minimum_quantity = parse_input_decimal(
             rules.get("min_quantity"), "min_quantity", positive=True
         )
-        minimum_quantity = round_up_to_step(minimum_quantity, quantity_step)
+        minimum_quantity = round_up_to_step(max(MIN_ORDER_QUANTITY, minimum_quantity), quantity_step)
         min_notional = parse_input_decimal(
             rules.get("min_notional", 0), "min_notional", nonnegative=True
         )
@@ -487,6 +496,8 @@ class SmartSellingEngine:
         *,
         source_time=None,
         ask_size=None,
+        bid_prices=None,
+        ask_prices=None,
         sequence=None,
         healthy=True,
         accessible=True,
@@ -518,12 +529,21 @@ class SmartSellingEngine:
                 bid = parse_input_decimal(bid, "bid", positive=True)
                 ask = parse_input_decimal(ask, "ask", positive=True)
                 size = parse_input_decimal(bid_size, "bid_size", nonnegative=True)
+                bid_levels = tuple(sorted({
+                    parse_input_decimal(p, "bid level", positive=True)
+                    for p in (bid_prices if bid_prices is not None else (bid,))
+                }, reverse=True))
+                ask_levels = tuple(sorted({
+                    parse_input_decimal(p, "ask level", positive=True)
+                    for p in (ask_prices if ask_prices is not None else (ask,))
+                }))
                 if ask < bid:
                     healthy = False
             except ValueError:
                 bid = ZERO
                 ask = ZERO
                 size = ZERO
+                bid_levels = ask_levels = ()
                 healthy = False
             source = parse_timestamp(source_time)
             consumed = ZERO
@@ -538,6 +558,8 @@ class SmartSellingEngine:
                 "ask": ask,
                 "bid_size": size,
                 "ask_size": parse_decimal(ask_size or 0, "ask_size", nonnegative=True),
+                "bid_prices": bid_levels,
+                "ask_prices": ask_levels,
                 "consumed": consumed,
                 "consumed_wall": consumed_wall,
                 "received_at": now,
@@ -862,6 +884,8 @@ class SmartSellingEngine:
             )
             if not reason and parse_decimal(parent["C"]) < 0:
                 reason = "negative credit before dispatch"
+            if not reason:
+                reason = price_distance_reason(parent, self._quotes[parent["symbol"]], self.side)
             if not reason:
                 quote = self._quotes[parent["symbol"]]
                 old_quantity = parse_decimal(order["quantity"])
@@ -1439,6 +1463,8 @@ class SmartSellingEngine:
             parent["reason"] = "waiting for parent start"
             return None
         reason = parent["hold"] or self._quote_reason(parent, now)
+        if not reason:
+            reason = price_distance_reason(parent, self._quotes[parent["symbol"]], self.side)
         if reason or parse_decimal(parent["C"]) < 0:
             parent["state"] = "HOLD"
             parent["reason"] = reason or "negative credit after tape correction"

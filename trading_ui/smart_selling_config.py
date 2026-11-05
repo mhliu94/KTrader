@@ -12,7 +12,7 @@ from .services.smart_selling_policy import (
 INSTRUMENT_DEFAULTS = {
     "tick_size": "0.01",
     "quantity_step": "1",
-    "min_quantity": "1",
+    "min_quantity": "100",
     "min_notional": "0",
 }
 

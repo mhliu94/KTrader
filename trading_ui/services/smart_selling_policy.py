@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Mapping
 
 ZERO = Decimal("0")
+MIN_ORDER_QUANTITY = Decimal("100")
 PARTICIPATION_PERCENTAGES = {
     "patient": Decimal("3"),
     "normal": Decimal("6"),
@@ -100,9 +101,31 @@ def utc_timestamp_string(value):
 
 def meets_order_minimum(parent, quantity, price):
     """Both quantity and notional rules must hold after downward sizing."""
-    return quantity >= parse_decimal(parent["min_quantity"]) and quantity * price >= parse_decimal(
+    return quantity >= max(MIN_ORDER_QUANTITY, parse_decimal(parent["min_quantity"])) and quantity * price >= parse_decimal(
         parent["min_notional"]
     )
+
+
+def price_distance_reason(parent, quote, side):
+    """Count distinct displayed prices from the executable side toward the bound."""
+    selling = side == "SELL"
+    bound = parent.get("minimum_price" if selling else "maximum_price")
+    if bound is None:
+        return ""
+    bound = parse_decimal(bound)
+    best = quote["bid" if selling else "ask"]
+    if (selling and bound <= best) or (not selling and bound >= best):
+        return ""
+    prices = sorted({
+        price for price in quote["ask_prices" if selling else "bid_prices"]
+        if (price > best if selling else price < best)
+    }, reverse=not selling)
+    crossed = sum(price <= bound if selling else price >= bound for price in prices)
+    if crossed >= 5:
+        return "user price limit is at least five displayed levels away"
+    if not prices or (bound > prices[-1] if selling else bound < prices[-1]):
+        return "waiting for displayed depth to locate user price limit"
+    return ""
 
 
 @dataclass(frozen=True)

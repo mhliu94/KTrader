@@ -25,6 +25,16 @@ the planned limit fixed. Confirmed fills consume cash at the order's limit price
 a conservative upper bound, so delayed account snapshots cannot reuse spent cash.
 This is a gross purchase budget; broker fees are not estimated by the controller.
 
+G and H also check the user's price bound against actual displayed depth before
+planning and immediately before dispatch. Buying pauses when at least five
+distinct bid prices lie below the best offer and at or above the maximum buy
+price. The fifth level is blocked; gaps do not count as extra levels and duplicate
+prices count once. If a nonmarketable maximum lies beyond the available depth,
+the controller waits for more depth. A maximum at or above the best offer needs
+no deeper levels. A newly blocked unsent order refunds its reservation; earned
+credit remains available within the normal cap. See [Smart selling](SMART_SELLING.md)
+for the corresponding sell-side rule and examples.
+
 Mode H reuses mode G's durable credit ledger, order correlation, replay protection,
 freshness and halt checks, cancellation and reconciliation. Trading-volume changes
 earn credit; order-book updates do not. Replayed, stale, duplicate, or uncertain

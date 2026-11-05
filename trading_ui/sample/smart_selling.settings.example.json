@@ -15,14 +15,14 @@
     "instrument_defaults": {
       "tick_size": "0.01",
       "quantity_step": "1",
-      "min_quantity": "1",
+      "min_quantity": "100",
       "min_notional": "0"
     },
     "instruments": {
       "EXAMPLE": {
         "tick_size": "0.0001",
         "quantity_step": "1",
-        "min_quantity": "1",
+        "min_quantity": "100",
         "min_notional": "0"
       }
     }

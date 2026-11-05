@@ -160,26 +160,26 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(self.engine.tick(), [])
 
     def test_depth_cap_and_partial_budget_flush(self):
-        self.start()
-        self.quote(bid_size="800")
-        self.tape("600")
+        self.start(quantity="2000")
+        self.quote(bid_size="1800")
+        self.tape("1600")
         self.assertEqual(self.engine.tick(), [])
         self.clock.now = 29
-        self.quote(bid_size="800")
+        self.quote(bid_size="1800")
         self.assertEqual(self.engine.tick(), [])
         self.clock.now = 30
-        self.quote(bid_size="800")
-        self.assertEqual(Decimal(self.child()["quantity"]), 60)
+        self.quote(bid_size="1800")
+        self.assertEqual(Decimal(self.child()["quantity"]), 160)
 
     def test_fractional_credit_and_quantity_step_never_round_up(self):
-        self.start(quantity="100", quantity_step=".1", min_quantity=".1", horizon_seconds=300)
-        self.quote(bid_size="100")
-        self.tape("12.345")
+        self.start(quantity="10000", quantity_step=".1", min_quantity=".1", horizon_seconds=300)
+        self.quote(bid_size="10000")
+        self.tape("1001.2345")
         self.clock.now = 30
-        self.quote(bid_size="100")
+        self.quote(bid_size="10000")
         child = self.child()
-        self.assertEqual(Decimal(child["quantity"]), Decimal("1.2"))
-        self.assertEqual(Decimal(self.status()["free_credit"]), Decimal(".0345"))
+        self.assertEqual(Decimal(child["quantity"]), Decimal("100.1"))
+        self.assertEqual(Decimal(self.status()["free_credit"]), Decimal(".02345"))
 
     def test_partial_fill_during_cancel_refunds_final_leaves_once(self):
         self.start()
@@ -299,9 +299,11 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(Decimal(self.status()["earned"]), 54)
         self.clock.now = 30
         self.quote()
+        self.assertEqual(self.engine.tick(), [])
+        self.tape("1000", event_id="fresh")
         child = self.child()
         self.report(child, "FILLED", child["quantity"], final=True)
-        self.assertEqual(Decimal(self.status()["earned"]), 54)
+        self.assertEqual(Decimal(self.status()["earned"]), 114)
 
     def test_negative_correction_keeps_live_reservation_and_signed_credit(self):
         self.start()
@@ -352,9 +354,9 @@ class SmartSellingTests(unittest.TestCase):
     def test_price_floor_upward_tick_and_tiny_depth(self):
         self.start(minimum_price="10.025")
         self.tape()
-        self.quote(bid_size="9")
+        self.quote(ask_prices=["10.01", "10.02", "10.03"], bid_size="9")
         self.assertEqual(self.engine.tick(), [])
-        self.quote(bid_size="1000")
+        self.quote(ask_prices=["10.01", "10.02", "10.03"], bid_size="1000")
         child = self.child()
         self.assertEqual(Decimal(child["limit_price"]), Decimal("10.03"))
         self.assertIn("minimum price", self.status()["reason"])
@@ -471,20 +473,22 @@ class SmartSellingTests(unittest.TestCase):
         self.assertTrue(any(e["kind"] == "tape_credit" for e in events))
 
     def test_minimum_notional_increases_minimum_legal_child_cap(self):
-        self.start(quantity="10", horizon_seconds=7200, min_notional="100")
-        self.assertEqual(Decimal(self.status()["child_cap"]), 10)
-        self.tape("100")
-        self.assertEqual(Decimal(self.child()["quantity"]), 10)
+        self.start(quantity="1000", horizon_seconds=7200, min_notional="1500")
+        self.quote(bid_size="1500")
+        self.assertEqual(Decimal(self.status()["child_cap"]), 150)
+        self.tape("1500")
+        self.assertEqual(Decimal(self.child()["quantity"]), 150)
 
     def test_known_bid_consumption_survives_repeated_old_snapshot(self):
-        self.start()
-        self.tape("2000")
+        self.start(quantity="2000")
+        self.quote(bid_size="2000")
+        self.tape("4000")
         first = self.child()
-        self.report(first, "FILLED", "100", final=True)
+        self.report(first, "FILLED", "200", final=True)
         self.clock.now = 5
-        self.quote(source_time=self.clock.wall_start)
+        self.quote(bid_size="2000", source_time=self.clock.wall_start)
         second = self.child()
-        self.assertEqual(Decimal(second["quantity"]), 90)
+        self.assertEqual(Decimal(second["quantity"]), 180)
 
     def test_new_source_snapshot_reconciles_known_consumption(self):
         self.start()
@@ -561,26 +565,27 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(Decimal(self.status()["earned"]), 100)
 
     def test_final_dispatch_shrinks_to_fresh_depth_and_preserves_accounting(self):
-        self.start()
-        self.tape()
+        self.start(quantity="2000")
+        self.quote(bid_size="2000")
+        self.tape("2000")
         original = self.child()
-        self.quote(bid_size="400", bid="10.02", ask="10.03")
+        self.quote(bid_size="1500", bid="10.02", ask="10.03")
         updated = self.engine.prepare_dispatch(original["client_order_id"])
-        self.assertEqual(Decimal(updated["quantity"]), 40)
+        self.assertEqual(Decimal(updated["quantity"]), 150)
         self.assertEqual(Decimal(updated["limit_price"]), Decimal("10.02"))
         self.assertEqual(updated["send_time"], original["send_time"])
-        self.assertEqual(Decimal(self.status()["free_credit"]), 60)
-        self.assertEqual(Decimal(self.status()["reserved"]), 40)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 50)
+        self.assertEqual(Decimal(self.status()["reserved"]), 150)
         self.assertIsNone(self.engine.prepare_dispatch(original["client_order_id"]))
 
     def test_final_dispatch_does_not_enlarge_child_on_deeper_book(self):
         self.start()
         self.tape()
-        self.quote(bid_size="400")
+        self.quote(bid_size="1000")
         original = self.child()
         self.quote(bid_size="10000")
         updated = self.engine.prepare_dispatch(original["client_order_id"])
-        self.assertEqual(Decimal(updated["quantity"]), 40)
+        self.assertEqual(Decimal(updated["quantity"]), 100)
 
     def test_halt_before_local_dispatch_releases_unhanded_reservation(self):
         self.start(mode="patient")
@@ -653,13 +658,14 @@ class SmartSellingTests(unittest.TestCase):
         self.assertIsNone(self.engine.get_market_checkpoint("OTHER"))
 
     def test_depth_heartbeat_does_not_replenish_known_bid_consumption(self):
-        self.start()
-        self.tape("2000")
+        self.start(quantity="2000")
+        self.quote(bid_size="2000")
+        self.tape("4000")
         child = self.child()
-        self.report(child, "FILLED", "100", final=True)
+        self.report(child, "FILLED", "200", final=True)
         self.clock.now = 5
-        self.quote(preserve_consumption=True)
-        self.assertEqual(Decimal(self.child()["quantity"]), 90)
+        self.quote(bid_size="2000", preserve_consumption=True)
+        self.assertEqual(Decimal(self.child()["quantity"]), 180)
 
     def test_abort_prepared_but_unpublished_child_preserves_fallback(self):
         self.start(mode="patient")
@@ -745,7 +751,7 @@ class SmartSellingTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "precision"):
                     parse_input_decimal(value)
-        self.start(mode="patient", quantity="1", quantity_step="1e-24", min_quantity="1e-24")
+        self.start(mode="patient", quantity="100", quantity_step="1e-24", min_quantity="1e-24")
         self.tape("1e-24")
         self.assertEqual(Decimal(self.status()["free_credit"]), Decimal("3e-26"))
         with self.assertRaisesRegex(ValueError, "precision"):
@@ -821,13 +827,15 @@ class SmartSellingTests(unittest.TestCase):
 
     def test_closest_cost_account_is_used_until_exhausted_before_farther_cost(self):
         self.start(
-            account_ids=["A", "B"], account_quantities={"A": "850", "B": "150"},
+            account_ids=["A", "B"], account_quantities={"A": "750", "B": "250"},
             account_average_costs={"A": "11.00", "B": "11.50"},
         )
-        self.tape("3000")
-        for now, account, quantity in [(0, "B", "100"), (5, "B", "50"), (10, "A", "50")]:
+        self.tape("2000")
+        for now, account, quantity in [(0, "B", "100"), (5, "B", "100"), (10, "A", "100")]:
             self.clock.now = now
             self.quote(bid=12, ask="12.01")
+            if now == 10:
+                self.tape("1000", event_id="next-credit")
             child = self.child()
             self.assertEqual((child["account_id"], child["quantity"]), (account, quantity))
             self.report(child, "FILLED", quantity, final=True)
@@ -873,14 +881,14 @@ class SmartSellingTests(unittest.TestCase):
             account_average_costs={"above": "12.5", "below": "11.5"},
             minimum_price="13",
         )
-        self.quote(bid="11.9", ask="12.1")
+        self.quote(bid="11.9", ask="12.1", ask_prices=["12.1", "12.5", "13"])
         self.tape("2000")
         first = self.child()
         self.assertEqual(first["account_id"], "above")
         self.assertGreaterEqual(Decimal(first["limit_price"]), Decimal("13"))
         self.report(first, "FILLED", first["quantity"], final=True)
         self.clock.now = 5
-        self.quote(bid="11.9", ask="12.1")
+        self.quote(bid="11.9", ask="12.1", ask_prices=["12.1", "12.5", "13"])
         self.assertEqual(self.child()["account_id"], "below")
 
     def test_known_costs_rank_before_unknown_and_equal_costs_rotate(self):
@@ -900,25 +908,25 @@ class SmartSellingTests(unittest.TestCase):
     def test_short_inventory_sells_available_then_spills_to_next_closest_account(self):
         self.start(
             # Input order deliberately differs from distance priority.
-            account_ids=["empty", "C", "B", "A"],
-            account_quantities={"empty": "0", "A": "40", "B": "30", "C": "930"},
+            quantity="10000", account_ids=["empty", "C", "B", "A"],
+            account_quantities={"empty": "0", "A": "400", "B": "300", "C": "9300"},
             account_average_costs={"empty": "12", "A": "12.10", "B": "11.50", "C": "13"},
         )
-        self.tape("2000")
+        self.tape("20000")
         for now, expected_account, expected_quantity in [
-            (0, "A", "40"),
-            (5, "B", "30"),
-            (10, "C", "30"),
-            (15, "C", "100"),
+            (0, "A", "400"),
+            (5, "B", "300"),
+            (10, "C", "300"),
+            (15, "C", "1000"),
         ]:
             self.clock.now = now
-            self.quote(bid="11.99", ask="12.01")
+            self.quote(bid="11.99", ask="12.01", bid_size="10000")
             child = self.child()
             self.assertEqual(
                 (child["account_id"], child["quantity"]), (expected_account, expected_quantity)
             )
             if now == 0:
-                self.assertEqual(self.status()["accounts"]["A"]["reserved"], "40")
+                self.assertEqual(self.status()["accounts"]["A"]["reserved"], "400")
                 self.clock.now = 1
                 self.assertEqual(self.engine.tick(), [])
             self.report(child, "FILLED", child["quantity"], final=True)
@@ -926,24 +934,25 @@ class SmartSellingTests(unittest.TestCase):
         self.assertTrue(status["accounts"]["empty"]["done"])
         self.assertTrue(status["accounts"]["A"]["done"])
         self.assertTrue(status["accounts"]["B"]["done"])
-        self.assertEqual(status["accounts"]["C"]["filled"], "130")
+        self.assertEqual(status["accounts"]["C"]["filled"], "1300")
 
     def test_split_slice_keeps_remainder_when_fresh_depth_is_smaller(self):
         self.start(
-            account_ids=["A", "B", "C"], account_quantities={"A": "40", "B": "500", "C": "460"}
+            quantity="10000", account_ids=["A", "B", "C"], account_quantities={"A": "400", "B": "5000", "C": "4600"}
         )
-        self.tape("2000")
+        self.quote(bid_size="10000")
+        self.tape("20000")
         first = self.child()
-        self.report(first, "FILLED", "40", final=True)
+        self.report(first, "FILLED", "400", final=True)
         self.clock.now = 5
-        self.quote(bid_size="500")
+        self.quote(bid_size="5000")
         second = self.child()
-        self.assertEqual((second["account_id"], second["quantity"]), ("B", "50"))
-        self.report(second, "FILLED", "50", final=True)
+        self.assertEqual((second["account_id"], second["quantity"]), ("B", "500"))
+        self.report(second, "FILLED", "500", final=True)
         self.clock.now = 10
-        self.quote()
+        self.quote(bid_size="10000")
         third = self.child()
-        self.assertEqual((third["account_id"], third["quantity"]), ("C", "10"))
+        self.assertEqual((third["account_id"], third["quantity"]), ("C", "100"))
 
     def test_partial_fill_cancel_refunds_only_selected_account_and_rotates(self):
         self.start(account_ids=["A", "B"], account_quantities={"A": "500", "B": "500"})
@@ -988,55 +997,57 @@ class SmartSellingTests(unittest.TestCase):
         self.quote()
         self.tape("1000", event_id="fractional-fill-followup")
         third = self.child()
-        self.assertEqual((third["account_id"], third["quantity"]), ("A", "79"))
+        self.assertEqual((third["account_id"], third["quantity"]), ("B", "100"))
         account = self.status()["accounts"]["A"]
         self.assertEqual(account["remaining"], "79.5")
-        self.assertEqual(Decimal(account["reserved"]), 79)
+        self.assertEqual(Decimal(account["reserved"]), 0)
 
     def test_multi_account_pre_dispatch_refund_keeps_account_reservations_exact(self):
-        self.start(account_ids=["A", "B"], account_quantities={"A": "500", "B": "500"})
-        self.tape("2000")
+        self.start(quantity="2000", account_ids=["A", "B"], account_quantities={"A": "1000", "B": "1000"})
+        self.quote(bid_size="2000")
+        self.tape("4000")
         first = self.child()
-        self.quote(bid_size="400")
+        self.quote(bid_size="1500")
         prepared = self.engine.prepare_dispatch(first["client_order_id"])
         self.assertEqual(prepared["account_id"], "A")
-        self.assertEqual(self.status()["accounts"]["A"]["reserved"], "40")
+        self.assertEqual(self.status()["accounts"]["A"]["reserved"], "150")
         self.assertTrue(self.engine.abort_dispatch(first["client_order_id"], "not published"))
         self.assertEqual(self.status()["accounts"]["A"]["reserved"], "0")
 
     def test_round_robin_and_inventory_survive_restart(self):
-        self.start(account_ids=["A", "B"], account_quantities={"A": "40", "B": "960"})
-        self.tape("2000")
+        self.start(quantity="10000", account_ids=["A", "B"], account_quantities={"A": "400", "B": "9600"})
+        self.quote(bid_size="10000")
+        self.tape("20000")
         first = self.child()
-        self.report(first, "FILLED", "40", final=True)
+        self.report(first, "FILLED", "400", final=True)
         self.engine.close()
         self.clock.now = 5
         self.engine = SmartSellingEngine(
             self.path, clock=self.clock.monotonic, wall_clock=self.clock.wall
         )
-        self.quote()
+        self.quote(bid_size="10000")
         second = self.child()
-        self.assertEqual((second["account_id"], second["quantity"]), ("B", "60"))
+        self.assertEqual((second["account_id"], second["quantity"]), ("B", "600"))
         self.assertTrue(self.status()["accounts"]["A"]["done"])
 
     def test_explicit_target_remains_supported_without_exceeding_inventory(self):
         self.start(
-            quantity="150",
+            quantity="1500",
             horizon_seconds=30,
             account_ids=["A", "B"],
-            account_quantities={"A": "40", "B": "960"},
+            account_quantities={"A": "400", "B": "9600"},
         )
-        self.tape("2000")
-        for now, account, quantity in [(0, "A", "40"), (5, "B", "60"), (10, "B", "50")]:
+        self.tape("20000")
+        for now, account, quantity in [(0, "A", "400"), (5, "B", "600"), (10, "B", "500")]:
             self.clock.now = now
-            self.quote()
+            self.quote(bid_size="10000")
             child = self.child()
             self.assertEqual((child["account_id"], child["quantity"]), (account, quantity))
             self.report(child, "FILLED", quantity, final=True)
         status = self.status()
         self.assertEqual(status["state"], "COMPLETED")
-        self.assertEqual(status["filled"], "150")
-        self.assertEqual(status["accounts"]["B"]["remaining"], "850")
+        self.assertEqual(status["filled"], "1500")
+        self.assertEqual(status["accounts"]["B"]["remaining"], "8500")
         self.assertEqual(self.engine.tick(), [])
 
     def test_selected_account_ownership_and_inventory_are_validated(self):

@@ -15,7 +15,7 @@ minimum sale price still applies. Equal distances rotate in selection order; unk
 among themselves. Multiple long position rows for the same normalized symbol use
 their share-weighted average; incomplete or invalid costs remain unknown.
 If the closest account has fewer shares than a planned slice, sell its available
-inventory first, subject to the broker's order minimum. After that child's
+inventory first, subject to the 100-share minimum and any larger broker minimum. After that child's
 terminal report, send the unfilled slice remainder to the next closest eligible
 account. Repeat as needed until the slice is covered. Exhausted accounts are
 skipped, and sales are capped by each account's inventory. Short selling is not
@@ -117,10 +117,17 @@ without acquiring a stop time or a deadline-based progress reference. Each child
 is also capped at 10% of displayed accessible best
 bid size, remaining inventory, and earned credit. Free credit is capped at two
 children. Five seconds must separate submissions; after 30 seconds a legal
-smaller child may use a partial budget. No credit is invented at startup.
+smaller child may use a partial budget, but never fewer than 100 shares. If POV
+credit is below 100, the controller waits until enough actual volume earns the
+full minimum. Inventory, depth or split remainders below the minimum cannot create
+an order, including when size is checked again immediately before dispatch.
+No credit is invented at startup.
 
-The default instrument rules are a constant $0.01 tick, whole shares, a one-share
-minimum, and no additional minimum notional. Override these for the instrument
+The default instrument rules are a constant $0.01 tick, whole shares, a 100-share
+minimum, and no additional minimum notional. A configured lower minimum cannot
+reduce the 100-share floor; larger broker minimums and quantity steps still apply.
+Existing sessions adopt this floor for new children while outstanding orders keep
+their reservations until reconciliation. Override the instrument rules for the instrument
 and downstream execution contract using
 [`sample/smart_selling.settings.example.json`](sample/smart_selling.settings.example.json).
 The current implementation supports constant tick grids, not tiered tick ladders.
@@ -128,6 +135,24 @@ The configured price-book feed must represent depth accessible to the trading
 servers. Prices and quantities use decimal arithmetic inside the controller.
 Values that cannot round-trip through the existing numeric command format are
 rejected before publication rather than rounded silently.
+
+Both G and H pause new orders when the user's price bound is **five or more
+displayed price levels away** from the executable market. For G, count distinct
+ask prices above the best bid up to and including the minimum sale price. For H,
+count distinct bid prices below the best offer down to and including the maximum
+buy price. A bound at the fifth such level is blocked; four is allowed by this
+guard. These are actual displayed prices, not tick increments: gaps do not create
+levels, and duplicate prices count once. Zero-size or invalid levels do not count.
+For example, with a $10 bid and asks at $10.01, $10.03, $10.10, $10.20 and $10.50,
+a $10.50 minimum sell price pauses selling.
+
+The check runs before reserving a child and again immediately before publication.
+An unsent child blocked by a newer book is released and its credit refunded;
+orders already handed to the broker retain their normal cancellation and
+reconciliation behavior. If a nonmarketable bound lies beyond the available depth,
+the controller waits for enough depth to locate it. Marketable bounds and sessions
+with no price bound do not require additional depth. Eligible credit continues to
+accrue under the normal cap while the controller waits.
 
 Recent account snapshots, enabled trading for every selected account, sufficient
 available holdings, and a reconciled order-status feed are required to start.

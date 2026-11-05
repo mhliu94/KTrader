@@ -190,11 +190,11 @@ class SmartSellingRuntimeTests(unittest.TestCase):
 
     def test_inventory_rounding_honors_configured_step_and_actual_holdings(self):
         self.runtime.config["instruments"]["XYZ"] = {"quantity_step": "0.1", "min_quantity": "0.1"}
-        self.snap.positions[0].qty = 10.25
-        self.snap.positions[0].available_qty = 50
+        self.snap.positions[0].qty = 110.25
+        self.snap.positions[0].available_qty = 150
         parent = self.runtime.start_parent(dict(account_ids=["A"], symbol="XYZ"))
-        self.assertEqual(parent["quantity"], "10.2")
-        self.assertEqual(parent["accounts"]["A"]["quantity"], "10.2")
+        self.assertEqual(parent["quantity"], "110.2")
+        self.assertEqual(parent["accounts"]["A"]["quantity"], "110.2")
 
     def test_all_selected_accounts_require_fresh_enabled_inventory_and_no_open_orders(self):
         second = self.add_account()
@@ -232,10 +232,10 @@ class SmartSellingRuntimeTests(unittest.TestCase):
 
     def test_inventory_limits_ignore_short_positions_and_cap_reported_available(self):
         self.add_account(quantity=-10)
-        self.snap.positions[0].qty = 20
+        self.snap.positions[0].qty = 200
         self.snap.positions[0].available_qty = 1000
         parent = self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
-        self.assertEqual(parent["quantity"], "20")
+        self.assertEqual(parent["quantity"], "200")
         self.assertEqual(parent["accounts"]["B"]["quantity"], "0")
         self.runtime.stop_all()
         self.snap.positions[0].qty = 0
@@ -312,21 +312,21 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         self.assertEqual(self.engine.get_parent(parent["parent_id"])["state"], "STOPPED")
 
     def test_round_robin_handoffs_never_oversell_when_account_snapshots_lag_fills(self):
-        self.snap.positions[0].qty = self.snap.positions[0].available_qty = 60
-        self.add_account(quantity=140)
+        self.snap.positions[0].qty = self.snap.positions[0].available_qty = 600
+        self.add_account(quantity=1400)
         parent = self.runtime.start_parent(
             dict(account_ids=["A", "B"], symbol="XYZ", mode="urgent", deadline=self.iso(60))
         )
         commands = []
-        for index, (account, quantity) in enumerate((("A", 60), ("B", 40), ("B", 100))):
+        for index, (account, quantity) in enumerate((("A", 600), ("B", 400), ("B", 1000))):
             self.now = index * 5
             # Keep the original inventory values to model account feedback lagging fills.
             for snapshot in self.snapshots.values():
                 snapshot.ts = self.iso()
-            self.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=self.epoch + self.now)
+            self.engine.on_quote("XYZ", 10, 10.01, 10000, source_time=self.epoch + self.now)
             if index != 1:
                 self.engine.on_trade(
-                    "XYZ", 1000, f"t{index}", source_time=self.epoch + self.now
+                    "XYZ", 10000, f"t{index}", source_time=self.epoch + self.now
                 )
             self.runtime.tick()
             self.flush()
@@ -339,7 +339,7 @@ class SmartSellingRuntimeTests(unittest.TestCase):
                 filled_quantity=quantity, average_fill_price=10,
             ))
         result = self.engine.get_parent(parent["parent_id"])
-        self.assertEqual(result["filled"], "200")
+        self.assertEqual(result["filled"], "2000")
         self.assertEqual(result["remaining"], "0")
         self.assertEqual(result["accounts"]["A"]["remaining"], "0")
         self.assertEqual(result["accounts"]["B"]["remaining"], "0")

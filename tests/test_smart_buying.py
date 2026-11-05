@@ -37,9 +37,9 @@ def buying(tmp_path):
             self.quote()
             return self.parent
 
-        def quote(self, ask=20, size=10000):
+        def quote(self, ask=20, size=10000, **depth):
             engine.on_quote("XYZ", Decimal(str(ask)) - Decimal(".01"), ask, 10000,
-                            ask_size=size, source_time=clock[0])
+                            ask_size=size, source_time=clock[0], **depth)
 
         def volume(self, quantity, event="trade-1"):
             engine.on_trade("XYZ", quantity, event, source_time=clock[0])
@@ -115,7 +115,7 @@ def test_cash_resized_at_dispatch_and_limit_never_chases(buying):
     buying.volume(10000)
     action = buying.engine.tick()[0]
     buying.snapshots["A"].available_cash_by_currency = {"USD": 2500}
-    buying.quote(ask=21)
+    buying.quote(ask=21, bid_prices=["20.99", "20.5", "20"])
     buying.runtime._publish_action(action)
     command = buying.publish.call_args.args[0]
     assert command["qty_shares"] == 125

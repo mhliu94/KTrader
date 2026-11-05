@@ -73,6 +73,21 @@ def _best(side, *, bid):
     return price, sum(quantities, ZERO)
 
 
+def _displayed_prices(side):
+    """Only actual, positive displayed liquidity counts as a price level."""
+    if not isinstance(side, dict) or not isinstance(side.get("levels"), list):
+        return ()
+    prices = set()
+    for level in side["levels"]:
+        if not isinstance(level, dict):
+            continue
+        price = _decimal(_first(level, ("prc", "price", "Price")))
+        quantity = _decimal(_first(level, ("qty", "total_qty", "quantity", "TotalSize")))
+        if price is not None and price > 0 and quantity is not None and quantity > 0:
+            prices.add(price)
+    return tuple(sorted(prices))
+
+
 @dataclass
 class _SymbolState:
     # Quotes: provider timestamps are wall-clock epochs; raw sequences may skip.
@@ -454,6 +469,8 @@ class SmartSellingMarketAdapter:
                 bid_size,
                 source_time=book_time,
                 ask_size=ask_size,
+                bid_prices=_displayed_prices(payload.get("bid_side")),
+                ask_prices=_displayed_prices(payload.get("offer_side")),
                 sequence=strict_sequence,
                 healthy=state.quote_healthy and self._volume_is_healthy(state),
                 accessible=accessible,

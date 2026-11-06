@@ -12,6 +12,34 @@ import threading
 
 TERMINAL_STATUSES = frozenset({"FILLED", "CANCELED", "REJECTED", "EXPIRED"})
 
+# Operator reconciliation is separate from broker-reported terminal status.
+# This database trigger also protects already-running consumers: adding an
+# explicit watermark takes effect without restarting a trading session.
+RECONCILIATION_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS feedback_reconciled_orders (
+        account_id TEXT NOT NULL, order_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL, created_at TEXT NOT NULL,
+        symbol TEXT NOT NULL, side TEXT NOT NULL,
+        reconciled_at TEXT NOT NULL, reason TEXT NOT NULL,
+        previous_data TEXT NOT NULL,
+        PRIMARY KEY(account_id, order_id)
+    );
+    CREATE TABLE IF NOT EXISTS feedback_reconciliation_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, reconciled_at TEXT NOT NULL,
+        trading_day TEXT NOT NULL, timezone TEXT NOT NULL,
+        reason TEXT NOT NULL, data TEXT NOT NULL
+    );
+    CREATE TRIGGER IF NOT EXISTS feedback_ignore_reconciled_replay
+    BEFORE INSERT ON feedback_orders
+    WHEN EXISTS (
+        SELECT 1 FROM feedback_reconciled_orders r
+        WHERE r.account_id=NEW.account_id AND r.order_id=NEW.order_id
+            AND r.created_at=NEW.created_at AND r.symbol=NEW.symbol AND r.side=NEW.side
+            AND r.sequence>=NEW.sequence
+    )
+    BEGIN SELECT RAISE(IGNORE); END;
+"""
+
 
 def canonical_order_symbol(value):
     symbol = str(value or "").strip().upper()
@@ -56,6 +84,7 @@ class OrderFeedbackStore:
             CREATE INDEX IF NOT EXISTS feedback_pending_instrument
                 ON feedback_pending_commands(account_id, symbol, pending);
         """)
+        self._db.executescript(RECONCILIATION_SCHEMA)
 
     def _validate_external_identifiers(self, payload):
         pending_ids = set()

@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -11,6 +14,8 @@ from market_data.trading_volume import (
     utc_iso,
 )
 from market_data.price_book_producer import TSQuotePoller, _day_volume_by_symbol
+from trading_ui.services.smart_selling import SmartSellingEngine
+from trading_ui.services.smart_selling_market import SmartSellingMarketAdapter
 
 NOW = datetime(2026, 10, 22, 15, 0, tzinfo=timezone.utc).timestamp()
 
@@ -87,16 +92,53 @@ class TradingVolumePublisherTests(unittest.TestCase):
         self.assertEqual(second["interval_start"], first["observed_at"])
         self.assertNotEqual(second["observed_at"], first["observed_at"])
 
-    def test_volume_advance_with_old_trade_time_is_not_timely_credit(self):
+    def test_volume_advance_with_unchanged_trade_time_preserves_observation_interval(self):
         self.publish()
         event = self.publish(quote(volume="1200"), offset=5)
-        # The last trade at the previous observation is borderline-valid;
-        # a timestamp materially before the previous observation is not.
         self.assertTrue(event["healthy"])
         event = self.publish(quote(volume="1300"), offset=10)
-        self.assertFalse(event["healthy"])
-        self.assertIsNone(event["total_volume"])
-        self.assertIn("old last trade", event["reason"])
+        self.assertTrue(event["healthy"])
+        self.assertEqual(event["total_volume"], 1300)
+        self.assertEqual(event["interval_start"], utc_iso(NOW + 5))
+        self.assertEqual(event["trade_time"], utc_iso(NOW))
+
+    def test_lagging_trade_time_funds_selling_once_without_false_health_holds(self):
+        clock = [0.0]
+        with tempfile.TemporaryDirectory() as directory:
+            engine = SmartSellingEngine(
+                Path(directory) / "state.sqlite3", clock=lambda: clock[0],
+                wall_clock=lambda: NOW + clock[0],
+            )
+            try:
+                parent = engine.start_parent({
+                    "account_id": "A", "symbol": "AAPL", "quantity": "1000",
+                    "mode": "urgent", "horizon_seconds": 300, "tick_size": ".01",
+                    "quantity_step": "1", "min_quantity": "100", "min_notional": "0",
+                })["parent_id"]
+                market = SmartSellingMarketAdapter(
+                    engine, clock=lambda: clock[0], wall_clock=lambda: NOW + clock[0],
+                )
+                for index, total in enumerate((1000, 1500, 2200)):
+                    clock[0] = index * 1.4
+                    event = self.publish(
+                        quote(volume=str(total), TradeTime=utc_iso(NOW - 30)), offset=clock[0],
+                    )
+                    self.assertTrue(event["healthy"])
+                    self.assertTrue(market.apply_volume(event))
+                    self.assertFalse(market.apply_volume(event))
+                    market.apply_price_book({
+                        "symbol": "AAPL", "book_observed_at": utc_iso(NOW + clock[0]),
+                        "sequence_num": index + 1,
+                        "bid_side": {"levels": [{"price": "10", "quantity": 1000}]},
+                        "offer_side": {"levels": [{"price": "10.01", "quantity": 1000}]},
+                    })
+                    self.assertEqual(market.market_status("AAPL")["state"], "TRADING")
+                self.assertEqual(Decimal(engine.get_parent(parent)["earned"]), 180)
+                submits = [action for action in engine.tick() if action["type"] == "submit"]
+                self.assertEqual(len(submits), 1)
+                self.assertEqual(submits[0]["quantity"], "100")
+            finally:
+                engine.close()
 
     def test_delayed_halted_or_unknown_market_flags_are_unhealthy(self):
         flags_cases = [

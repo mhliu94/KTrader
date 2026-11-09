@@ -163,15 +163,11 @@ class TradingVolumePublisher:
                     reason = "quote observations are not time ordered"
                 elif volume > previous["volume"] and trade_time is None:
                     reason = "volume increased without a last trade timestamp"
-                elif (
-                    volume > previous["volume"]
-                    and trade_time is not None
-                    and trade_time < previous["observed_at"] - 1
-                ):
-                    # An unchanged old last trade is normal for an illiquid
-                    # instrument. An increased counter with that old timestamp
-                    # cannot establish timely newly eligible volume.
-                    reason = "volume increased with an old last trade timestamp"
+                # TradeTime dates the last trade, not the daily Volume update.
+                # A fresh realtime snapshot can advance Volume while TradeTime
+                # stays unchanged (including during extended-hours trading).
+                # Use consecutive observation times for cumulative-volume
+                # intervals; do not invalidate them against the last trade.
             event = self._event(
                 symbol,
                 request_started_at,

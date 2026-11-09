@@ -175,7 +175,8 @@ the existing cancel command cancels **all open orders for that account and symbo
 The price-book publisher also publishes **`stock-quotes`** on its configured
 Kafka cluster, using the fixed `symbols` list in
 `market_data/md_producer_config.json`. It reuses the quote poller's existing
-requests and interval (five seconds by default). Volume-only symbols are not
+requests and interval (configured here to a one-second delay between polls;
+five seconds if the setting is omitted). Volume-only symbols are not
 automatically added to this topic.
 
 The **Market Data** tab also uses these snapshots: `PreviousClose` supplies the
@@ -245,13 +246,29 @@ has independent `trading_volume_symbols`, `trading_volume_topic`, and
 `trading_volume_poll_interval_seconds` settings. The ticker list initially matches
 the current book list and can be changed independently. The publisher batches the
 union of both lists into TradeStation quote requests, up to 100 symbols per
-request, every five seconds. It publishes volume observations even when depth
-does not change.
+request. This repository configures a one-second delay after each polling cycle;
+request and publication time adds to that delay. It publishes volume observations
+even when depth does not change.
+
+TradeStation's [standard quote snapshot quota](https://api.tradestation.com/docs/fundamentals/rate-limiting/rate-limiting-overview/)
+is 500 requests per rolling five minutes, per user. Polling every 300 ms would
+require 1,000 requests in that window. The current seven symbols fit in one request,
+so the configured one-second delay uses at most 300 requests per five minutes,
+leaving room for other quote requests. More than 100 distinct symbols require
+additional batches and a slower interval to stay within the same shared quota.
+Restart the market-data publisher to apply interval changes; restarting only the
+trading UI does not reload this setting.
 
 TradeStation's current `GET /v3/marketdata/quotes/{symbols}` returns **`Volume`**
 as daily shares/contracts. `LastSize` is one trade's size; `PreviousVolume` is the
 previous day. Neither is used as cumulative volume. `TradeTime` is the last trade
 time, so an unchanged old last trade alone does not make an illiquid market stale.
+The daily volume counter may also increase while `TradeTime` remains unchanged.
+Volume intervals use consecutive fresh quote observation times, not the last
+trade timestamp. The producer still checks request duration, observation order,
+realtime/halt flags, invalid or future timestamps, and missing trade timestamps
+when volume increases. Counter corrections, gaps, and restarts retain their
+existing consumer safeguards.
 See the [official TradeStation specification](https://api.tradestation.com/docs/specification/).
 
 Example record (Kafka key is the symbol):

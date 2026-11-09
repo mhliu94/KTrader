@@ -6,9 +6,6 @@
   "symbols": [
     "AEHL",
     "BIYA",
-    "AAPL",
-    "GOOG",
-    "NVDA",
     "POM",
     "TANH",
     "UZX",
@@ -19,14 +16,11 @@
   "trading_volume_symbols": [
     "AEHL",
     "BIYA",
-    "AAPL",
-    "GOOG",
-    "NVDA",
     "POM",
     "TANH",
     "UZX",
     "CHSN",
     "BDMD"
   ],
-  "trading_volume_poll_interval_seconds": 5
+  "trading_volume_poll_interval_seconds": 1
 }

@@ -207,6 +207,24 @@
       "broker": "Longbridge",
       "trading_medium": "API",
       "hidden": true
+    },
+    {
+      "ip_address": "135.148.218.242",
+      "machine_alias": "OVH-Vint1",
+      "numeric_id": 27,
+      "string_id": "FANGDE-HWK",
+      "owner_type": "individual",
+      "broker": "Fangde",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "135.148.218.243",
+      "machine_alias": "OVH-Vint2",
+      "numeric_id": 28,
+      "string_id": "FANGDE-WXL",
+      "owner_type": "individual",
+      "broker": "Fangde",
+      "trading_medium": "API"
     }
   ]
 }

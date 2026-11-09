@@ -65,29 +65,30 @@ is never relaxed. API callers send `account_ids` in rotation order, omit `quanti
 to sell available inventory, use `start_time: null` for now, and `deadline: null`
 for no deadline.
 
-| Setting | Patient | Normal | Urgent |
-|---|---|---|---|
-| Default participation in newly observed volume | 3% | 6% | 10% |
-| Normal limit | Best ask | Midpoint rounded upward | Best bid |
-| Cancel-request age | 5 seconds | 5 seconds | 2 seconds |
+| Setting | Patient | Normal | Urgent | Ultra |
+|---|---|---|---|---|
+| Default participation in newly observed volume | 5% | 8% | 15% | 25% |
+| Normal limit | Best ask | Midpoint rounded upward | Best bid | Best bid |
+| Cancel-request age | 5 seconds | 5 seconds | 2 seconds | 2 seconds |
 
 Participation is configured in the control UI server's JSON settings. The
-urgency selector shows only Patient, Normal, and Urgent; it does not show rates.
+urgency selector shows only Patient, Normal, Urgent, and Ultra; it does not show rates.
 The default configuration is:
 
 ```json
 {
   "smart_selling": {
     "participation_percentages": {
-      "patient": "3",
-      "normal": "6",
-      "urgent": "10"
+      "patient": "5",
+      "normal": "8",
+      "urgent": "15",
+      "ultra": "25"
     }
   }
 }
 ```
 
-Values are percentage units: `"6"` means 6%, not 0.06%. Partial overrides keep the
+Values are percentage units: `"8"` means 8%, not 0.08%. Partial overrides keep the
 other defaults. Each value must be finite, greater than zero, and at most 100;
 unknown modes, booleans, and unsupported decimal precision are rejected. Decimal
 strings preserve exact configured values. Restart the control UI to load changed
@@ -110,18 +111,34 @@ the best bid for new orders, prioritizing execution while preserving the selecte
 participation rate and minimum price. This is a caller-provided signal; the
 algorithm does not detect or predict events.
 
-Decisions run once per second. The child cap is the parent quantity times
+Decisions run once per second. By default, the child cap is the parent quantity times
 30 seconds divided by its horizon, rounded down to the quantity step and at least
-the legal minimum. No-deadline sessions retain the default two-hour sizing horizon
+the legal minimum. This cap is independent of urgency; a higher participation rate
+earns credit faster without increasing the calculated cap. No-deadline sessions retain the default two-hour sizing horizon
 without acquiring a stop time or a deadline-based progress reference. Each child
-is also capped at 10% of displayed accessible best
-bid size, remaining inventory, and earned credit. Free credit is capped at two
+is also capped by remaining inventory and earned credit.
+**The 10% displayed-size rule is not enforced.** Its sizing and pre-dispatch
+checks are commented out. Free credit is capped at two
 children. Five seconds must separate submissions; after 30 seconds a legal
 smaller child may use a partial budget, but never fewer than 100 shares. If POV
 credit is below 100, the controller waits until enough actual volume earns the
-full minimum. Inventory, depth or split remainders below the minimum cannot create
+full minimum. Inventory or split remainders below the minimum cannot create
 an order, including when size is checked again immediately before dispatch.
 No credit is invented at startup.
+
+The **Disable calculated per-order share cap** checkbox applies to a new Smart
+selling session and is unchecked by default. API callers can send the boolean
+`disable_child_cap: true`. This removes the horizon-derived cap both when sizing
+and immediately before dispatch. Free credit is then bounded by remaining,
+unreserved inventory instead of two calculated children, and a legal funded
+order can proceed without the 30-second partial-budget wait. The participation
+rate, per-account inventory limits, 100-share minimum,
+five-second submission spacing, price limits, deadline, and halt checks still
+apply. Account-split remainders are preserved. The calculated size remains the
+reference for deciding whether execution is behind schedule. The choice is
+saved with the session and survives restart; existing sessions keep the cap.
+The status API returns `disable_child_cap` and reports `child_cap: null` when
+disabled. Smart buying has no corresponding checkbox.
 
 The default instrument rules are a constant $0.01 tick, whole shares, a 100-share
 minimum, and no additional minimum notional. A configured lower minimum cannot

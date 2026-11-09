@@ -1534,6 +1534,14 @@ def _smart_trading_settings(
     price_bound = "maximum" if buying else "minimum"
     help_key = "smart_buying_pov_help" if buying else "smart_completion_help"
     confirm_disabled = ""
+    ultra_option = "" if buying else f'<option value="ultra">{html_escape(t(lang, "smart_ultra"))}</option>'
+    child_cap_control = "" if buying else f"""
+        <label class="fast-account-row" for="smart-disable-child-cap" style="margin-top:12px;">
+          <input id="smart-disable-child-cap" type="checkbox" aria-describedby="smart-child-cap-help">
+          <span>{html_escape(t(lang, 'smart_disable_child_cap'))}</span>
+        </label>
+        <p class="help" id="smart-child-cap-help">{html_escape(t(lang, 'smart_child_cap_help'))}</p>
+    """
     account_options = "\n".join(
         f'<label class="fast-account-row">'
         f'<input type="checkbox" data-{prefix}-account-id="{html_escape(account.id)}">'
@@ -1588,6 +1596,7 @@ def _smart_trading_settings(
               <option value="patient">{html_escape(t(lang, 'smart_patient'))}</option>
               <option value="normal" selected>{html_escape(t(lang, 'smart_normal'))}</option>
               <option value="urgent">{html_escape(t(lang, 'smart_urgent'))}</option>
+              {ultra_option}
             </select>
           </div>
           <div>
@@ -1595,6 +1604,7 @@ def _smart_trading_settings(
             <input id="{prefix}-{price_bound}-price" type="number" min="0" step="any" inputmode="decimal">
           </div>
         </div>
+        {child_cap_control}
         <p class="help" id="{modal_prefix}-help">{html_escape(t(lang, help_key))}</p>
         <div class="warn" id="{modal_prefix}-error" role="alert"></div>
         <div class="modal-actions">
@@ -1657,6 +1667,7 @@ def _smart_selling_controls(
         const start = document.getElementById("smart-start");
         const deadline = document.getElementById("smart-deadline");
         const minimumPrice = document.getElementById("smart-minimum-price");
+        const disableChildCap = document.getElementById("smart-disable-child-cap");
         const error = document.getElementById("smart-selling-error");
         const message = document.getElementById("smart-selling-message");
         const statusMessage = document.getElementById("smart-status-message");
@@ -1877,6 +1888,7 @@ def _smart_selling_controls(
             deadline: deadlineDate === null ? null : deadlineDate.toISOString(),
             minimum_price: floor
           };
+          if (disableChildCap) payload.disable_child_cap = disableChildCap.checked;
           submitting = true;
           settings.disabled = true;
           document.getElementById("smart-selling-close").disabled = true;

@@ -30,6 +30,7 @@ def plan_buy(parent, quote, now):
 class SmartBuyingEngine(SmartSellingEngine):
     side = "BUY"
     liquidity_side = "ask"
+    participation_percentages = PARTICIPATION_PERCENTAGES
     child_policy = staticmethod(plan_buy)
 
     def __init__(self, *args, **kwargs):

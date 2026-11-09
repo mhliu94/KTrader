@@ -13,9 +13,10 @@ from typing import Any, Mapping
 ZERO = Decimal("0")
 MIN_ORDER_QUANTITY = Decimal("100")
 PARTICIPATION_PERCENTAGES = {
-    "patient": Decimal("3"),
-    "normal": Decimal("6"),
-    "urgent": Decimal("10"),
+    "patient": Decimal("5"),
+    "normal": Decimal("8"),
+    "urgent": Decimal("15"),
+    "ultra": Decimal("25"),
 }
 PARTICIPATION_RATES = {
     mode: percentage.scaleb(-2)
@@ -140,7 +141,7 @@ class ChildPlan:
 
 
 def plan_child_order(parent: Mapping[str, Any], quote: Mapping[str, Any], now: float) -> ChildPlan:
-    """Apply fixed participation funding, depth, floor, and partial-flush rules.
+    """Apply fixed participation funding, floor, and partial-flush rules.
 
     Parent health, lifecycle, and five-second submission spacing are the
     engine's responsibility. This function only proposes a legal child from
@@ -153,9 +154,17 @@ def plan_child_order(parent: Mapping[str, Any], quote: Mapping[str, Any], now: f
     child_cap = parse_decimal(parent["child_cap"])
     quantity_step = parse_decimal(parent["quantity_step"])
     remaining = parent_quantity - filled - reserved
-    depth_budget = max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
-    depth_limited = depth_budget < min(child_cap, remaining)
-    ready_quantity = round_down_to_step(min(child_cap, remaining, depth_budget), quantity_step)
+    # 10% displayed-size rule is not enforced for Smart selling.
+    # depth_budget = max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
+    disable_child_cap = parent.get("disable_child_cap", False)
+    size_cap = remaining if disable_child_cap else child_cap
+    continuation = parse_decimal(parent.get("slice_remaining", "0"))
+    if continuation:
+        size_cap = min(size_cap, continuation)
+    # depth_limited = depth_budget < min(size_cap, remaining)
+    # ready_quantity = round_down_to_step(min(size_cap, remaining, depth_budget), quantity_step)
+    depth_limited = False
+    ready_quantity = round_down_to_step(min(size_cap, remaining), quantity_step)
 
     behind_schedule = False
     if parent["deadline_mono"] is not None:
@@ -164,7 +173,7 @@ def plan_child_order(parent: Mapping[str, Any], quote: Mapping[str, Any], now: f
         progress_reference = parent_quantity * parse_decimal(elapsed_fraction)
         behind_schedule = filled < progress_reference - child_cap
     aggressive = bool(
-        parent["mode"] == "urgent"
+        parent["mode"] in {"urgent", "ultra"}
         or parent["fallback"]
         or behind_schedule
         or parent["imminent_event"]
@@ -189,10 +198,10 @@ def plan_child_order(parent: Mapping[str, Any], quote: Mapping[str, Any], now: f
             price,
             aggressive,
             depth_limited,
-            "depth or residual quantity below broker minimum",
+            "residual quantity below broker minimum",
         )
     flush_since = parent["last_send"] if parent["last_send"] is not None else parent["start_mono"]
-    if credit < ready_quantity and now - flush_since < 30:
+    if not disable_child_cap and credit < ready_quantity and now - flush_since < 30:
         return ChildPlan(None, price, aggressive, depth_limited, "earning volume credit")
     quantity = round_down_to_step(min(ready_quantity, max(ZERO, credit)), quantity_step)
     if not meets_order_minimum(parent, quantity, price):

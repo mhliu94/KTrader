@@ -88,6 +88,17 @@ def test_fixed_participation_and_minimum_child(buying, mode, volume):
     assert command["type"] == "LIMIT_ORDER"
 
 
+@pytest.mark.parametrize("mode", ["ultra", "4"])
+def test_selling_ultra_mode_is_not_available_for_buying(buying, mode):
+    assert buying.runtime.config["participation_percentages"] == {
+        "patient": "5", "normal": "8", "urgent": "15",
+    }
+    with pytest.raises(ValueError, match="mode must be"):
+        buying.start(mode=mode)
+    with pytest.raises(ValueError, match="mode must be"):
+        buying.engine.start_parent({"account_id": "A", "symbol": "XYZ", "quantity": "100", "mode": mode})
+
+
 def test_subminimum_credit_accumulates_without_rounding_up(buying):
     buying.start()
     buying.volume(1249)

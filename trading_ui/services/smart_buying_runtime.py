@@ -17,6 +17,8 @@ def normalize_smart_buying_config(raw=None):
         "state_db": "./logs/smart_buying.sqlite3", **(raw or {}),
         "participation_percentages": PARTICIPATION_PERCENTAGES,
     })
+    # Selling also supports Ultra; buying retains its three fixed urgencies.
+    config["participation_percentages"] = dict(PARTICIPATION_PERCENTAGES)
     rules = config["instrument_defaults"]
     rules["min_quantity"] = str(max(Decimal(100), Decimal(str(rules["min_quantity"]))))
     rules["quantity_step"] = str(max(Decimal(1), Decimal(str(rules["quantity_step"]))))

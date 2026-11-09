@@ -10,7 +10,7 @@ from trading_ui.smart_selling_config import normalize_smart_selling_config
 
 class SmartSellingConfigTests(unittest.TestCase):
     def test_defaults_and_partial_overrides_use_percentage_units(self):
-        expected = {"patient": "3", "normal": "6", "urgent": "10"}
+        expected = {"patient": "5", "normal": "8", "urgent": "15", "ultra": "25"}
         for raw in (None, {}, {"participation_percentages": {}}):
             with self.subTest(raw=raw):
                 self.assertEqual(
@@ -31,6 +31,7 @@ class SmartSellingConfigTests(unittest.TestCase):
                     "patient": "0.123456789012345678901234",
                     "normal": Decimal("6.000000000000000000000001"),
                     "urgent": 100,
+                    "ultra": "27.5",
                 }
             }
         )["participation_percentages"]
@@ -40,6 +41,7 @@ class SmartSellingConfigTests(unittest.TestCase):
                 "patient": "0.123456789012345678901234",
                 "normal": "6.000000000000000000000001",
                 "urgent": "100",
+                "ultra": "27.5",
             },
         )
         self.assertEqual(
@@ -86,7 +88,7 @@ class SmartSellingConfigTests(unittest.TestCase):
             "1.234567890123456789012345678901",
             "1e1000000",
         )
-        for mode in ("patient", "normal", "urgent"):
+        for mode in ("patient", "normal", "urgent", "ultra"):
             for invalid in invalid_values:
                 with self.subTest(mode=mode, value=invalid):
                     with self.assertRaisesRegex(ValueError, f"participation_percentages.{mode}"):
@@ -101,7 +103,7 @@ class SmartSellingConfigTests(unittest.TestCase):
                 settings = json.loads((sample_dir / filename).read_text())["smart_selling"]
                 self.assertEqual(
                     normalize_smart_selling_config(settings)["participation_percentages"],
-                    {"patient": "3", "normal": "6", "urgent": "10"},
+                    {"patient": "5", "normal": "8", "urgent": "15", "ultra": "25"},
                 )
 
 

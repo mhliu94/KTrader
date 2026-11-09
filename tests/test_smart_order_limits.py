@@ -118,16 +118,23 @@ def test_no_bound_or_marketable_bound_does_not_require_deep_book(engine, with_bo
     assert engine.tick()[0]["type"] == "submit"
 
 
-def test_final_dispatch_never_shrinks_below_100(engine):
+def test_final_dispatch_respects_side_specific_depth_limits(engine):
     parent = start(engine)
     fund(engine)
     action = engine.tick()[0]
     before = engine.get_parent(parent)
     quote(engine, bid_size=990, ask_size=99)
-    assert engine.prepare_dispatch(action["client_order_id"]) is None
+    prepared = engine.prepare_dispatch(action["client_order_id"])
     after = engine.get_parent(parent)
-    assert after["reserved"] == "0"
-    assert Decimal(after["free_credit"]) == Decimal(before["free_credit"]) + Decimal(before["reserved"])
+    if engine.side == "SELL":
+        assert prepared is not None
+        assert Decimal(prepared["quantity"]) == 100
+        assert after["reserved"] == before["reserved"]
+        assert after["free_credit"] == before["free_credit"]
+    else:
+        assert prepared is None
+        assert after["reserved"] == "0"
+        assert Decimal(after["free_credit"]) == Decimal(before["free_credit"]) + Decimal(before["reserved"])
 
 
 def test_selling_accumulates_100_credit_even_after_partial_flush_timer(tmp_path):
@@ -135,7 +142,7 @@ def test_selling_accumulates_100_credit_even_after_partial_flush_timer(tmp_path)
     instance = SmartSellingEngine(tmp_path / "selling.sqlite3", clock=lambda: now[0], wall_clock=lambda: 1800000000)
     try:
         parent = start(instance, min_quantity="1")
-        fund(instance, "999")
+        fund(instance, "666")
         now[0] = 30
         quote(instance)
         assert instance.tick() == []

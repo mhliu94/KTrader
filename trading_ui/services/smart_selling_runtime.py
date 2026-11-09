@@ -107,6 +107,7 @@ class SmartSellingRuntime:
                         key: parent.get(key) for key in (
                             "symbol", "quantity", "mode", "participation", "start",
                             "deadline", "minimum_price", "maximum_price", "child_cap",
+                            "disable_child_cap",
                         )
                     }
                     starting.update(
@@ -297,11 +298,12 @@ class SmartSellingRuntime:
                     "deadline",
                     "minimum_price",
                     "imminent_event",
+                    "disable_child_cap",
                 )
                 if key in settings
             }
             mode = str(settings.get("mode", SMART_SELLING_DEFAULTS["mode"])).lower()
-            mode = {"1": "patient", "2": "normal", "3": "urgent"}.get(mode, mode)
+            mode = {"1": "patient", "2": "normal", "3": "urgent", "4": "ultra"}.get(mode, mode)
             permitted.update(
                 # Trusted application settings only; HTTP rate overrides are ignored.
                 participation_percentage=self.config["participation_percentages"].get(mode),

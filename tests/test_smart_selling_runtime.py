@@ -348,13 +348,13 @@ class SmartSellingRuntimeTests(unittest.TestCase):
 
     def test_configured_percentages_drive_each_mode_and_ignore_http_rate_overrides(self):
         self.runtime.config = normalize_smart_selling_config({
-            "participation_percentages": {"patient": "2.5", "normal": "4", "urgent": "12.25"}
+            "participation_percentages": {"patient": "2.5", "normal": "4", "urgent": "12.25", "ultra": "27.5"}
         })
-        for mode, percentage in (("patient", "2.5"), ("normal", "4"), ("urgent", "12.25"), ("1", "2.5")):
+        for mode, percentage in (("patient", "2.5"), ("normal", "4"), ("urgent", "12.25"), ("ultra", "27.5"), ("1", "2.5"), ("4", "27.5")):
             with self.subTest(mode=mode):
                 parent = self.start(
                     mode=mode, participation_percentage=99,
-                    participation_percentages={"patient": 99, "normal": 99, "urgent": 99},
+                    participation_percentages={"patient": 99, "normal": 99, "urgent": 99, "ultra": 99},
                     participation=".99",
                 )
                 self.engine.on_trade("XYZ", 100, mode, source_time=self.epoch)
@@ -605,6 +605,38 @@ class SmartSellingRuntimeTests(unittest.TestCase):
             response = client.post(f'/api/smart-selling/{parent["parent_id"]}/stop')
             self.assertEqual(response.json()["parent"]["state"], "STOPPED")
             self.assertEqual(client.post("/api/smart-selling/unknown/stop").status_code, 404)
+
+    def test_api_child_cap_checkbox_controls_actual_published_quantity(self):
+        with patch.multiple(
+            webserver, SMART_SELLING_MANAGER=self.runtime, SESSIONS={"token": "trader"}
+        ):
+            client = TestClient(webserver.app)
+            self.addCleanup(client.close)
+            client.cookies.set("auth_token", "token")
+            settings = dict(account_ids=["A"], symbol="XYZ", mode="urgent", deadline=self.iso(300))
+            for value in ("true", "false", 1, None):
+                response = client.post("/api/smart-selling", json={**settings, "disable_child_cap": value})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertIn("must be a boolean", response.json()["error"])
+            self.assertFalse(self.runtime.has_active_session())
+            for mode, disabled, quantity in (("urgent", True, 750), ("urgent", False, 100),
+                                              ("ultra", True, 1000), ("ultra", False, 100)):
+                with self.subTest(mode=mode, disabled=disabled):
+                    response = client.post("/api/smart-selling", json={**settings, "mode": mode, "disable_child_cap": disabled})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    parent = response.json()["parent"]
+                    self.assertEqual(parent["disable_child_cap"], disabled)
+                    self.engine.on_quote("XYZ", 10, 10.01, 1, source_time=self.epoch)
+                    self.engine.on_trade("XYZ", 5000, f"{mode}-{disabled}", source_time=self.epoch)
+                    self.runtime.tick()
+                    self.flush()
+                    command = self.publish.call_args.args[0]
+                    self.assertEqual(command["qty_shares"], quantity)
+                    self.runtime.on_order_payload(self.snapshot(
+                        command, order_id=f"broker-{mode}-{disabled}", status="FILLED",
+                        filled_quantity=quantity, average_fill_price=10,
+                    ))
+                    self.runtime.stop_parent(parent["parent_id"])
 
     def test_existing_manual_entrypoints_cannot_place_into_owned_instrument(self):
         self.start()

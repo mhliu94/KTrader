@@ -51,6 +51,7 @@ class SmartSellingEngine:
 
     side = "SELL"
     liquidity_side = "bid"
+    participation_percentages = PARTICIPATION_PERCENTAGES
     child_policy = staticmethod(plan_child_order)
 
     def __init__(
@@ -164,6 +165,7 @@ class SmartSellingEngine:
         )
         parent.setdefault("next_account_index", 0)
         parent.setdefault("slice_remaining", "0")
+        parent.setdefault("disable_child_cap", False)
         minimum = round_up_to_step(
             max(MIN_ORDER_QUANTITY, parse_decimal(parent["min_quantity"])),
             parse_decimal(parent["quantity_step"]),
@@ -229,7 +231,12 @@ class SmartSellingEngine:
         )
 
     def _trim(self, parent):
-        excess = max(ZERO, parse_decimal(parent["C"]) - 2 * parse_decimal(parent["child_cap"]))
+        credit_cap = (
+            parse_decimal(parent["quantity"]) - parse_decimal(parent["F"]) - parse_decimal(parent["R"])
+            if parent["disable_child_cap"]
+            else 2 * parse_decimal(parent["child_cap"])
+        )
+        excess = max(ZERO, parse_decimal(parent["C"]) - credit_cap)
         if excess:
             parent["C"] = decimal_string(parse_decimal(parent["C"]) - excess)
             parent["D"] = decimal_string(parse_decimal(parent["D"]) + excess)
@@ -252,11 +259,14 @@ class SmartSellingEngine:
         # unless a backend caller explicitly retains a smaller liquidation target.
         quantity = parse_input_decimal(settings.get("quantity"), "quantity", positive=True)
         mode = str(settings.get("mode", SMART_SELLING_DEFAULTS["mode"])).lower()
-        mode = {"1": "patient", "2": "normal", "3": "urgent"}.get(mode, mode)
-        if mode not in PARTICIPATION_PERCENTAGES:
-            raise ValueError("mode must be patient, normal, or urgent")
+        mode = {"1": "patient", "2": "normal", "3": "urgent", "4": "ultra"}.get(mode, mode)
+        if mode not in self.participation_percentages:
+            raise ValueError("mode must be one of: " + ", ".join(self.participation_percentages))
+        disable_child_cap = settings.get("disable_child_cap", False)
+        if not isinstance(disable_child_cap, bool):
+            raise ValueError("disable_child_cap must be a boolean")
         percentage = parse_participation_percentage(
-            settings.get("participation_percentage", PARTICIPATION_PERCENTAGES[mode])
+            settings.get("participation_percentage", self.participation_percentages[mode])
         )
         # Capture the configured rate exactly once. Existing/recovered parents
         # keep this persisted ratio even when the application settings change.
@@ -354,6 +364,7 @@ class SmartSellingEngine:
             "minimum_price": minimum_price,
             "child_cap": decimal_string(child_cap),
             "base_child_cap": decimal_string(child_cap),
+            "disable_child_cap": disable_child_cap,
             "tick_size": decimal_string(tick_size),
             "quantity_step": decimal_string(quantity_step),
             "min_quantity": decimal_string(minimum_quantity),
@@ -426,7 +437,9 @@ class SmartSellingEngine:
                 self._save(parent)
 
     def _depth_budget(self, quote):
-        return max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
+        # 10% displayed-size rule is not enforced for Smart selling.
+        # return max(ZERO, quote["bid_size"] - quote["consumed"]) * Decimal(".10")
+        return None
 
     def _dispatch_price(self, parent, order, quote):
         floor = parse_decimal(parent["minimum_price"]) if parent["minimum_price"] else ZERO
@@ -903,16 +916,16 @@ class SmartSellingEngine:
                 quantity = round_down_to_step(
                     min(
                         old_quantity,
-                        parse_decimal(parent["child_cap"]),
+                        remaining if parent["disable_child_cap"] else parse_decimal(parent["child_cap"]),
                         remaining,
                         account_remaining,
-                        depth,
+                        depth if depth is not None else remaining,
                     ),
                     step,
                 )
                 age_limit = 2 if aggressive else 5
                 if not meets_order_minimum(parent, quantity, price):
-                    reason = "refreshed depth below broker minimum before dispatch"
+                    reason = "available quantity below broker minimum before dispatch"
                 elif now - order["send_mono"] >= age_limit:
                     reason = "submission queue exceeded child cancellation age"
                 else:
@@ -1603,7 +1616,8 @@ class SmartSellingEngine:
             "start": utc_timestamp_string(parent["start_wall"]),
             "deadline": utc_timestamp_string(parent["deadline_wall"]),
             "minimum_price": parent["minimum_price"],
-            "child_cap": parent["child_cap"],
+            "child_cap": None if parent["disable_child_cap"] else parent["child_cap"],
+            "disable_child_cap": parent["disable_child_cap"],
             "fallback": parent["fallback"],
             "active_order": parent["order"],
             "order_state": parent["order"]["state"] if parent["order"] else "IDLE",

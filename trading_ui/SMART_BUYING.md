@@ -43,8 +43,8 @@ a fresh ask, enabled accounts, and fresh account snapshots. Submissions are at l
 five seconds apart; working children request cancellation after two seconds.
 Timeouts never free an order reservation without terminal broker evidence.
 
-The implementation does not use mode G's horizon-based slice sizing, 10% depth
-cap, passive pricing, progress escalation, or partial-credit flush timer. A
+The implementation does not use mode G's horizon-based slice sizing,
+passive pricing, progress escalation, or partial-credit flush timer. A
 deadline stops execution rather than increasing participation. Stop controls cancel
 outstanding children and retain account ownership until reconciliation finishes.
 Accounts cannot overlap with E/F/G sessions or manual trading instructions.

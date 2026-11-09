@@ -40,6 +40,8 @@ class SmartSellingTemplateTests(unittest.TestCase):
         self.assertIn('id="smart-start-now"', page)
         self.assertIn('id="smart-no-deadline"', page)
         self.assertIn('id="smart-set-deadline"', page)
+        self.assertIn('id="smart-disable-child-cap" type="checkbox"', page)
+        self.assertNotRegex(page, r'id="smart-disable-child-cap"[^>]* checked')
         self.assertNotIn('id="smart-imminent-event"', page)
         self.assertNotIn("Adverse event is imminent", page)
         self.assertNotIn('id="smart-event-help"', page)
@@ -73,6 +75,7 @@ class SmartBuyingTemplateTests(unittest.TestCase):
                 self.assertIn(I18N[language]["smart_buying_pov_help"], page)
                 self.assertIn('id="smart-buying-modal" hidden', page)
                 self.assertIn('id="smart-buying-settings" disabled', page)
+                self.assertNotIn('id="smart-buying-disable-child-cap"', page)
                 self.assertNotRegex(page, r'id="smart-buying-confirm"[^>]* disabled')
                 self.assertIn('/api/smart-buying', page)
                 form = re.search(r'<form[^>]*id="algo-form".*?</form>', page, re.S).group()
@@ -174,9 +177,13 @@ class SmartSellingBrowserTests(unittest.TestCase):
             equal(requests.length, 0, "opening the modal does not place orders");
             equal(el("fast-trading-modal").hidden, true, "G does not open fast configuration");
             equal(el("smart-mode").value, "normal", "default participation mode");
-            equal(Array.from(el("smart-mode").options, option => option.value), ["patient", "normal", "urgent"], "urgency options");
+            equal(el("smart-disable-child-cap").checked, false, "calculated cap is enabled by default");
+            equal(document.querySelector("label[for='smart-disable-child-cap']").textContent.trim(),
+              labels.smart_disable_child_cap, "cap checkbox is localized");
+            equal(el("smart-child-cap-help").textContent, labels.smart_child_cap_help, "cap help is localized");
+            equal(Array.from(el("smart-mode").options, option => option.value), ["patient", "normal", "urgent", "ultra"], "urgency options");
             equal(Array.from(el("smart-mode").options, option => option.textContent),
-              [labels.smart_patient, labels.smart_normal, labels.smart_urgent], "plain urgency labels");
+              [labels.smart_patient, labels.smart_normal, labels.smart_urgent, labels.smart_ultra], "plain urgency labels");
             equal(document.querySelectorAll("[data-smart-account-id]:checked").length, 0, "accounts require explicit selection");
             equal(balance("A").endsWith(": 150"), true, "prefixed and unprefixed account shares summed and shown");
             equal(balance("B").endsWith(": 0"), true, "empty inventory is shown as zero");
@@ -233,7 +240,8 @@ class SmartSellingBrowserTests(unittest.TestCase):
             equal(el("fast-trading-modal").hidden, true, "smart submit avoids fast modal");
             const payload = JSON.parse(requests[0].options.body);
             equal(payload, {account_ids: ["A", "B"], symbol: "AAPL", mode: "normal",
-              start_time: start.toISOString(), deadline: deadline.toISOString(), minimum_price: null},
+              start_time: start.toISOString(), deadline: deadline.toISOString(), minimum_price: null,
+              disable_child_cap: false},
               "submitted payload and local time conversion");
             equal(requests[0].options.credentials, "same-origin", "authenticated same-origin request");
             equal(requests[0].options.headers["Content-Type"], "application/json", "JSON content type");
@@ -286,8 +294,10 @@ class SmartSellingBrowserTests(unittest.TestCase):
             equal(el("smart-status-error").textContent, "", "status warning clears on recovery");
 
             createFailure = true;
-            el("smart-mode").value = "urgent";
+            el("smart-mode").value = "ultra";
             el("smart-minimum-price").value = "12.5";
+            document.querySelector("label[for='smart-disable-child-cap']").click();
+            equal(el("smart-disable-child-cap").checked, true, "checkbox can disable the calculated cap");
             el("smart-start-now").click();
             document.querySelector("label[for='smart-no-deadline']").click();
             equal(el("smart-no-deadline").checked, true, "No deadline choice selected");
@@ -299,14 +309,16 @@ class SmartSellingBrowserTests(unittest.TestCase):
             confirm();
             await settle();
             const finalPayload = JSON.parse(requests[requests.length - 1].options.body);
-            equal(finalPayload.mode, "urgent", "explicit urgency submitted");
+            equal(finalPayload.mode, "ultra", "explicit urgency submitted");
             equal(finalPayload.minimum_price, 12.5, "minimum price submitted");
+            equal(finalPayload.disable_child_cap, true, "disabled cap is submitted as a boolean");
             equal("imminent_event" in finalPayload, false, "adverse event omitted to keep backend default off");
             equal(finalPayload.start_time, null, "Now is resolved by the server at submission");
             equal(finalPayload.deadline, null, "No deadline sends null");
             equal("quantity" in finalPayload, false, "quantity omitted to sell all inventory");
             equal(el("smart-selling-error").textContent.includes("existing parent"), true, "server rejection is visible");
             equal(el("smart-minimum-price").value, "12.5", "failed submit preserves price");
+            equal(el("smart-disable-child-cap").checked, true, "failed submit preserves cap choice");
             equal(el("smart-selling-modal").hidden, false, "server rejection keeps dialog open");
             document.querySelector("label[for='smart-set-deadline']").click();
             equal(el("smart-set-deadline").checked, true, "Set deadline choice selected");

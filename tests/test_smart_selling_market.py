@@ -132,11 +132,11 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.clock.now = 1
         batch = self.volume(2, "12445.6")
         self.assertTrue(self.market.apply_volume(batch))
-        self.assertEqual(self.earned(), Decimal("10.05"))
+        self.assertEqual(self.earned(), Decimal("15.075"))
         self.assertFalse(self.market.apply_volume(batch))
         self.clock.now = 2
         self.assertFalse(self.market.apply_volume(self.volume(1, "90000")))
-        self.assertEqual(self.earned(), Decimal("10.05"))
+        self.assertEqual(self.earned(), Decimal("15.075"))
 
     def test_straddling_batch_is_excluded_only_for_new_parent(self):
         self.market.apply_volume(self.volume(1, 1000))
@@ -154,12 +154,12 @@ class SmartSellingMarketTests(unittest.TestCase):
         )["parent_id"]
         self.clock.now = 1
         self.market.apply_volume(self.volume(2, 1100))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
         self.assertEqual(self.earned(new_parent), 0)
         self.clock.now = 2
         self.market.apply_volume(self.volume(3, 1200))
-        self.assertEqual(self.earned(), 20)
-        self.assertEqual(self.earned(new_parent), 10)
+        self.assertEqual(self.earned(), 30)
+        self.assertEqual(self.earned(new_parent), 15)
 
     def test_sequence_gap_discards_uncertain_volume_and_resumes_after_baseline(self):
         self.market.apply_volume(self.volume(1, 1000))
@@ -168,7 +168,7 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.assertEqual(self.earned(), 0)
         self.clock.now = 2
         self.market.apply_volume(self.volume(4, 100100))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
 
     def test_stale_future_and_long_intervals_never_create_catchup_credit(self):
         self.market.apply_volume(self.volume(1, 1000))
@@ -187,17 +187,17 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.assertEqual(self.earned(), 0)
         self.clock.now = 41
         self.market.apply_volume(self.volume(6, 100100))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
         self.clock.now = 60
         self.market.apply_volume(self.volume(7, 999999))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
 
     def test_volume_disconnect_blocks_saved_credit_despite_fresh_quote(self):
         self.market.apply_price_book(self.book())
         self.market.apply_volume(self.volume(1, 1000))
         self.clock.now = 1
         self.market.apply_volume(self.volume(2, 2000))
-        self.assertEqual(self.earned(), 100)
+        self.assertEqual(self.earned(), 150)
         self.market.set_volume_connected(False)
         self.clock.now = 2
         self.market.apply_price_book(self.book())
@@ -205,10 +205,10 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.assertEqual(self.engine.get_parent(self.parent)["state"], "HOLD")
         self.market.set_volume_connected(True)
         self.market.apply_volume(self.volume(10, 20000))
-        self.assertEqual(self.earned(), 100)
+        self.assertEqual(self.earned(), 150)
         self.clock.now = 3
         self.market.apply_volume(self.volume(11, 20100))
-        self.assertEqual(self.earned(), 110)
+        self.assertEqual(self.earned(), 165)
 
     def test_unhealthy_observation_and_session_or_feed_changes_reset_baseline(self):
         self.market.apply_volume(self.volume(1, 1000))
@@ -218,12 +218,12 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.market.apply_volume(self.volume(3, 100000))
         self.clock.now = 3
         self.market.apply_volume(self.volume(4, 100100))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
         self.clock.now = 4
         self.market.apply_volume(self.volume(5, 10, session="2027-01-16"))
         self.clock.now = 5
         self.market.apply_volume(self.volume(1, 20, session="2027-01-16", feed_id="feed-b"))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
         self.assertNotIn("correction", self.engine.get_parent(self.parent)["reason"])
 
     def test_unknown_negative_correction_remains_held_after_quotes_recover(self):
@@ -259,7 +259,7 @@ class SmartSellingMarketTests(unittest.TestCase):
                 ],
             )
         )
-        self.assertEqual(self.earned(), Decimal("10.05"))
+        self.assertEqual(self.earned(), Decimal("15.075"))
         self.clock.now = 1
         self.market.apply_volume(
             self.volume(
@@ -270,7 +270,7 @@ class SmartSellingMarketTests(unittest.TestCase):
                 ],
             )
         )
-        self.assertEqual(self.earned(), Decimal("10.05"))
+        self.assertEqual(self.earned(), Decimal("15.075"))
         self.clock.now = 2
         self.market.apply_volume(
             self.volume(
@@ -286,7 +286,7 @@ class SmartSellingMarketTests(unittest.TestCase):
                 ],
             )
         )
-        self.assertEqual(self.earned(), Decimal("8.00"))
+        self.assertEqual(self.earned(), Decimal("12.000"))
 
     def test_raw_book_sequence_gaps_do_not_invent_provider_gaps(self):
         self.market.apply_volume(self.volume(1, 1000))
@@ -374,7 +374,7 @@ class SmartSellingMarketTests(unittest.TestCase):
                 self.volume(2, 1100), topic="trading-volume", partition=0, offset=5
             )
         )
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
 
     def test_forecast_rate_is_bounded_fresh_and_counts_zero_volume_intervals(self):
         self.market = SmartSellingMarketAdapter(
@@ -402,16 +402,16 @@ class SmartSellingMarketTests(unittest.TestCase):
         )
         self.clock.now = 2
         restarted.apply_volume(self.volume(50, 99999))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
         self.clock.now = 3
         restarted.apply_volume(self.volume(51, 100099))
-        self.assertEqual(self.earned(), 20)
+        self.assertEqual(self.earned(), 30)
 
     def test_reconnect_or_restart_cannot_hide_same_session_volume_correction(self):
         self.market.apply_volume(self.volume(1, 1000))
         self.clock.now = 1
         self.market.apply_volume(self.volume(2, 2000))
-        self.assertEqual(self.earned(), 100)
+        self.assertEqual(self.earned(), 150)
         self.market.set_volume_connected(False)
         self.clock.now = 2
         self.market.set_volume_connected(True)
@@ -439,7 +439,7 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.assertEqual(self.earned(), 0, "first explicit healthy observation is a new baseline")
         self.clock.now = 4
         self.market.apply_volume(self.volume(5, 4100))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
 
     def test_halt_requests_cancel_without_releasing_partial_fill_reservation(self):
         self.market.apply_price_book(self.book())
@@ -463,7 +463,7 @@ class SmartSellingMarketTests(unittest.TestCase):
             submit["client_order_id"], "PARTIALLY_FILLED", 30, broker_order_id="broker-1"
         )
         self.assertEqual(Decimal(self.engine.get_parent(self.parent)["reserved"]), 70)
-        self.assertEqual(self.earned(), 100)
+        self.assertEqual(self.earned(), 150)
 
     def test_reopening_discards_auction_and_waits_for_cooldown_and_fresh_book(self):
         self.market.apply_volume(self.volume(1, 1000))
@@ -491,7 +491,7 @@ class SmartSellingMarketTests(unittest.TestCase):
         self.assertEqual(self.earned(), 0, "release snapshot remains an uncredited baseline")
         self.clock.now = 14
         self.market.apply_volume(self.volume(15, 120100))
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
         self.assertEqual(self.engine.get_parent(self.parent)["deadline"], original_deadline)
 
     def test_stale_unknown_and_unhealthy_false_flags_cannot_release_halt(self):
@@ -563,7 +563,7 @@ class SmartSellingMarketTests(unittest.TestCase):
             )
         )
         self.assertIn("unknown tape correction", self.engine.get_parent(self.parent)["reason"])
-        self.assertEqual(self.earned(), 10)
+        self.assertEqual(self.earned(), 15)
 
 
 if __name__ == "__main__":

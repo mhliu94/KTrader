@@ -37,9 +37,10 @@
   },
   "smart_selling": {
     "participation_percentages": {
-      "patient": "3",
-      "normal": "6",
-      "urgent": "10"
+      "patient": "5",
+      "normal": "8",
+      "urgent": "15",
+      "ultra": "25"
     }
   },
   "fast_trading": {

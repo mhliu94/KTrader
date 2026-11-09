@@ -142,7 +142,7 @@ class SmartSellingFeedbackTests(unittest.TestCase):
         )
         self.assertEqual(self.status()["filled"], "60")
         self.assertEqual(self.status()["reserved"], "0")
-        self.assertEqual(Decimal(self.status()["free_credit"]), 40)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 90)
 
     def test_duplicate_and_reordered_snapshots_do_not_double_count(self):
         partial = self.snapshot(sequence=2, status="PARTIALLY_FILLED", filled_quantity=40)
@@ -153,7 +153,7 @@ class SmartSellingFeedbackTests(unittest.TestCase):
         terminal = self.snapshot(sequence=3, status="CANCELED", filled_quantity=40)
         self.feedback.apply_snapshot(terminal)
         self.feedback.apply_snapshot(terminal)
-        self.assertEqual(Decimal(self.status()["free_credit"]), 60)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 110)
         self.assertEqual(self.status()["reserved"], "0")
 
     def test_stale_sequence_with_contradictory_higher_fill_triggers_core_hold(self):

@@ -169,7 +169,7 @@ def test_smart_registers_confirmable_child_before_publication(smart):
 
     publish.side_effect = on_publish
     runtime.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=now[0])
-    runtime.engine.on_trade("XYZ", 1000, "t1", source_time=now[0])
+    runtime.engine.on_trade("XYZ", 2000, "t1", source_time=now[0])
     runtime.tick()
     wait(list(runtime._pending), timeout=2)
     assert publish.call_count == 1
@@ -188,7 +188,7 @@ def test_smart_reporting_failure_preserves_session_and_orders(smart):
     parent = start_smart(runtime, now)
     assert runtime.has_active_session()
     runtime.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=now[0])
-    runtime.engine.on_trade("XYZ", 1000, "t1", source_time=now[0])
+    runtime.engine.on_trade("XYZ", 2000, "t1", source_time=now[0])
     runtime.tick()
     wait(list(runtime._pending), timeout=2)
     assert publish.call_count == 1
@@ -199,7 +199,7 @@ def test_smart_recovers_active_session_and_child_correlation(smart, tmp_path):
     runtime, _, publish, now = smart
     parent = start_smart(runtime, now)
     runtime.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=now[0])
-    runtime.engine.on_trade("XYZ", 1000, "t1", source_time=now[0])
+    runtime.engine.on_trade("XYZ", 2000, "t1", source_time=now[0])
     runtime.tick()
     wait(list(runtime._pending), timeout=2)
     child = publish.call_args.args[0]
@@ -299,7 +299,7 @@ def test_smart_real_reporting_serializes_effective_settings_and_tracks_fill_then
         assert initial["account_ids"] == ["A", "B"]
         assert initial["running"] is True
         runtime.engine.on_quote("XYZ", 10, 10.01, 1000, source_time=now[0])
-        runtime.engine.on_trade("XYZ", 1000, "t1", source_time=now[0])
+        runtime.engine.on_trade("XYZ", 2000, "t1", source_time=now[0])
         runtime.tick()
         wait(list(runtime._pending), timeout=2)
         child = publish.call_args.args[0]

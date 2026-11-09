@@ -245,7 +245,8 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
             equal(urgency.value, "normal", "H default normal urgency");
             equal(Array.from(urgency.options, option => option.value).join(","), "patient,normal,urgent", "H urgency choices");
             equal(Array.from(urgency.options, option => option.textContent).join(","),
-              Array.from(document.getElementById("smart-mode").options, option => option.textContent).join(","), "H localized urgency matches G");
+              Array.from(document.getElementById("smart-mode").options).filter(option => option.value !== "ultra")
+                .map(option => option.textContent).join(","), "H localized urgency matches shared G choices");
             const maximumPrice = document.getElementById("smart-buying-maximum-price");
             equal(maximumPrice.value, "", "H price blank by default");
             equal(maximumPrice.required, false, "H price optional");

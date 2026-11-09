@@ -32,7 +32,7 @@ def test_buying_modal_submits_once_with_cash_account_price_and_urgency(lang, tmp
       if (url.endsWith('/stop')) { parents[0].state='STOPPING'; return {ok:true,json:async()=>({ok:true})}; }
       await new Promise(resolve => { release = resolve; });
       parents=[{parent_id:'buy/one',account_ids:['A'],symbol:'AAPL',quantity:'500',filled:'0',remaining:'500',
-        reserved:'100',state:'RUNNING',reason:'waiting for volume'}];
+        reserved:'100',state:'RUNNING',active:true,start:new Date().toISOString(),reason:'waiting for volume'}];
       return {ok:true,json:async()=>({ok:true,parent:parents[0]})};
     };
     </script>

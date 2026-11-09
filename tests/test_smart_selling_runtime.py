@@ -78,6 +78,23 @@ class SmartSellingRuntimeTests(unittest.TestCase):
     def flush(self):
         wait(list(self.runtime._pending), timeout=5)
 
+    def test_status_keeps_older_active_sessions_beyond_recent_history_without_duplicates(self):
+        older = self.start(start_time=self.iso(-86400), deadline=None)
+        self.add_account("B")
+        for _ in range(100):
+            stopped = self.start(account_id="B", quantity="100")
+            self.runtime.stop_parent(stopped["parent_id"])
+        current = self.start(account_id="B", quantity="100")
+        self.assertNotIn(older["parent_id"], {p["parent_id"] for p in self.engine.list_parents()})
+        visible = self.runtime.list_parents()
+        self.assertEqual(len(visible), len({p["parent_id"] for p in visible}))
+        self.assertEqual(visible[0]["parent_id"], current["parent_id"])
+        self.assertEqual(
+            {p["parent_id"] for p in visible if p["active"]},
+            {older["parent_id"], current["parent_id"]},
+        )
+        self.assertTrue(all("market_state" in p for p in visible))
+
     def snapshot(self, command, **changes):
         payload = dict(
             schema_version=1,

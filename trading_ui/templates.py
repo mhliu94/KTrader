@@ -1786,6 +1786,9 @@ def _smart_selling_controls(
         }
 
         function renderParents(parents) {
+          const today = new Date().toDateString();
+          parents = parents.filter(parent => parent.active
+            || new Date(parent.start).toDateString() === today);
           rows.replaceChildren();
           table.hidden = !parents.length;
           statusMessage.textContent = parents.length ? "" : labels.smart_status_empty;

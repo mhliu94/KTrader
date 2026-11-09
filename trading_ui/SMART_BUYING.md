@@ -49,6 +49,10 @@ deadline stops execution rather than increasing participation. Stop controls can
 outstanding children and retain account ownership until reconciliation finishes.
 Accounts cannot overlap with E/F/G sessions or manual trading instructions.
 
+The control panel shows sessions starting today (browser-local date) plus active
+sessions from any date, including scheduled, paused, and stopping sessions. Older
+inactive sessions are hidden from the panel; their saved history is retained.
+
 The backend provides `GET/POST /api/smart-buying` and
 `POST /api/smart-buying/{parent_id}/stop`. It publishes existing `LIMIT_ORDER`
 commands with `side: BUY` and `trading_mode: H`; no broker protocol changes are

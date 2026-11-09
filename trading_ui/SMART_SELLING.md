@@ -380,6 +380,11 @@ reopening. Orders may remain on the book during a pause; see the
 
 ## Diagnostics and validation
 
+The control panel shows sessions whose start date is today in the browser's local
+timezone, plus active sessions from any date. Older stopped, completed, and expired
+sessions are hidden; scheduled, paused, and stopping sessions remain visible while
+active. This display filter also applies to Smart buying and does not delete history.
+
 The status endpoint `/api/smart-selling` returns parent progress, free credit,
 reserved quantity, fills, discarded credit, market/order state, and the binding
 reason. Every 30 seconds a rolling observed-volume estimate reports required

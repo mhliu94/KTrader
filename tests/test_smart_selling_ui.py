@@ -104,17 +104,18 @@ class SmartSellingBrowserTests(unittest.TestCase):
           window.pollFailure = false;
           window.blockCreate = false;
           window.releaseCreate = null;
+          window.buyingParents = [];
           window.accounts = [{account_id: "A", positions: [{symbol: "AAPL", qty: "100"}, {symbol: "us.aapl", qty: 50}]},
             {account_id: "B", positions: [{symbol: "AAPL", qty: 0}]}];
           window.parents = [{parent_id: "p/a", account_id: "A", symbol: "AAPL", quantity: "1000",
-            account_ids: ["A", "B"],
+            account_ids: ["A", "B"], active: true, start: new Date().toISOString(),
             filled: "10", remaining: "990", reserved: "20", state: "RUNNING", reason: "earning volume credit",
             active_order: {state: "LIVE"}}];
           window.addEventListener("error", event => uiErrors.push(event.message));
           window.addEventListener("unhandledrejection", event => uiErrors.push(String(event.reason)));
           window.fetch = async function(url, options = {}) {
             if (url === "/api/smart-buying" && options.method !== "POST")
-              return {ok: true, json: async () => ({ok: true, parents: []})};
+              return {ok: true, json: async () => ({ok: true, parents: buyingParents})};
             if (url === "/api/accounts") return {ok: true, json: async () => ({accounts: accounts})};
             if (url === "/api/market-data") return {ok: true, json: async () => ({rows: {}})};
             if (url === "/api/smart-selling" && options.method !== "POST") {
@@ -351,6 +352,58 @@ class SmartSellingBrowserTests(unittest.TestCase):
             document.querySelector("label[for='algo-mode-g']").click();
             equal(el("algo-submit").disabled, true, "cannot start without a configured account");
             equal(el("smart-selling-message").textContent, labels.smart_no_accounts, "missing accounts explained outside the modal");
+
+            const midnight = new Date();
+            midnight.setHours(0, 0, 0, 0);
+            const tomorrow = new Date(midnight);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const yesterday = new Date(midnight.getTime() - 1);
+            function session(id, state, active, started) {
+              return Object.assign({}, parents[0], {parent_id: id, reason: id, state, active,
+                start: started.toISOString(), active_order: null, market_state: "TRADING", market_reason: ""});
+            }
+            const archived = ["STOPPED", "COMPLETED", "EXPIRED"].map(state =>
+              session("old-" + state, state, false, yesterday));
+            const ongoing = ["RUNNING", "HOLD", "STOPPING"].map(state =>
+              session("old-" + state, state, true, yesterday));
+            ongoing.push(session("scheduled", "SCHEDULED", true, tomorrow));
+            parents = [session("today-stopped", "STOPPED", false, midnight),
+              session("today-completed", "COMPLETED", false, new Date(tomorrow.getTime() - 1)),
+              session("today-expired", "EXPIRED", false, midnight), ...archived, ...ongoing];
+            buyingParents = parents;
+            const statusPrefixes = ["smart", "smart-buying"];
+            const visibleReasons = prefix => Array.from(el(prefix + "-status-rows").rows,
+              row => row.cells[6].textContent);
+            await refresh();
+            for (const prefix of statusPrefixes) {
+              equal(visibleReasons(prefix), ["today-stopped", "today-completed", "today-expired",
+                "old-RUNNING", "old-HOLD", "old-STOPPING", "scheduled"],
+                prefix + " shows local-day history and all ongoing sessions");
+              equal(el(prefix + "-status-table").hidden, false, prefix + " filtered table visible");
+            }
+            const RealDate = Date;
+            try {
+              window.Date = class extends RealDate {
+                constructor(...args) { super(...(args.length ? args : [tomorrow.getTime()])); }
+                static now() { return tomorrow.getTime(); }
+              };
+              await refresh();
+              for (const prefix of statusPrefixes) {
+                equal(visibleReasons(prefix), ["old-RUNNING", "old-HOLD", "old-STOPPING", "scheduled"],
+                  prefix + " rolls over at local midnight while retaining active sessions");
+              }
+            } finally {
+              window.Date = RealDate;
+            }
+            parents = archived;
+            buyingParents = archived;
+            await refresh();
+            for (const prefix of statusPrefixes) {
+              equal(visibleReasons(prefix), [], prefix + " removes prior-day inactive rows");
+              equal(el(prefix + "-status-table").hidden, true, prefix + " hides empty table");
+              equal(Boolean(el(prefix + "-status-message").textContent), true,
+                prefix + " shows the empty state after filtering");
+            }
           } catch (failure) {
             failures.push(failure.stack || String(failure));
           }

@@ -345,7 +345,11 @@ class SmartSellingRuntime:
         )
 
     def list_parents(self):
-        parents = self.engine.list_parents()
+        parents_by_id = {parent["parent_id"]: parent for parent in self.engine.list_parents()}
+        # Older active sessions must remain visible beyond the recent-history limit.
+        for parent in self.engine.list_parents(active_only=True, limit=1000):
+            parents_by_id[parent["parent_id"]] = parent
+        parents = list(parents_by_id.values())
         if hasattr(self.market, "market_status"):
             for parent in parents:
                 status = self.market.market_status(parent["symbol"])

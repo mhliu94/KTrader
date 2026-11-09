@@ -7,6 +7,8 @@ let generation = 0;
 let interval = 2000;
 let pageSize = 20;
 let currentPage = 1;
+let unreconciledPage = 1;
+let unreconciledPageSize = 20;
 let refreshedAt = null;
 let connectionLost = false;
 let logoutFailed = false;
@@ -33,6 +35,7 @@ function showLogin() {
   clearTimeout(timer);
   snapshot = null;
   currentPage = 1;
+  unreconciledPage = 1;
   refreshedAt = null;
   connectionLost = false;
   logoutFailed = false;
@@ -45,6 +48,7 @@ function showLogin() {
   for (const id of ["algo-select", "tag-select", "algo-summary", "tag-summary", "algo-parameters", "algo-accounts", "tag-accounts"]) el(id).replaceChildren();
   for (const id of ["algo-select", "tag-select"]) delete el(id).dataset.signature;
   el("orders").replaceChildren();
+  el("unreconciled-rows").replaceChildren();
   el("dashboard").hidden = true;
   el("session").hidden = true;
   el("loading").hidden = true;
@@ -160,6 +164,7 @@ function renderSnapshot() {
   renderFeedback();
   render();
   renderReports();
+  renderUnreconciled();
 }
 
 function renderFeedback() {
@@ -198,6 +203,7 @@ async function refresh() {
     connectionLost = true;
     renderFeedback();
     renderReports();
+    renderUnreconciled();
   }
   if (current === generation) timer = setTimeout(refresh, interval);
 }
@@ -266,8 +272,78 @@ function selectReportTab(name, focus = false) {
     el(`panel-${button.dataset.tab}`).hidden = !selected;
     if (selected && focus) button.focus();
   }
-  el("dashboard-title").textContent = t(name === "orders" ? "today_orders" : name === "algo" ? "algo_sessions" : "tags");
+  el("dashboard-title").textContent = t({orders: "today_orders", algo: "algo_sessions", tags: "tags", unreconciled: "unreconciled_orders"}[name]);
 }
+
+function renderUnreconciled() {
+  if (!snapshot) return;
+  const report = snapshot.unreconciled || {items: [], complete: false};
+  const items = report.items || [];
+  const accountIds = new Set(items.map((row) => row.account_id));
+  options("unreconciled-account", snapshot.accounts.map((a) => [a.id, `#${a.num_id} · ${a.id}`]));
+  const symbols = new Set(items.map((row) => row.symbol));
+  if (el("unreconciled-symbol").value) symbols.add(el("unreconciled-symbol").value);
+  options("unreconciled-symbol", [...symbols].sort().map((symbol) => [symbol, symbol]));
+  const account = el("unreconciled-account").value, symbol = el("unreconciled-symbol").value;
+  const query = el("unreconciled-search").value.trim().toLowerCase();
+  const matching = items.filter((row) => (!account || row.account_id === account) && (!symbol || row.symbol === symbol) &&
+    (!query || [row.account_id, row.symbol, row.order_id, row.command_id, row.session_id, row.message].some((v) => v && String(v).toLowerCase().includes(query))));
+  const pages = Math.max(1, Math.ceil(matching.length / unreconciledPageSize));
+  unreconciledPage = Math.min(unreconciledPage, pages);
+  const offset = (unreconciledPage - 1) * unreconciledPageSize;
+  const rows = matching.slice(offset, offset + unreconciledPageSize);
+  el("unreconciled-badge").textContent = report.complete ? fmt(items.length) : `${fmt(items.length)}+`;
+  el("unreconciled-current").textContent = t(connectionLost || !report.complete ? "unreconciled_incomplete" : "unreconciled_summary", {count: fmt(items.length), accounts: fmt(accountIds.size)});
+  el("unreconciled-current").classList.toggle("warning", connectionLost || !report.complete || items.length > 0);
+  const warnings = [];
+  if (connectionLost) warnings.push(t("stale_connection"));
+  if (!report.complete) warnings.push(t("unreconciled_unavailable"));
+  if (report.details_available === false) warnings.push(t("unreconciled_details_unavailable"));
+  el("unreconciled-notice").hidden = !warnings.length;
+  el("unreconciled-notice").textContent = warnings.join(" ");
+  el("unreconciled-refreshed").textContent = t("unreconciled_asof", {time: reportTime(report.generated_at)});
+  el("unreconciled-count").textContent = t("unreconciled_count", {start: fmt(matching.length ? offset + 1 : 0), end: fmt(offset + rows.length), count: fmt(matching.length), total: fmt(items.length)});
+  const summary = t("page_summary", {page: fmt(unreconciledPage), pages: fmt(pages)});
+  if (el("unreconciled-page").textContent !== summary) el("unreconciled-page").textContent = summary;
+  el("unreconciled-previous").disabled = unreconciledPage === 1;
+  el("unreconciled-next").disabled = unreconciledPage === pages;
+  const body = document.createDocumentFragment();
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    cell(row, `#${item.account_num_id} · ${item.account_id}`, item.broker);
+    cell(row, item.symbol, item.side ? label(item.side) : "—", "symbol");
+    cell(row, t(`unreconciled_kind_${item.kind}`), (item.modes || []).map((mode) => t(`smart_mode_${mode}`)).join(" / "));
+    cell(row, label(item.status), item.reported_status && item.reported_status !== item.status ? t("broker_status", {status: label(item.reported_status)}) : "");
+    cell(row, `${fmt(item.filled_quantity)} / ${fmt(item.quantity)}`, "", "number key-number");
+    cell(row, fmt(item.limit_price), "", "number key-number");
+    const age = item.age_seconds == null ? "" : t("unreconciled_age", {minutes: fmt(Math.floor(item.age_seconds / 60))});
+    cell(row, reportTime(item.updated_at), age, "order-time");
+    const identity = cell(row, item.order_id || t("no_broker_id"), item.command_id ? t("command_id", {id: item.command_id}) : "", "identifier");
+    if (item.session_id) {
+      const session = document.createElement("span");
+      session.className = "secondary";
+      session.textContent = `${t("session_id")}: ${item.session_id}`;
+      identity.append(session);
+    }
+    cell(row, t(`unreconciled_reason_${item.reason}`), item.message || "", "detail");
+    body.append(row);
+  }
+  el("unreconciled-rows").replaceChildren(body);
+  el("unreconciled-empty").hidden = rows.length > 0;
+  el("unreconciled-empty").textContent = t(items.length ? "no_matches" : report.complete ? "no_unreconciled" : "unreconciled_unavailable");
+}
+
+for (const id of ["unreconciled-account", "unreconciled-symbol", "unreconciled-search"]) el(id).addEventListener("input", () => {
+  unreconciledPage = 1;
+  renderUnreconciled();
+});
+el("unreconciled-page-size").addEventListener("change", () => {
+  unreconciledPageSize = Number(el("unreconciled-page-size").value);
+  unreconciledPage = 1;
+  renderUnreconciled();
+});
+el("unreconciled-previous").addEventListener("click", () => { unreconciledPage = Math.max(1, unreconciledPage - 1); renderUnreconciled(); });
+el("unreconciled-next").addEventListener("click", () => { unreconciledPage++; renderUnreconciled(); });
 
 function reportTime(value) {
   if (!value) return "—";
@@ -437,7 +513,7 @@ async function mutateTag(path, body) {
 for (const button of document.querySelectorAll("[data-tab]")) {
   button.addEventListener("click", () => selectReportTab(button.dataset.tab));
   button.addEventListener("keydown", (event) => {
-    const tabs = ["orders", "algo", "tags"];
+    const tabs = Array.from(document.querySelectorAll("[data-tab]"), (tab) => tab.dataset.tab);
     const index = tabs.indexOf(button.dataset.tab);
     const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
     if (next !== null) { event.preventDefault(); selectReportTab(tabs[next], true); }

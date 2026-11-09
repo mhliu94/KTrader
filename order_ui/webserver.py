@@ -18,6 +18,7 @@ from .config import default_config_path, load_config
 from .consumer import OrderStatusConsumer
 from .events import STATUSES
 from .store import OrderStore
+from .reconciliation import ReconciliationView
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "ktrader_order_ui_session"
@@ -43,6 +44,8 @@ def create_app(config_path=None, *, consumer_factory=OrderStatusConsumer, config
         app.state.config = cfg
         reporting = ActivityReporting(cfg.get("reporting_db_path", DEFAULT_REPORTING_DB))
         app.state.reporting = reporting
+        app.state.reconciliation = ReconciliationView(
+            cfg.get("reconciliation_sources", []), cfg.get("reporting_db_path", DEFAULT_REPORTING_DB))
         app.state.store = OrderStore(cfg["accounts"], cfg["timezone"], reporting=reporting)
         consumer = consumer_factory(cfg["kafka"], app.state.store)
         app.state.consumer = consumer
@@ -121,6 +124,7 @@ def create_app(config_path=None, *, consumer_factory=OrderStatusConsumer, config
         for order in snapshot["orders"]:
             order["tags"] = tags.get((order["account_id"], order["order_id"]), [])
         return {**snapshot, "username": username,
+                "unreconciled": app.state.reconciliation.snapshot(cfg["accounts"]),
                 "reporting": app.state.reporting.snapshot(cfg["accounts"]),
                 "refresh_interval_seconds": cfg["refresh_interval_seconds"], "statuses": STATUSES,
                 "accounts": [{"id": meta.id, "num_id": meta.num_id, "broker": meta.broker}

@@ -37,6 +37,7 @@
         <button id="tab-orders" type="button" role="tab" aria-selected="true" aria-controls="panel-orders" data-tab="orders" data-i18n="recent_orders">Recent orders</button>
         <button id="tab-algo" type="button" role="tab" aria-selected="false" aria-controls="panel-algo" tabindex="-1" data-tab="algo" data-i18n="algo_sessions">Algo sessions</button>
         <button id="tab-tags" type="button" role="tab" aria-selected="false" aria-controls="panel-tags" tabindex="-1" data-tab="tags" data-i18n="tags">Tags</button>
+        <button id="tab-unreconciled" type="button" role="tab" aria-selected="false" aria-controls="panel-unreconciled" tabindex="-1" data-tab="unreconciled"><span data-i18n="unreconciled_orders">Unreconciled orders</span> <span id="unreconciled-badge" class="tab-count">—</span></button>
       </nav>
       <section id="panel-orders" role="tabpanel" aria-labelledby="tab-orders" tabindex="0">
       <div class="metrics">
@@ -96,6 +97,26 @@
         <p id="tag-empty" class="empty" data-i18n="no_tags">No tag periods recorded yet.</p>
         <div id="tag-report" hidden><div id="tag-summary" class="report-summary"></div><div id="tag-accounts" class="table-scroll"></div></div>
         <p class="report-note" data-i18n="cash_note">Cash amounts use confirmed fills before fees. Currencies are shown separately; missing prices or currencies are marked incomplete.</p>
+      </section>
+      <section id="panel-unreconciled" class="report-panel" role="tabpanel" aria-labelledby="tab-unreconciled" tabindex="0" hidden>
+        <div class="report-heading"><h2 data-i18n="unreconciled_orders">Unreconciled orders</h2><span id="unreconciled-current" class="feed" role="status"></span></div>
+        <p class="muted" data-i18n="unreconciled_description">Orders and commands still unresolved by Smart selling or Smart buying, across all dates. These can prevent a new session for the same account and symbol.</p>
+        <p class="report-note" data-i18n="unreconciled_note">Open orders may still be working normally. Check the broker's actual status before reconciling; this view does not cancel orders or clear account locks.</p>
+        <div id="unreconciled-notice" class="notice" role="status" hidden></div>
+        <div class="filters">
+          <label><span data-i18n="account">Account</span><select id="unreconciled-account"><option value="" data-i18n="all_accounts">All accounts</option></select></label>
+          <label><span data-i18n="symbol">Symbol</span><select id="unreconciled-symbol"><option value="" data-i18n="all_symbols">All symbols</option></select></label>
+          <label class="search"><span data-i18n="search">Search</span><input id="unreconciled-search" type="search" data-i18n-placeholder="unreconciled_search" data-i18n-label="unreconciled_search" placeholder="Account, symbol, order or command ID"></label>
+        </div>
+        <div class="table-meta"><span id="unreconciled-count"></span><span id="unreconciled-refreshed"></span></div>
+        <nav class="pagination" aria-label="Unreconciled order pages" data-i18n-label="unreconciled_pages">
+          <label class="page-size"><span data-i18n="page_size">Orders per page</span><select id="unreconciled-page-size"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option></select></label>
+          <div class="page-controls"><button id="unreconciled-previous" class="quiet" type="button" data-i18n="previous_page">Previous</button><span id="unreconciled-page" role="status" aria-live="polite"></span><button id="unreconciled-next" class="quiet" type="button" data-i18n="next_page">Next</button></div>
+        </nav>
+        <div class="table-scroll"><table class="unreconciled-table"><caption class="sr-only" data-i18n="unreconciled_caption">Unresolved records across all dates, newest first</caption><thead><tr>
+          <th scope="col" data-i18n="account">Account</th><th scope="col" data-i18n="symbol_side">Symbol / side</th><th scope="col" data-i18n="record_kind">Record</th><th scope="col" data-i18n="status">Status</th><th scope="col" class="number" data-i18n="filled_quantity">Filled / quantity</th><th scope="col" class="number" data-i18n="limit_price">Limit price</th><th scope="col" data-i18n="last_evidence">Last report / submission</th><th scope="col" data-i18n="identifiers">Order / command IDs</th><th scope="col" data-i18n="reason">Reason</th>
+        </tr></thead><tbody id="unreconciled-rows"></tbody></table></div>
+        <p id="unreconciled-empty" class="empty"></p>
       </section>
       <footer><span data-i18n="footer">Read-only order status · Latest updates first</span><span id="refresh-note"></span></footer>
     </section>

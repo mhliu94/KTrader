@@ -116,7 +116,7 @@ def test_reports_and_tag_controls_in_browser(report_browser):
     page.route("**/api/**", api)
     page.goto(f"http://127.0.0.1:{server.server_port}/static/index.html")
     page.locator("#dashboard").wait_for(state="visible", timeout=5000)
-    assert page.locator("[role=tab]").count() == 3
+    assert page.locator("[role=tab]").count() == 4
     assert page.locator("#orders img").count() == 0
     assert "<img src=x" in page.locator("#orders").inner_text()
 
@@ -176,3 +176,78 @@ def test_reports_and_tag_controls_in_browser(report_browser):
     assert page.locator("#tag-stop").is_disabled()
     assert page.locator("#algo-current").inner_text() == "会话状态暂不可用"
     assert not errors, errors
+
+
+def test_unreconciled_filters_pagination_translation_and_live_resolution(report_browser):
+    browser, server = report_browser
+    base = {
+        "kind": "broker_order", "account_id": "A", "account_num_id": 1, "broker": "GigaMoney",
+        "symbol": "AEHL", "side": "SELL", "status": "PENDING_NEW", "reported_status": "PENDING_NEW",
+        "quantity": 20000, "filled_quantity": 0, "limit_price": None, "modes": ["G", "H"],
+        "updated_at": "2026-10-26T15:00:00Z", "age_seconds": 172800,
+        "reason": "awaiting_acceptance", "message": "<img src=x onerror=alert(1)>",
+    }
+    items = [{**base, "order_id": f"old-order-{i}"} for i in range(25)]
+    items.append({**base, "kind": "pending_command", "account_id": "B", "account_num_id": 2,
+                  "symbol": "POM", "order_id": None, "command_id": "missing-command",
+                  "quantity": None, "filled_quantity": None, "status": "AWAITING_REPORT",
+                  "reported_status": None, "reason": "missing_feedback"})
+    data = {
+        "username": "tester", "date": "2026-10-28", "timezone": "UTC", "refresh_interval_seconds": 60,
+        "accounts": [{"id": "A", "num_id": 1, "broker": "GigaMoney"}, {"id": "B", "num_id": 2, "broker": "GigaMoney"}],
+        "statuses": [], "orders": [], "feed": {"state": "live", "detail": "Live", "invalid_messages": 0},
+        "unreconciled": {"items": items, "complete": True, "details_available": True, "generated_at": "2026-10-28T15:00:00Z"},
+    }
+    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+    errors, posts = [], []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+
+    def api(route):
+        if route.request.method != "GET": posts.append(route.request.url)
+        route.fulfill(json=data)
+
+    page.route("**/api/**", api)
+    page.goto(f"http://127.0.0.1:{server.server_port}/static/index.html")
+    page.locator("#dashboard").wait_for(state="visible")
+    page.locator("#tab-orders").focus()
+    page.keyboard.press("End")
+    assert page.locator("#panel-unreconciled").is_visible()
+    assert page.locator("#unreconciled-badge").inner_text() == "26"
+    assert page.locator("#unreconciled-rows tr").count() == 20
+    assert page.locator("#unreconciled-rows img").count() == 0
+    assert "<img src=x" in page.locator("#unreconciled-rows").inner_text()
+    assert "10/26/2026" in page.locator("#unreconciled-rows").inner_text()
+    page.locator("#unreconciled-next").click()
+    assert page.locator("#unreconciled-rows tr").count() == 6
+    page.evaluate("refresh()")
+    assert page.locator("#unreconciled-page").inner_text() == "Page 2 of 2"
+    page.locator("#unreconciled-account").select_option("B")
+    assert page.locator("#unreconciled-rows tr").count() == 1
+    assert "missing-command" in page.locator("#unreconciled-rows").inner_text()
+    assert "— / —" in page.locator("#unreconciled-rows").inner_text()
+    page.locator("#unreconciled-symbol").select_option("POM")
+    page.locator("[data-language=zh]").click()
+    assert page.locator("#dashboard-title").inner_text() == "未对账订单"
+    assert page.locator("#unreconciled-account").input_value() == "B"
+    assert "未确认指令" in page.locator("#unreconciled-rows").inner_text()
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.locator("#unreconciled-search").is_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    # Resolution removes the record without resetting the selected filters.
+    data["unreconciled"]["items"] = items[:25]
+    page.evaluate("refresh()")
+    assert page.locator("#unreconciled-rows tr").count() == 0
+    assert page.locator("#unreconciled-account").input_value() == "B"
+    assert page.locator("#unreconciled-symbol").input_value() == "POM"
+    page.locator("[data-language=en]").click()
+    page.locator("#unreconciled-account").select_option("")
+    page.locator("#unreconciled-symbol").select_option("")
+    page.locator("#unreconciled-search").fill("old-order-24")
+    assert page.locator("#unreconciled-rows tr").count() == 1
+    data["unreconciled"].update(items=[], complete=False)
+    page.evaluate("refresh()")
+    assert page.locator("#unreconciled-notice").is_visible()
+    assert "incomplete" in page.locator("#unreconciled-current").inner_text()
+    assert "No unresolved records" not in page.locator("#unreconciled-empty").inner_text()
+    assert not posts and not errors
+    page.close()

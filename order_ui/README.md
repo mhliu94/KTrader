@@ -202,6 +202,32 @@ Authenticated APIs: `GET /api/orders` includes `reporting.sessions`,
 `{"name":"Opening buys","symbol":"AAPL"}`; `POST /api/tags/{id}/stop` closes the
 period. Mutations require the existing same-origin `X-Order-UI-Request: 1` header.
 
+## Unreconciled orders
+
+The **Unreconciled orders / 未对账订单** tab shows the durable records used by
+Smart selling and Smart buying to block new sessions: nonterminal broker orders,
+commands awaiting a linked final report, and dispatched algorithm children still
+awaiting reconciliation. It includes **all dates**, with account/symbol filters,
+ID/message search, pagination, broker messages, timestamps, and algorithm session
+IDs. Records shared by the two controllers are displayed once with both modes.
+An ordinary working order is shown as open, not as a failed trade. Missing
+quantity or broker identity stays unknown rather than being inferred.
+
+The tab refreshes with the existing dashboard poll and removes resolved records
+when the controllers release them. It reads the state and feedback databases in
+SQLite read-only mode; it never places/cancels orders, clears locks, replays
+commands, or updates reconciliation state. Hidden accounts are excluded. Missing
+or unreadable sources show an incomplete-data warning, not an all-clear result.
+
+Database paths follow the shared `smart_selling.state_db` and
+`smart_buying.state_db` settings (explicit paths are relative to the shared config
+file). Defaults are `logs/smart_selling.sqlite3` and `logs/smart_buying.sqlite3`
+under the repository root, matching the trading UI launcher. Their feedback
+databases append `.feedback.sqlite3`. Both UIs must have access to those same
+local files; the order UI only needs read access. Additional order details come
+from the existing reporting database. `GET /api/orders` includes an authenticated
+`unreconciled` object with `items`, source availability and a `complete` flag.
+
 ## Kafka publisher contract
 
 The machine-readable contract is

@@ -118,6 +118,15 @@ def load_config(path: str | Path) -> dict:
         if key.endswith(".location"):
             client_config[key] = str(path.parent / value)
     kafka["client_config"] = client_config
+    reconciliation_sources = []
+    for mode, name in (("G", "smart_selling"), ("H", "smart_buying")):
+        raw = _object(shared.get(name, {}), name)
+        if "state_db" in raw:
+            state_db = path.parent / _string(raw["state_db"], f"{name}.state_db")
+        else:
+            state_db = Path(__file__).resolve().parents[1] / "logs" / f"{name}.sqlite3"
+        reconciliation_sources.append({"mode": mode, "state_db": str(state_db.resolve())})
     return {"accounts": accounts, "users": users, "timezone": zone,
             "refresh_interval_seconds": refresh, "server": server, "kafka": kafka,
+            "reconciliation_sources": reconciliation_sources,
             "reporting_db_path": reporting_db_path(shared, path)}

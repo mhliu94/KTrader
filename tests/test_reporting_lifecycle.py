@@ -31,6 +31,7 @@ def lifecycle(monkeypatch, tmp_path):
         "SMART_SELLING_MANAGER", "SMART_SELLING_CONSUMER", "OPERATIONS_LOG",
         "SMART_BUYING_MANAGER", "SMART_BUYING_CONSUMER",
         "ACTIVITY_REPORTING", "SYSTEM_SNAPSHOTS",
+        "MARKET_ACTIVITY", "MARKET_ORDER_STORE", "MARKET_ORDER_CONSUMER",
     ):
         monkeypatch.setattr(webserver, name, None)
     store = AccountStore()
@@ -43,6 +44,7 @@ def lifecycle(monkeypatch, tmp_path):
         "AccountDetailsConsumer", "TradingCommandsProducer", "FastTradingStrategyManager",
         "SmartSellingRuntime", "SmartSellingConsumer", "PriceBookConsumer",
         "SmartBuyingRuntime",
+        "MarketActivity", "OrderStatusConsumer",
     ):
         instance = Mock(name=name + " instance")
         for method in ("start", "stop", "stop_all", "close", "flush"):
@@ -77,6 +79,13 @@ def test_startup_archives_every_account_and_keeps_hidden_accounts_out_of_trading
         factories["AccountDetailsConsumer"].return_value.start.assert_called_once_with()
         recorder.return_value.start.assert_called_once_with()
         factories["SmartSellingRuntime"].return_value.start.assert_called_once_with()
+        factories["MarketActivity"].assert_called_once_with(str(path.parent / "state" / "activity.sqlite3"))
+        assert set(webserver.MARKET_ORDER_STORE.accounts) == {"VISIBLE"}
+        factories["OrderStatusConsumer"].return_value.start.assert_called_once_with()
+        market_args = factories["PriceBookConsumer"].call_args.kwargs
+        assert market_args["quote_history_seconds"] == 1500
+        market_args["quote_callback"]("quote")
+        factories["MarketActivity"].return_value.record_quote.assert_called_once_with("quote")
     finally:
         webserver.on_shutdown()
 
@@ -95,6 +104,8 @@ def test_shutdown_closes_reporting_after_algorithms_and_stops_snapshot_worker(li
     factories["ActivityReporting"].return_value.close.assert_called_once_with()
     factories["TradingCommandsProducer"].return_value.flush.assert_called_once_with(2.0)
     assert events.index(("FastTradingStrategyManager", "stop_all")) < events.index(("ActivityReporting", "close"))
+    assert events.index(("OrderStatusConsumer", "stop")) < events.index(("MarketActivity", "close"))
+    assert events.index(("PriceBookConsumer", "stop")) < events.index(("MarketActivity", "close"))
     if smart_enabled:
         factories["SmartSellingRuntime"].return_value.close.assert_called_once_with()
         assert events.index(("SmartSellingRuntime", "close")) < events.index(("ActivityReporting", "close"))

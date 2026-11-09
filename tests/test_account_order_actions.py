@@ -262,14 +262,14 @@ class AccountOrderEndpointTests(unittest.TestCase):
 
     def test_custom_symbol_quote_is_available_for_order_summary(self):
         webserver.MD_STORE = FakeMarketDataStore({"NVDA": 100.0})
-        response = self.client.get("/api/market-data", params={"symbol": " nvda "})
+        response = self.client.get("/api/quotes", params={"symbol": " nvda "})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(response.json()["rows"]), {"NVDA"})
         self.assertEqual(response.json()["rows"]["NVDA"]["last"], 100.0)
 
     def test_default_quote_request_keeps_configured_symbols(self):
-        response = self.client.get("/api/market-data")
+        response = self.client.get("/api/quotes")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(response.json()["rows"]), {"AAPL", "MSFT"})

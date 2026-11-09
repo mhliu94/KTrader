@@ -117,7 +117,7 @@ class SmartSellingBrowserTests(unittest.TestCase):
             if (url === "/api/smart-buying" && options.method !== "POST")
               return {ok: true, json: async () => ({ok: true, parents: buyingParents})};
             if (url === "/api/accounts") return {ok: true, json: async () => ({accounts: accounts})};
-            if (url === "/api/market-data") return {ok: true, json: async () => ({rows: {}})};
+            if (url === "/api/quotes") return {ok: true, json: async () => ({rows: {}})};
             if (url === "/api/smart-selling" && options.method !== "POST") {
               if (pollFailure) throw new Error("offline");
               return {ok: true, json: async () => ({ok: true, parents: parents})};

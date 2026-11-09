@@ -15,6 +15,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from urllib.parse import quote
 from .app_logging import configure_logging
 from .services.market_data import MarketDataStore
+from .services.market_activity import MarketActivity
+from order_ui.config import load_kafka_config as load_order_kafka_config
+from order_ui.consumer import OrderStatusConsumer
+from order_ui.store import OrderStore
 from .templates import render_market_data_page, render_market_insights_page
 from .models import AccountSnapshot
 
@@ -80,6 +84,9 @@ ALGO_CONTROL_LOCK = threading.RLock()
 OPERATIONS_LOG = None
 ACTIVITY_REPORTING = None
 SYSTEM_SNAPSHOTS = None
+MARKET_ACTIVITY = None
+MARKET_ORDER_STORE = None
+MARKET_ORDER_CONSUMER = None
 
 MD_STORE = MarketDataStore()
 
@@ -264,6 +271,10 @@ def _can_access_admin_control(user: str | None) -> bool:
     return user == "lmh"
 
 
+def _can_access_market_data(user: str | None) -> bool:
+    return user == "lmh"
+
+
 def _can_manage_trading(user: str | None) -> bool:
     return _has_lmh_feature_access(user)
 
@@ -360,6 +371,7 @@ def _start_services() -> None:
     global APP_CONFIG, ACCOUNT_METAS, SYMBOLS, AUTH_USERS, ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, COMMANDS_PRODUCER, FAST_TRADING_MANAGER, OPERATIONS_LOG
     global SMART_SELLING_MANAGER, SMART_SELLING_CONSUMER, ACTIVITY_REPORTING, SYSTEM_SNAPSHOTS
     global SMART_BUYING_MANAGER, SMART_BUYING_CONSUMER
+    global MARKET_ACTIVITY, MARKET_ORDER_STORE, MARKET_ORDER_CONSUMER
 
     server_started_at = datetime.now(timezone.utc)
     config_path = os.getenv("ACCOUNT_DASHBOARD_CONFIG", "./trading_ui/sample/config.json")
@@ -378,6 +390,12 @@ def _start_services() -> None:
     snapshot_metas = load_account_metas(APP_CONFIG, include_hidden=True)
     db_path = reporting_db_path(APP_CONFIG, config_path)
     ACTIVITY_REPORTING = ActivityReporting(db_path)
+    MARKET_ACTIVITY = MarketActivity(db_path)
+    MARKET_ORDER_STORE = OrderStore(ACCOUNT_METAS, "America/New_York", reporting=MARKET_ACTIVITY)
+    order_kafka = load_order_kafka_config(APP_CONFIG, config_path)
+    order_kafka["group_id"] = "market-activity-" + order_kafka["group_id"]
+    MARKET_ORDER_CONSUMER = OrderStatusConsumer(order_kafka, MARKET_ORDER_STORE)
+    MARKET_ORDER_CONSUMER.start()
     SYSTEM_SNAPSHOTS = SystemSnapshotRecorder(
         db_path, accounts_provider=lambda: snapshot_metas,
         snapshots_provider=lambda: (store.get_all(), "kafka"),
@@ -434,6 +452,8 @@ def _start_services() -> None:
         MD_STORE,
         payload_callback=_on_price_book if _smart_managers() else None,
         health_callback=_on_price_book_health if _smart_managers() else None,
+        quote_callback=MARKET_ACTIVITY.record_quote,
+        quote_history_seconds=25 * 60,
     )
     MARKET_DATA_CONSUMER.start()
 
@@ -443,6 +463,7 @@ def on_shutdown() -> None:
     global SYSTEM_SNAPSHOTS, FAST_TRADING_MANAGER, SMART_SELLING_MANAGER
     global ACCOUNT_CONSUMER, MARKET_DATA_CONSUMER, SMART_SELLING_CONSUMER, COMMANDS_PRODUCER, ACTIVITY_REPORTING
     global SMART_BUYING_MANAGER, SMART_BUYING_CONSUMER
+    global MARKET_ACTIVITY, MARKET_ORDER_STORE, MARKET_ORDER_CONSUMER
     # Also used after partial startup. One failing service must not strand others.
     for service, method, args in (
         (SYSTEM_SNAPSHOTS, "stop", ()),
@@ -451,12 +472,14 @@ def on_shutdown() -> None:
         (SMART_BUYING_MANAGER, "stop_all", ()),
         (ACCOUNT_CONSUMER, "stop", ()),
         (MARKET_DATA_CONSUMER, "stop", ()),
+        (MARKET_ORDER_CONSUMER, "stop", ()),
         (SMART_SELLING_CONSUMER, "stop", ()),
         (SMART_BUYING_CONSUMER, "stop", ()),
         (SMART_SELLING_MANAGER, "close", ()),
         (SMART_BUYING_MANAGER, "close", ()),
         (COMMANDS_PRODUCER, "flush", (2.0,)),
         (ACTIVITY_REPORTING, "close", ()),
+        (MARKET_ACTIVITY, "close", ()),
     ):
         if service is not None:
             try:
@@ -467,6 +490,7 @@ def on_shutdown() -> None:
     ACCOUNT_CONSUMER = MARKET_DATA_CONSUMER = SMART_SELLING_CONSUMER = None
     COMMANDS_PRODUCER = ACTIVITY_REPORTING = None
     SMART_BUYING_MANAGER = SMART_BUYING_CONSUMER = None
+    MARKET_ACTIVITY = MARKET_ORDER_STORE = MARKET_ORDER_CONSUMER = None
 
 
 @app.get("/set-lang")
@@ -1438,8 +1462,10 @@ def market_data(request: Request) -> HTMLResponse:
     if gate is not None:
         return gate
     lang = resolve_lang(request)
+    if not _can_access_market_data(user):
+        return HTMLResponse(t(lang, "md_forbidden"), status_code=403)
     inner = render_market_data_page(lang=lang, symbols=_market_data_symbols())
-    return HTMLResponse(render_layout(lang, "market-data", inner, current_user=(user or ""), can_access_admin_control=_can_access_admin_control(user), can_manage_trading=_can_manage_trading(user)))
+    return HTMLResponse(render_layout(lang, "market-data", inner, current_user=(user or ""), can_access_admin_control=_can_access_admin_control(user), can_manage_trading=_can_manage_trading(user)), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/market-insights", response_class=HTMLResponse)
@@ -1458,7 +1484,27 @@ def market_insights(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/market-data")
-async def api_market_data(request: Request, symbol: str | None = None) -> JSONResponse:
+def api_market_data(request: Request, symbol: str | None = None) -> JSONResponse:
+    user, gate = _require_auth_api(request)
+    if gate is not None:
+        return gate
+    headers = {"Cache-Control": "no-store"}
+    if not _can_access_market_data(user):
+        return JSONResponse({"ok": False, "error": t(resolve_lang(request), "md_forbidden")}, status_code=403, headers=headers)
+    symbols = _market_data_symbols()
+    clean_symbol = str(symbol or (symbols[0] if symbols else "")).strip().upper()
+    if not clean_symbol or clean_symbol not in symbols:
+        return JSONResponse({"ok": False, "error": t(resolve_lang(request), "invalid_symbol")}, status_code=400, headers=headers)
+    if MARKET_ACTIVITY is None or MARKET_ORDER_STORE is None:
+        return JSONResponse({"ok": False, "error": t(resolve_lang(request), "md_unavailable")}, status_code=503, headers=headers)
+    feed = MARKET_ORDER_STORE.feed_status()
+    state = "incomplete" if feed.get("invalid_messages") else feed["state"]
+    data = MARKET_ACTIVITY.snapshot(clean_symbol, ACCOUNT_METAS, order_feed=state)
+    return JSONResponse({"ok": True, "symbols": symbols, **data}, headers=headers)
+
+
+@app.get("/api/quotes")
+async def api_quotes(request: Request, symbol: str | None = None) -> JSONResponse:
     user, gate = _require_auth_api(request)
     if gate is not None:
         return gate

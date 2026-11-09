@@ -145,7 +145,7 @@ class StockQuotePipelineTests(unittest.TestCase):
             client = TestClient(webserver.app)
             try:
                 client.cookies.set("auth_token", "test-market-token")
-                response = client.get("/api/market-data")
+                response = client.get("/api/quotes")
                 self.assertEqual(response.status_code, 200)
                 return response.json()["rows"]
             finally:

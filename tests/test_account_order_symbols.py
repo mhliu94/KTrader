@@ -40,7 +40,7 @@ class AccountOrderSymbolBrowserTests(unittest.TestCase):
             if (path.pathname === "/api/accounts") {
               return {ok: true, json: async () => ({accounts: [{account_id: "A", cash: 1000}]})};
             }
-            if (path.pathname === "/api/market-data") {
+            if (path.pathname === "/api/quotes") {
               const symbol = path.searchParams.get("symbol");
               quoteSymbols.push(symbol);
               return {ok: true, json: async () => ({rows: {

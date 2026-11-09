@@ -222,13 +222,12 @@ requests and interval (configured here to a one-second delay between polls;
 five seconds if the setting is omitted). Volume-only symbols are not
 automatically added to this topic.
 
-The **Market Data** tab also uses these snapshots: `PreviousClose` supplies the
-previous trading day's close, `Last` supplies the actual last trade, and `Volume`
-supplies daily volume. Change and percentage change are calculated from that same
-snapshot. No historical CSV or daily updater is required. Missing optional fields
-stay unavailable; they never reuse an earlier day's values. The tab marks quotes
-stale after 30 seconds without a new observation, even if depth still updates.
-Short interest is not supplied by this quote feed and remains unavailable.
+The `lmh`-only **Market Data** tab uses these snapshots for four five-minute
+volume windows, estimated VWAP, and the last trade's time, quantity and price.
+Broker fill reports supply our bought, sold and gross volume alongside market
+volume. See [Market Data](MARKET_DATA.md) for timing, completeness and access
+rules. No historical CSV or daily updater is required. Quotes become stale
+after 30 seconds without a new observation, even if depth still updates.
 
 The UI's `market_data.publisher_config` points to `md_producer_config.json` so
 the tab follows the publisher's subscribed symbols rather than the trading forms'
@@ -257,15 +256,16 @@ trade prices for **Last / 最新** and **Market Value / 市值**; holdings with 
 usable trade quote show `--` for both. Unavailable observations clear a previous
 price, and older observations cannot overwrite newer ones.
 
-On startup and partition reassignment, this shared consumer reads only the last
-100 records **per partition** of `price-books` and `stock-quotes`, then continues
-with live updates. These feeds carry complete snapshots, so replaying their full
-history is unnecessary. The limit is across symbols, not per symbol; a symbol
-absent from the recent window appears when its next snapshot arrives.
+On startup and partition reassignment, this shared consumer reads the last
+100 records **per partition** of `price-books`. For the Market Data table it
+requests the last 25 minutes of `stock-quotes` via Kafka timestamp offsets,
+then continues with live updates. If timestamp lookup is unavailable, quotes
+fall back to the record-count limit and incomplete windows are marked.
 
 Set `kafka.market_data_replay_records` to change the window, or
 `KAFKA_MARKET_DATA_REPLAY_RECORDS` when the JSON setting is absent. The default is
-100; zero skips history and waits for new data. Short or empty partitions start at
+100; zero skips the record-count replay and waits for new data. The table's
+25-minute quote replay is independent of this setting. Short or empty partitions start at
 their earliest retained offset. If Kafka cannot return offsets within five
 seconds per partition, the consumer logs a warning and waits for new data on
 that partition. `market_data_auto_offset_reset` now defaults to `latest` as a

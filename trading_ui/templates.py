@@ -90,6 +90,13 @@ def render_layout(
     )
 
 
+    market_data_tab_html = ""
+    if current_user == "lmh":
+        market_data_tab_html = (
+            f'<a class="{tab3_cls}" href="/market-data">'
+            f'{html_escape(t(lang, "tab_market"))}</a>'
+        )
+
     admin_control_tab_html = ""
     if can_access_admin_control:
         admin_control_tab_html = (
@@ -312,7 +319,7 @@ def render_layout(
   <div class="tabs">
     <a class="{tab1_cls}" href="/account-details">{html_escape(t(lang,"tab_account"))}</a>
     <a class="{tab2_cls}" href="/control-panel">{html_escape(t(lang,"tab_control"))}</a>
-    <a class="{tab3_cls}" href="/market-data">{html_escape(t(lang,"tab_market"))}</a>
+    {market_data_tab_html}
     <a class="{tab4_cls}" href="/market-insights">{html_escape(t(lang,"tab_insights"))}</a>
     {admin_control_tab_html}
     {trading_status_tab_html}
@@ -952,7 +959,7 @@ def _render_account_order_controls(lang: str, symbols: List[str] | None) -> str:
           if (!activeModal) return Promise.resolve();
           if (summaryRequest) return summaryRequest;
           const symbol = selectedSymbol(activeModal);
-          const marketUrl = "/api/market-data" + (symbol ? "?symbol=" + encodeURIComponent(symbol) : "");
+          const marketUrl = "/api/quotes" + (symbol ? "?symbol=" + encodeURIComponent(symbol) : "");
           summaryRequest = Promise.all([
             fetch("/api/accounts", { cache: "no-store", credentials: "same-origin" }),
             fetch(marketUrl, { cache: "no-store", credentials: "same-origin" })
@@ -2725,7 +2732,7 @@ def render_control_panel_page(
           try {{
             const [accountsResp, marketResp] = await Promise.all([
               fetch("/api/accounts", {{ cache: "no-store" }}),
-              fetch("/api/market-data", {{ cache: "no-store" }})
+              fetch("/api/quotes", {{ cache: "no-store" }})
             ]);
             if (accountsResp.ok) {{
               accountsCache = await accountsResp.json();
@@ -2875,7 +2882,7 @@ def render_control_panel_page(
           try {{
             const [accountsResp, marketResp] = await Promise.all([
               fetch("/api/accounts", {{ cache: "no-store" }}),
-              fetch("/api/market-data", {{ cache: "no-store" }})
+              fetch("/api/quotes", {{ cache: "no-store" }})
             ]);
             if (accountsResp.ok) accountsCache = await accountsResp.json();
             if (marketResp.ok) marketCache = await marketResp.json();
@@ -2940,130 +2947,136 @@ def _fmt_ts(epoch: int | None) -> str:
 
 
 def render_market_data_page(lang: str, symbols: List[str]) -> str:
-    rows = []
-    for sym in sorted(symbols):
-        s = html_escape(sym)
-        rows.append(
-            "<tr>"
-            f"<td><b>{s}</b></td>"
-            f"<td style='text-align:right' id='md-{s}-prev'>—</td>"
-            f"<td style='text-align:right' id='md-{s}-last'>—</td>"
-            f"<td style='text-align:right' id='md-{s}-chg'>—</td>"
-            f"<td style='text-align:right' id='md-{s}-chgpx'>—</td>"
-            f"<td style='text-align:right' id='md-{s}-shortint'>—</td>"
-            f"<td style='text-align:right' id='md-{s}-vol'>—</td>"
-            f"<td style='text-align:right' id='md-{s}-asof'>—</td>"
-            "</tr>"
-        )
-
+    options = ''.join(f'<option value="{html_escape(symbol)}">{html_escape(symbol)}</option>'
+                      for symbol in symbols)
+    labels = {key: t(lang, key) for key in (
+        "md_current", "md_partial", "md_unavailable", "md_forbidden", "md_feed_warning",
+        "md_no_symbols", "md_loading", "md_updated",
+    )}
     return f"""
-  <div class="card" style="max-width: 980px;">
-    <div class="hdr">
-      <div class="acct">{html_escape(t(lang,'md_title'))}</div>
-      <div class="ts">{html_escape(t(lang,'md_note_live'))}</div>
+  <section class="card" style="max-width:1160px;" aria-labelledby="md-heading">
+    <div class="hdr" style="flex-wrap:wrap;gap:16px;">
+      <div><div class="acct" id="md-heading">{html_escape(t(lang, 'md_title'))}</div>
+        <div class="ts">{html_escape(t(lang, 'md_window_note'))}</div></div>
+      <div><label for="md-symbol">{html_escape(t(lang, 'symbol'))}</label>
+        <select id="md-symbol" style="min-width:160px;" {'disabled' if not symbols else ''}>{options}</select></div>
     </div>
-
-    <table class="pos">
-      <thead>
-        <tr>
-          <th>{html_escape(t(lang,'symbol'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_prev_close'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_last'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_change'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_change_pct'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_short_interest'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_volume'))}</th>
-          <th style="text-align:right">{html_escape(t(lang,'md_asof'))}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(rows) if rows else '<tr><td colspan="8"><em>—</em></td></tr>'}
-      </tbody>
-    </table>
-  </div>
-
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin:20px 0;">
+      <div><div class="ts">{html_escape(t(lang, 'md_last_trade_time'))}</div><strong id="md-trade-time">—</strong></div>
+      <div><div class="ts">{html_escape(t(lang, 'md_last_trade_quantity'))}</div><strong id="md-trade-quantity">—</strong></div>
+      <div><div class="ts">{html_escape(t(lang, 'md_last_trade_price'))}</div><strong id="md-trade-price">—</strong></div>
+    </div>
+    <div id="md-error" class="warn" role="status" aria-live="polite"></div>
+    <div style="overflow-x:auto;">
+      <table class="pos" id="md-windows" style="min-width:740px;">
+        <caption style="text-align:left;padding:8px 0;">{html_escape(t(lang, 'md_table_caption'))}</caption>
+        <thead>
+          <tr><th scope="col" rowspan="2">{html_escape(t(lang, 'md_window'))}</th>
+            <th scope="col" rowspan="2" style="text-align:right;">{html_escape(t(lang, 'md_market_volume'))}</th>
+            <th scope="colgroup" colspan="3" style="text-align:center;">{html_escape(t(lang, 'md_our_volume'))}</th>
+            <th scope="col" rowspan="2" style="text-align:right;">{html_escape(t(lang, 'md_vwap_estimate'))}</th></tr>
+          <tr><th scope="col" style="text-align:right;">{html_escape(t(lang, 'md_bought'))}</th>
+            <th scope="col" style="text-align:right;">{html_escape(t(lang, 'md_sold'))}</th>
+            <th scope="col" style="text-align:right;">{html_escape(t(lang, 'md_gross'))}</th></tr>
+        </thead>
+        <tbody id="md-window-rows"><tr><td colspan="6">{html_escape(t(lang, 'md_loading' if symbols else 'md_no_symbols'))}</td></tr></tbody>
+      </table>
+    </div>
+    <p class="help">{html_escape(t(lang, 'md_method_note'))}</p>
+    <p class="help">{html_escape(t(lang, 'md_partial_note'))}</p>
+    <div class="ts" id="md-updated" aria-live="polite"></div>
+  </section>
   <script>
-  (function(){{
-    function fmtNum(x, digits) {{
-      if (x === null || x === undefined) return "—";
-      var n = Number(x);
-      if (!isFinite(n)) return "—";
-      return n.toLocaleString(undefined, {{
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits
+  (function() {{
+    const labels = {json.dumps(labels, ensure_ascii=False)};
+    const select = document.getElementById("md-symbol");
+    const rows = document.getElementById("md-window-rows");
+    const error = document.getElementById("md-error");
+    let requestId = 0;
+    let pendingSymbol = null;
+    function number(value, digits) {{
+      return value === null || value === undefined || !Number.isFinite(Number(value)) ? "—"
+        : Number(value).toLocaleString(undefined, {{maximumFractionDigits:digits}});
+    }}
+    function timestamp(value, zone, date) {{
+      if (value === null || value === undefined) return "—";
+      return new Date(value * 1000).toLocaleString({json.dumps('zh-CN' if lang == 'zh' else 'en-GB')}, {{
+        timeZone:zone, hourCycle:"h23", hour:"2-digit", minute:"2-digit",
+        ...(date ? {{month:"short",day:"2-digit",second:"2-digit"}} : {{}})
       }});
     }}
-
-    function fmtPct(x) {{
-      if (x === null || x === undefined) return "—";
-      var n = Number(x);
-      if (!isFinite(n)) return "—";
-      return n.toFixed(2) + "%";
+    function empty(message) {{
+      rows.replaceChildren();
+      const row = rows.insertRow();
+      const cell = row.insertCell();
+      cell.colSpan = 6; cell.textContent = message;
+      ["md-trade-time", "md-trade-quantity", "md-trade-price"].forEach(id => document.getElementById(id).textContent = "—");
+      document.getElementById("md-updated").textContent = "";
     }}
-
-    function fmtInt(x) {{
-      if (x === null || x === undefined) return "—";
-      var n = Number(x);
-      if (!isFinite(n)) return "—";
-      return Math.trunc(n).toLocaleString();
-    }}
-
-    function fmtAsOf(epoch) {{
-      if (!epoch) return "—";
-      var d = new Date(epoch * 1000);
-      // show second-resolution in local time + timezone
-      return d.toLocaleString(undefined, {{ hour12:false }});
-    }}
-
-    async function poll() {{
-      try {{
-        const r = await fetch("/api/market-data", {{ cache: "no-store" }});
-        if (!r.ok) return;
-        const j = await r.json();
-        const rows = j.rows || {{}};
-
-        for (const sym in rows) {{
-          const row = rows[sym] || {{}};
-          const esc = sym.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
-
-          const prevEl = document.getElementById("md-" + esc + "-prev");
-          const lastEl = document.getElementById("md-" + esc + "-last");
-          const chgEl  = document.getElementById("md-" + esc + "-chg");
-          const chgpxEl= document.getElementById("md-" + esc + "-chgpx");
-          const shortIntEl = document.getElementById("md-" + esc + "-shortint");
-          const volEl  = document.getElementById("md-" + esc + "-vol");
-          const asofEl = document.getElementById("md-" + esc + "-asof");
-
-          if (prevEl) prevEl.textContent = fmtNum(row.prev_close, 4);
-
-          if (row.error) {{
-            const msg = "ERR: " + row.error;
-            if (lastEl) lastEl.textContent = msg;
-            if (chgEl) chgEl.textContent = "—";
-            if (chgpxEl) chgpxEl.textContent = "—";
-            if (shortIntEl) shortIntEl.textContent = "—";
-            if (volEl) volEl.textContent = "—";
-            if (asofEl) asofEl.textContent = fmtAsOf(row.asof_epoch);
-            continue;
-          }}
-
-          if (lastEl) lastEl.textContent = fmtNum(row.last, 4);
-          if (chgEl) chgEl.textContent = fmtNum(row.change, 4);
-          if (chgpxEl) chgpxEl.textContent = fmtPct(row.change_pct);
-          if (shortIntEl) shortIntEl.textContent = fmtPct(row.short_interest);
-          if (volEl) volEl.textContent = fmtInt(row.volume);
-          if (asofEl) asofEl.textContent = fmtAsOf(row.asof_epoch);
-        }}
-      }} catch (e) {{
-        // ignore transient errors
+    function cell(row, value, complete, digits) {{
+      const td = row.insertCell();
+      td.style.textAlign = "right";
+      td.textContent = number(value, digits);
+      if (!complete) {{
+        td.textContent += " *";
+        td.title = labels.md_partial;
       }}
     }}
-
+    async function poll() {{
+      const symbol = select.value;
+      if (!symbol || pendingSymbol === symbol) return;
+      const id = ++requestId;
+      pendingSymbol = symbol;
+      try {{
+        const response = await fetch("/api/market-data?symbol=" + encodeURIComponent(symbol), {{cache:"no-store", credentials:"same-origin"}});
+        if (id !== requestId || symbol !== select.value) return;
+        if (!response.ok) {{
+          if (response.status === 401 || response.status === 403) {{
+            clearInterval(timer);
+            throw new Error(labels.md_forbidden);
+          }}
+          throw new Error(labels.md_unavailable);
+        }}
+        const data = await response.json();
+        if (id !== requestId || symbol !== select.value) return;
+        if (data.symbol !== symbol || !Array.isArray(data.windows)) throw new Error(labels.md_unavailable);
+        rows.replaceChildren();
+        data.windows.forEach(window => {{
+          const row = rows.insertRow();
+          const label = document.createElement("th");
+          label.scope = "row"; label.style.textAlign = "left";
+          label.textContent = timestamp(window.start, data.timezone, true).replace(/:\d{{2}}$/, "")
+            + " – " + timestamp(window.end, data.timezone, false)
+            + (window.current ? " · " + labels.md_current : "");
+          row.appendChild(label);
+          cell(row, window.market_volume, window.market_complete, 0);
+          cell(row, window.bought, window.our_complete, 4);
+          cell(row, window.sold, window.our_complete, 4);
+          cell(row, window.gross, window.our_complete, 4);
+          cell(row, window.vwap_estimate, window.market_complete, 4);
+        }});
+        document.getElementById("md-trade-time").textContent = timestamp(data.last_trade.time, data.timezone, true);
+        document.getElementById("md-trade-quantity").textContent = number(data.last_trade.quantity, 4);
+        document.getElementById("md-trade-price").textContent = number(data.last_trade.price, 4);
+        error.textContent = data.quote_state !== "live" || data.order_feed !== "live" ? labels.md_feed_warning : "";
+        document.getElementById("md-updated").textContent = labels.md_updated + " " + timestamp(data.generated_at, data.timezone, true);
+      }} catch (reason) {{
+        if (id !== requestId || symbol !== select.value) return;
+        empty(labels.md_unavailable);
+        error.textContent = reason.message || labels.md_unavailable;
+      }} finally {{
+        if (id === requestId) pendingSymbol = null;
+      }}
+    }}
+    select.addEventListener("change", function() {{
+      empty(labels.md_loading); error.textContent = ""; poll();
+    }});
+    const timer = setInterval(poll, 5000);
     poll();
-    setInterval(poll, 5000); // 5s live update without full page refresh
   }})();
   </script>
 """
+
 
 
 def render_market_insights_page(lang: str, symbols: List[str], max_levels: int) -> str:

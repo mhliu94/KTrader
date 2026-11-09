@@ -35,7 +35,7 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
           window.addEventListener("unhandledrejection", event => uiErrors.push(String(event.reason)));
           window.fetch = async url => {
             if (url === "/api/accounts") return {ok: true, json: async () => ({accounts: []})};
-            if (url === "/api/market-data") return {ok: true, json: async () => ({rows: {}})};
+            if (url === "/api/quotes") return {ok: true, json: async () => ({rows: {}})};
             throw new Error("Unexpected fetch: " + url);
           };
           window.setInterval = () => 0;

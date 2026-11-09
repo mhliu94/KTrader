@@ -90,6 +90,25 @@ def load_config(path: str | Path) -> dict:
     if bool(server["ssl_certfile"]) != bool(server["ssl_keyfile"]):
         raise ValueError("Provide both order_ui.server.ssl_certfile and ssl_keyfile for HTTPS.")
 
+    kafka = load_kafka_config(shared, path)
+    reconciliation_sources = []
+    for mode, name in (("G", "smart_selling"), ("H", "smart_buying")):
+        raw = _object(shared.get(name, {}), name)
+        if "state_db" in raw:
+            state_db = path.parent / _string(raw["state_db"], f"{name}.state_db")
+        else:
+            state_db = Path(__file__).resolve().parents[1] / "logs" / f"{name}.sqlite3"
+        reconciliation_sources.append({"mode": mode, "state_db": str(state_db.resolve())})
+    return {"accounts": accounts, "users": users, "timezone": zone,
+            "refresh_interval_seconds": refresh, "server": server, "kafka": kafka,
+            "reconciliation_sources": reconciliation_sources,
+            "reporting_db_path": reporting_db_path(shared, path)}
+
+
+def load_kafka_config(shared, path):
+    """Shared order-feed connection settings for reporting consumers."""
+    path = Path(path).resolve()
+    settings = _object(shared.get("order_ui", {}), "order_ui")
     shared_kafka = _object(shared.get("kafka", {}), "kafka")
     kafka = _object(settings.get("kafka", {}), "order_ui.kafka")
     defaults = {
@@ -118,15 +137,4 @@ def load_config(path: str | Path) -> dict:
         if key.endswith(".location"):
             client_config[key] = str(path.parent / value)
     kafka["client_config"] = client_config
-    reconciliation_sources = []
-    for mode, name in (("G", "smart_selling"), ("H", "smart_buying")):
-        raw = _object(shared.get(name, {}), name)
-        if "state_db" in raw:
-            state_db = path.parent / _string(raw["state_db"], f"{name}.state_db")
-        else:
-            state_db = Path(__file__).resolve().parents[1] / "logs" / f"{name}.sqlite3"
-        reconciliation_sources.append({"mode": mode, "state_db": str(state_db.resolve())})
-    return {"accounts": accounts, "users": users, "timezone": zone,
-            "refresh_interval_seconds": refresh, "server": server, "kafka": kafka,
-            "reconciliation_sources": reconciliation_sources,
-            "reporting_db_path": reporting_db_path(shared, path)}
+    return kafka

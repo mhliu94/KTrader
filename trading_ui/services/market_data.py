@@ -32,6 +32,7 @@ class StockQuote:
     error: Optional[str] = None
     prev_close: Optional[float] = None
     volume: Optional[int] = None
+    last_size: Optional[int] = None
 
 
 def _quote_timestamp(value: object) -> float:
@@ -85,6 +86,9 @@ def stock_quote_from_payload(payload: dict) -> Optional[StockQuote]:
     volume = payload.get("volume")
     if isinstance(volume, int) and not isinstance(volume, bool) and volume >= 0:
         quote.volume = volume
+    last_size = payload.get("last_size")
+    if isinstance(last_size, int) and not isinstance(last_size, bool) and last_size >= 0:
+        quote.last_size = last_size
     return quote
 
 

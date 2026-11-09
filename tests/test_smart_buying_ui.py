@@ -26,7 +26,7 @@ def test_buying_modal_submits_once_with_cash_account_price_and_urgency(lang, tmp
       if (url === '/api/accounts') return {ok: true, json: async () => ({accounts: [
         {account_id:'A', cash_by_currency:{USD:10000}}
       ]})};
-      if (url === '/api/market-data') return {ok:true,json:async()=>({rows:{}})};
+      if (url === '/api/quotes') return {ok:true,json:async()=>({rows:{}})};
       if (options.method !== 'POST') return {ok:true,json:async()=>({ok:true, parents:url.includes('buying')?parents:[]})};
       posts.push({url, payload:options.body ? JSON.parse(options.body):null});
       if (url.endsWith('/stop')) { parents[0].state='STOPPING'; return {ok:true,json:async()=>({ok:true})}; }

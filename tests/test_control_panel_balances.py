@@ -79,7 +79,7 @@ class ControlPanelBalanceBrowserTests(unittest.TestCase):
               if (failAccounts) throw new Error("offline");
               return {ok: true, json: async () => structuredClone(accountData)};
             }
-            if (url === "/api/market-data") return {ok: true, json: async () => structuredClone(quoteData)};
+            if (url === "/api/quotes") return {ok: true, json: async () => structuredClone(quoteData)};
             throw new Error("Unexpected fetch: " + url);
           };
           window.refreshCallbacks = [];

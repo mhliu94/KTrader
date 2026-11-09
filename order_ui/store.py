@@ -33,6 +33,10 @@ class OrderStore:
     def received(self):
         self.update_feed(last_message_at=self._now().isoformat())
 
+    def feed_status(self):
+        with self._lock:
+            return dict(self._feed)
+
     def reject_message(self):
         with self._lock:
             self._feed["invalid_messages"] += 1

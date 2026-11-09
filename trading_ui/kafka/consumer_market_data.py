@@ -22,7 +22,8 @@ def parse_market_data_message(raw: bytes):
 
 
 class PriceBookConsumer:
-    def __init__(self, kafka_cfg: Dict[str, Any], store: MarketDataStore, payload_callback=None, health_callback=None) -> None:
+    def __init__(self, kafka_cfg: Dict[str, Any], store: MarketDataStore, payload_callback=None, health_callback=None,
+                 quote_callback=None, quote_history_seconds=0) -> None:
         self._kafka_cfg = kafka_cfg
         self._store = store
         self._thread: Optional[threading.Thread] = None
@@ -30,6 +31,8 @@ class PriceBookConsumer:
         self._consumer: Optional[Consumer] = None
         self._payload_callback = payload_callback
         self._health_callback = health_callback
+        self._quote_callback = quote_callback
+        self._quote_history_seconds = quote_history_seconds
 
     def start(self) -> None:
         bootstrap_servers = self._kafka_cfg.get("market_data_bootstrap_servers", self._kafka_cfg["bootstrap_servers"])
@@ -102,6 +105,11 @@ class PriceBookConsumer:
             quote = stock_quote_from_payload(payload)
             if quote is not None:
                 self._store.upsert_stock_quote(quote)
+                if self._quote_callback:
+                    try:
+                        self._quote_callback(quote)
+                    except Exception:
+                        LOGGER.exception("Could not persist market quote history")
             return
         if topic != self._kafka_cfg["market_data_topic"]:
             return
@@ -125,6 +133,16 @@ class PriceBookConsumer:
     def _on_assign(self, consumer: Consumer, partitions: list[TopicPartition]) -> None:
         replay_records = int(self._kafka_cfg.get("market_data_replay_records", 100))
         for partition in partitions:
+            if self._quote_history_seconds and partition.topic == self._kafka_cfg.get("stock_quotes_topic", "stock-quotes"):
+                timestamp = int((time.time() - self._quote_history_seconds) * 1000)
+                try:
+                    offsets = consumer.offsets_for_times(
+                        [TopicPartition(partition.topic, partition.partition, timestamp)], timeout=5.0)
+                    if offsets and offsets[0].error is None:
+                        partition.offset = offsets[0].offset if offsets[0].offset >= 0 else OFFSET_END
+                        continue
+                except KafkaException:
+                    LOGGER.warning("Quote history offsets unavailable; falling back to bounded recent replay")
             # These records are complete snapshots. Bound the warm-up on every
             # assignment, including restarts and rebalances, regardless of commits.
             partition.offset = OFFSET_END

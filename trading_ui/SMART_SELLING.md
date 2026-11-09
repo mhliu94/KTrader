@@ -180,6 +180,32 @@ A scheduled session, or a session still reconciling a stop, keeps its accounts. 
 the session that owns an account and allow its outstanding orders to resolve before
 using that account in another session; other accounts can start a session right away.
 
+If a broker publisher omits both `command_id` and `client_order_id`, even a filled
+order can leave a stopped session waiting for reconciliation. The publisher must
+echo one of these identifiers to prevent this. Do not remove the account lock or
+infer ownership automatically from matching price, quantity, or timestamps.
+
+For a reviewed client-to-broker order mapping, an operator can preview a repair:
+
+```sh
+python -m trading_ui.reconcile_smart_selling \
+  --state-db logs/smart_selling.sqlite3 \
+  --feedback-db logs/smart_selling.sqlite3.feedback.sqlite3 \
+  --client-order-id smart-REVIEWED-CLIENT-ID \
+  --snapshot-file /path/to/terminal-snapshot.json \
+  --source 'Reviewed Kafka order-status partition and offset, plus command evidence'
+```
+
+Back up both databases before adding `--apply`. The utility requires a stopped
+session, a dispatched outstanding child, matching account and order attributes,
+and a terminal snapshot matching the latest durable broker feedback. It rejects
+conflicting broker bindings and newer feedback. It uses the normal ledger
+transition, records the original evidence in `smart_events`, and releases the
+resolved session atomically. It never publishes commands, replays the outbox,
+restarts the server, or resumes a session. The live server reads the repaired
+state on its next status check. The utility repairs this specific recorded state;
+the broker publisher still needs to preserve correlation IDs for future orders.
+
 Manual order instructions, including cancellations and orders for other symbols,
 are rejected for accounts owned by an algorithm session. Other accounts remain
 available for manual trading. External systems must honor this ownership too:

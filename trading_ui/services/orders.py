@@ -1,14 +1,57 @@
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, Optional, Tuple, List
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from ..models import AccountMeta
 
 
 FAST_TRADING_TARGET_PERCENTAGE_CHOICES = (*range(10, 101, 10), 120, 150)
 FAST_TRADING_TOTAL_TARGET_POSITION_ERROR = "Enter a whole number of shares (0 or more), or leave blank."
+BROKER_ORDERS_TIMEZONE = "America/New_York"
+
+
+def broker_orders_today() -> date:
+    return datetime.now(ZoneInfo(BROKER_ORDERS_TIMEZONE)).date()
+
+
+def validate_broker_orders_inputs(
+    trading_date_raw: str,
+    account_ids: List[str],
+    account_metas: Dict[str, AccountMeta],
+    invalid_date: str,
+    future_date: str,
+    invalid_account: str,
+    accounts_required: str,
+) -> Tuple[Optional[Dict], Optional[str]]:
+    """Build one read-only, multi-account request; resolve UI-only All selection."""
+    try:
+        trading_date = date.fromisoformat(trading_date_raw)
+        if trading_date.isoformat() != trading_date_raw:
+            return None, invalid_date
+    except (ValueError, TypeError):
+        return None, invalid_date
+    if trading_date > broker_orders_today():
+        return None, future_date
+    if not account_ids:
+        return None, accounts_required
+    if any(aid != "__ALL__" and aid not in account_metas for aid in account_ids):
+        return None, invalid_account
+    selected = set(account_metas) if "__ALL__" in account_ids else set(account_ids)
+    if not selected:
+        return None, accounts_required
+    selected = sorted(selected, key=lambda aid: (account_metas[aid].num_id, aid))
+    return {
+        "type": "GET_BROKER_ORDERS",
+        "command_id": f"broker_orders_{uuid4().hex}",
+        "ts": iso_utc_now(),
+        "trading_date": trading_date.isoformat(),
+        "timezone": BROKER_ORDERS_TIMEZONE,
+        "account_ids": selected,
+    }, None
 
 
 def iso_utc_now() -> str:

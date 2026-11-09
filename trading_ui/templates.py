@@ -67,7 +67,7 @@ def render_layout(
     inner_html: str,
     flash: str = "",
     current_user: str = "",
-    can_convert_currency: bool = False,
+    can_access_admin_control: bool = False,
     can_manage_trading: bool = False,
 ) -> str:
     next_path = f"/{active_tab}"
@@ -76,7 +76,7 @@ def render_layout(
     tab2_cls = "tab active" if active_tab == "control-panel" else "tab"
     tab3_cls = "tab active" if active_tab == "market-data" else "tab"
     tab4_cls = "tab active" if active_tab == "market-insights" else "tab"
-    tab5_cls = "tab active" if active_tab == "currency-conversion" else "tab"
+    tab5_cls = "tab active" if active_tab == "admin-control" else "tab"
     tab6_cls = "tab active" if active_tab == "trading-status" else "tab"
 
     flash_html = ""
@@ -90,11 +90,11 @@ def render_layout(
     )
 
 
-    conversion_tab_html = ""
-    if can_convert_currency:
-        conversion_tab_html = (
-            f'<a class="{tab5_cls}" href="/currency-conversion">'
-            f'{html_escape(t(lang,"currency_conversion"))}</a>'
+    admin_control_tab_html = ""
+    if can_access_admin_control:
+        admin_control_tab_html = (
+            f'<a class="{tab5_cls}" href="/admin-control">'
+            f'{html_escape(t(lang,"admin_control"))}</a>'
         )
 
     trading_status_tab_html = ""
@@ -314,7 +314,7 @@ def render_layout(
     <a class="{tab2_cls}" href="/control-panel">{html_escape(t(lang,"tab_control"))}</a>
     <a class="{tab3_cls}" href="/market-data">{html_escape(t(lang,"tab_market"))}</a>
     <a class="{tab4_cls}" href="/market-insights">{html_escape(t(lang,"tab_insights"))}</a>
-    {conversion_tab_html}
+    {admin_control_tab_html}
     {trading_status_tab_html}
   </div>
 
@@ -1256,148 +1256,87 @@ def render_login_page(lang: str, next_path: str, error: str = "") -> str:
 """
 
 
-def _currency_conversion_account_options(account_metas: Dict[str, AccountMeta]) -> str:
-    sorted_account_ids = sorted(account_metas.keys(), key=lambda aid: account_metas[aid].num_id)
-    tiger_account_ids = [aid for aid in sorted_account_ids if account_metas[aid].broker.strip().lower() == "tiger"]
-    conversion_account_ids = tiger_account_ids or sorted_account_ids
-    return "\n".join(
-        (
-            f"<option value='{html_escape(aid)}'>"
-            f"#{account_metas[aid].num_id} {html_escape(aid)} ({html_escape(account_metas[aid].broker)})"
-            "</option>"
-        )
-        for aid in conversion_account_ids
-    )
-
-
-def _render_currency_conversion_panel(lang: str, account_metas: Dict[str, AccountMeta], error: str = "", ok: str = "") -> str:
-    conversion_account_opts = _currency_conversion_account_options(account_metas)
-    msg = ""
-    if error:
-        msg = f"<div class='warn'>{html_escape(error)}</div>"
-    elif ok:
-        msg = f"<div class='help'>{html_escape(ok)}</div>"
-
-    return f"""
-  <section class="card control-panel-section currency-conversion-panel">
-    <div class="hdr">
-      <div class="acct">{html_escape(t(lang,'currency_conversion'))}</div>
-      <div class="ts">USD/HKD</div>
-    </div>
-
-    {msg}
-
-    <form method="post" action="/submit-currency-conversion" id="currency-conversion-form">
-      <div>
-        <label for="conversion_account_id">{html_escape(t(lang,'account'))}</label>
-        <select id="conversion_account_id" name="account_id" required>
-          {conversion_account_opts}
-        </select>
-      </div>
-
-      <div class="row">
-        <div>
-          <label for="source_currency">{html_escape(t(lang,'source_currency'))}</label>
-          <select id="source_currency" name="source_currency" required>
-            <option value="HKD">HKD</option>
-            <option value="USD">USD</option>
-          </select>
-        </div>
-        <div>
-          <label for="target_currency">{html_escape(t(lang,'target_currency'))}</label>
-          <select id="target_currency" name="target_currency" required>
-            <option value="USD">USD</option>
-            <option value="HKD">HKD</option>
-          </select>
-        </div>
-      </div>
-
-      <div>
-        <label for="source_amount">{html_escape(t(lang,'source_amount'))}</label>
-        <input id="source_amount" name="source_amount" placeholder="2000" inputmode="decimal" required />
-      </div>
-
-      <div class="help">
-        {html_escape(t(lang,'conversion_balances'))}: <b id="conversion-balances">-</b>
-      </div>
-      <div class="help">{html_escape(t(lang,'conversion_help'))}</div>
-
-      <button class="btn btn-blue" type="submit">{html_escape(t(lang,'submit_conversion'))}</button>
-    </form>
-  </section>
-"""
-
-
-def _render_currency_conversion_script() -> str:
-    return """
-    <script>
-      (function(){
-        const form = document.getElementById("currency-conversion-form");
-        if (!form) return;
-        const accountEl = document.getElementById("conversion_account_id");
-        const sourceEl = document.getElementById("source_currency");
-        const targetEl = document.getElementById("target_currency");
-        const balancesEl = document.getElementById("conversion-balances");
-        let accountsCache = null;
-
-        function fmtCurrency(currency, value) {
-          const n = Number(value || 0);
-          if (!isFinite(n)) return currency + " -";
-          return currency + " " + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        }
-
-        function keepOppositeCurrency(changedEl) {
-          if (!sourceEl || !targetEl || sourceEl.value !== targetEl.value) return;
-          if (changedEl === sourceEl) {
-            targetEl.value = sourceEl.value === "HKD" ? "USD" : "HKD";
-          } else {
-            sourceEl.value = targetEl.value === "HKD" ? "USD" : "HKD";
-          }
-        }
-
-        function renderBalances() {
-          if (!balancesEl) return;
-          const accounts = accountsCache && Array.isArray(accountsCache.accounts) ? accountsCache.accounts : [];
-          const account = accounts.find((row) => row.account_id === (accountEl ? accountEl.value : ""));
-          const cash = account && account.cash_by_currency ? account.cash_by_currency : {};
-          balancesEl.textContent = [fmtCurrency("USD", cash.USD), fmtCurrency("HKD", cash.HKD)].join(" | ");
-        }
-
-        async function refreshBalances() {
-          try {
-            const resp = await fetch("/api/accounts", { cache: "no-store" });
-            if (resp.ok) accountsCache = await resp.json();
-          } catch (e) {
-            // ignore transient errors
-          }
-          renderBalances();
-        }
-
-        if (accountEl) accountEl.addEventListener("change", renderBalances);
-        if (sourceEl) sourceEl.addEventListener("change", function(){ keepOppositeCurrency(sourceEl); });
-        if (targetEl) targetEl.addEventListener("change", function(){ keepOppositeCurrency(targetEl); });
-
-        refreshBalances();
-        setInterval(refreshBalances, 5000);
-      })();
-    </script>
-"""
-
-
-def render_currency_conversion_page(
+def render_admin_control_page(
     lang: str,
     account_metas: Dict[str, AccountMeta],
+    today: str,
+    trading_date: str | None = None,
+    selected_accounts: List[str] | None = None,
     error: str = "",
     ok: str = "",
 ) -> str:
+    selected = set(["__ALL__"] if selected_accounts is None else selected_accounts)
+    account_choices = []
+    for idx, aid in enumerate(sorted(account_metas, key=lambda aid: (account_metas[aid].num_id, aid)), 1):
+        meta = account_metas[aid]
+        checked = " checked" if aid in selected and "__ALL__" not in selected else ""
+        account_choices.append(
+            f'<input class="choice-input" type="checkbox" id="broker-orders-acct-{idx}" '
+            f'name="account_ids" value="{html_escape(aid)}" data-broker-orders-account{checked}>'
+            f'<label class="choice-btn" for="broker-orders-acct-{idx}" '
+            f'title="{html_escape(_account_server_title(meta))}">'
+            f'{html_escape(_account_label(meta))} ({html_escape(meta.broker)})</label>'
+        )
+    msg = (f'<div class="warn" role="alert">{html_escape(error)}</div>' if error
+           else f'<div class="help" role="status">{html_escape(ok)}</div>' if ok else "")
+    all_checked = " checked" if "__ALL__" in selected else ""
+    disabled = " disabled" if not account_metas else ""
     return f"""
-  <div class="control-panel-grid currency-conversion-grid">
-    <div class="control-panel-column">
-      {_render_currency_conversion_panel(lang, account_metas, error=error, ok=ok)}
+  <section class="card control-panel-section" style="max-width: 960px;">
+    <div class="hdr">
+      <div class="acct">{html_escape(t(lang,'broker_orders_title'))}</div>
     </div>
-  </div>
-
-  {_render_currency_conversion_script()}
+    {msg}
+    <form method="post" action="/submit-broker-orders" id="broker-orders-form">
+      <div>
+        <label for="broker-orders-date">{html_escape(t(lang,'broker_orders_date'))}</label>
+        <input id="broker-orders-date" name="trading_date" type="date"
+          value="{html_escape(today if trading_date is None else trading_date)}" max="{html_escape(today)}" required>
+      </div>
+      <div class="help">{html_escape(t(lang,'broker_orders_help'))}</div>
+      <fieldset style="border: 0; padding: 0; margin: 0;">
+        <legend>{html_escape(t(lang,'quick_accounts'))}</legend>
+        <div class="choice-grid" style="margin-top: 8px;">
+          <input class="choice-input" type="checkbox" id="broker-orders-all" name="account_ids"
+            value="__ALL__"{all_checked}>
+          <label class="choice-btn" for="broker-orders-all">{html_escape(t(lang,'all_accounts'))}</label>
+          {''.join(account_choices)}
+        </div>
+      </fieldset>
+      <button class="btn btn-blue" type="submit"{disabled}>{html_escape(t(lang,'broker_orders_submit'))}</button>
+    </form>
+  </section>
+  <script>
+    (function() {{
+      const form = document.getElementById("broker-orders-form");
+      const all = document.getElementById("broker-orders-all");
+      const accounts = Array.from(form.querySelectorAll("[data-broker-orders-account]"));
+      const submit = form.querySelector("button[type='submit']");
+      function updateSubmit() {{
+        submit.disabled = !accounts.length || (!all.checked && !accounts.some(input => input.checked));
+      }}
+      all.addEventListener("change", function() {{
+        if (all.checked) accounts.forEach(input => {{ input.checked = false; }});
+        updateSubmit();
+      }});
+      accounts.forEach(function(input) {{
+        input.addEventListener("change", function() {{
+          if (input.checked) all.checked = false;
+          updateSubmit();
+        }});
+      }});
+      form.addEventListener("submit", function(event) {{
+        if (!all.checked && !accounts.some(input => input.checked)) {{
+          event.preventDefault();
+          updateSubmit();
+          return;
+        }}
+        submit.disabled = true;
+      }});
+      window.addEventListener("pageshow", updateSubmit);
+      updateSubmit();
+    }})();
+  </script>
 """
 
 

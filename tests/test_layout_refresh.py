@@ -11,7 +11,7 @@ class LayoutRefreshTests(unittest.TestCase):
             "control-panel",
             "market-data",
             "market-insights",
-            "currency-conversion",
+            "admin-control",
             "trading-status",
         ):
             with self.subTest(tab=tab):

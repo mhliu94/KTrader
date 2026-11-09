@@ -26,7 +26,7 @@ from .templates import (
     render_layout,
     render_account_details_page,
     render_control_panel_page,
-    render_currency_conversion_page,
+    render_admin_control_page,
     render_live_account_details_page,
     render_login_page,
     resolve_account_sort,
@@ -43,7 +43,8 @@ from .services.orders import (
     validate_algo_start_inputs,
     algo_account_conflict_error,
     build_algo_stop_command,
-    validate_currency_conversion_inputs,
+    broker_orders_today,
+    validate_broker_orders_inputs,
     validate_trading_status_inputs,
 )
 from .services.fast_trading import FastTradingStrategyManager
@@ -259,8 +260,8 @@ def _has_lmh_feature_access(user: str | None) -> bool:
     return str(user or "").strip() == "lmh"
 
 
-def _can_convert_currency(user: str | None) -> bool:
-    return _has_lmh_feature_access(user)
+def _can_access_admin_control(user: str | None) -> bool:
+    return user == "lmh"
 
 
 def _can_manage_trading(user: str | None) -> bool:
@@ -543,7 +544,7 @@ def account_details(
     )
     account_content = _render_account_details_content(lang, effective_sort, selected_security)
     inner = render_live_account_details_page(account_content, lang=lang, symbols=configured_symbols)
-    response = HTMLResponse(render_layout(lang, "account-details", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
+    response = HTMLResponse(render_layout(lang, "account-details", inner, current_user=(user or ""), can_access_admin_control=_can_access_admin_control(user), can_manage_trading=_can_manage_trading(user)))
     secure_cookie = bool(APP_CONFIG.get("server", {}).get("ssl_enabled", False))
     response.set_cookie(
         ACCOUNT_SORT_COOKIE,
@@ -577,26 +578,26 @@ def control_panel(request: Request, ok: str | None = None, err: str | None = Non
         error=(err or ""),
         ok=(ok or ""),
     )
-    return HTMLResponse(render_layout(lang, "control-panel", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
+    return HTMLResponse(render_layout(lang, "control-panel", inner, current_user=(user or ""), can_access_admin_control=_can_access_admin_control(user), can_manage_trading=_can_manage_trading(user)))
 
 
-@app.get("/currency-conversion", response_class=HTMLResponse)
-def currency_conversion(request: Request, ok: str | None = None, err: str | None = None) -> HTMLResponse:
+def _admin_control_response(lang: str, user: str, *, status_code: int = 200, **form) -> HTMLResponse:
+    inner = render_admin_control_page(lang, ACCOUNT_METAS, today=broker_orders_today().isoformat(), **form)
+    return HTMLResponse(render_layout(
+        lang, "admin-control", inner, current_user=user,
+        can_access_admin_control=True, can_manage_trading=_can_manage_trading(user),
+    ), status_code=status_code)
+
+
+@app.get("/admin-control", response_class=HTMLResponse)
+def admin_control(request: Request, ok: str | None = None) -> HTMLResponse:
     user, gate = _require_auth_page(request)
     if gate is not None:
         return gate
     lang = resolve_lang(request)
-    if not _can_convert_currency(user):
-        return RedirectResponse(url=f"/control-panel?err={quote(t(lang, 'conversion_forbidden'))}", status_code=303)
-    inner = render_currency_conversion_page(lang, ACCOUNT_METAS, error=(err or ""), ok=(ok or ""))
-    return HTMLResponse(render_layout(
-        lang,
-        "currency-conversion",
-        inner,
-        current_user=(user or ""),
-        can_convert_currency=True,
-        can_manage_trading=True,
-    ))
+    if not _can_access_admin_control(user):
+        return HTMLResponse(t(lang, "admin_control_forbidden"), status_code=403)
+    return _admin_control_response(lang, user, ok=(ok or ""))
 
 
 @app.get("/trading-status", response_class=HTMLResponse)
@@ -614,7 +615,7 @@ def trading_status(request: Request, ok: str | None = None, err: str | None = No
         "trading-status",
         inner,
         current_user=(user or ""),
-        can_convert_currency=True,
+        can_access_admin_control=_can_access_admin_control(user),
         can_manage_trading=True,
     ))
 
@@ -830,43 +831,41 @@ async def submit_cancel_open_orders(request: Request):
     return RedirectResponse(url=f"/control-panel?ok={quote(ok)}", status_code=303)
 
 
-@app.post("/submit-currency-conversion")
-def submit_currency_conversion(
-    request: Request,
-    account_id: str = Form(...),
-    source_currency: str = Form(...),
-    target_currency: str = Form(...),
-    source_amount: str = Form(...),
-):
+@app.post("/submit-broker-orders")
+async def submit_broker_orders(request: Request):
     user, gate = _require_auth_page(request)
     if gate is not None:
         return gate
     lang = resolve_lang(request)
-    if not _can_convert_currency(user):
-        return RedirectResponse(url=f"/control-panel?err={quote(t(lang, 'conversion_forbidden'))}", status_code=303)
-
-    cmd, err = validate_currency_conversion_inputs(
-        account_id=account_id,
-        source_currency_raw=source_currency,
-        target_currency_raw=target_currency,
-        source_amount_raw=source_amount,
+    if not _can_access_admin_control(user):
+        return HTMLResponse(t(lang, "admin_control_forbidden"), status_code=403)
+    form = await request.form()
+    trading_date = str(form.get("trading_date", ""))
+    account_ids = [str(value) for value in form.getlist("account_ids")]
+    cmd, err = validate_broker_orders_inputs(
+        trading_date_raw=trading_date,
+        account_ids=account_ids,
         account_metas=ACCOUNT_METAS,
+        invalid_date=t(lang, "broker_orders_invalid_date"),
+        future_date=t(lang, "broker_orders_future_date"),
         invalid_account=t(lang, "invalid_account"),
-        invalid_currency=t(lang, "invalid_currency_pair"),
-        same_currency=t(lang, "same_currency"),
-        amount_positive=t(lang, "conversion_amount_positive"),
+        accounts_required=t(lang, "quick_pick_account"),
     )
-
     if err:
-        return RedirectResponse(url=f"/currency-conversion?err={quote(err)}", status_code=303)
-
+        return _admin_control_response(lang, user, status_code=400, error=err,
+                                       trading_date=trading_date, selected_accounts=account_ids)
     try:
-        assert COMMANDS_PRODUCER is not None and cmd is not None
-        _publish_control_command(cmd, key=cmd.get("account_id", "CURRENCY_CONVERSION"))
-        ok = f"{t(lang,'conversion_submitted')} {t(lang,'published_cmd')}={cmd['command_id']}"
-        return RedirectResponse(url=f"/currency-conversion?ok={quote(ok)}", status_code=303)
-    except Exception as e:
-        return RedirectResponse(url=f"/currency-conversion?err={quote(str(e))}", status_code=303)
+        if COMMANDS_PRODUCER is None:
+            raise RuntimeError("Trading command producer unavailable")
+        _publish_control_command(cmd, key="GET_BROKER_ORDERS")
+    except Exception:
+        LOGGER.exception("Failed to queue broker order history request")
+        return _admin_control_response(lang, user, status_code=503,
+                                       error=t(lang, "broker_orders_publish_failed"),
+                                       trading_date=trading_date, selected_accounts=account_ids)
+    ok = t(lang, "broker_orders_queued").format(date=cmd["trading_date"], count=len(cmd["account_ids"]))
+    ok += f" {t(lang, 'published_cmd')}={cmd['command_id']}"
+    return RedirectResponse(url=f"/admin-control?ok={quote(ok)}", status_code=303)
 
 
 @app.post("/submit-trading-status")
@@ -1423,11 +1422,6 @@ def submit_cancel_open_orders_get() -> RedirectResponse:
     return RedirectResponse(url="/control-panel", status_code=302)
 
 
-@app.get("/submit-currency-conversion")
-def submit_currency_conversion_get() -> RedirectResponse:
-    return RedirectResponse(url="/currency-conversion", status_code=302)
-
-
 @app.get("/submit-trading-status")
 def submit_trading_status_get() -> RedirectResponse:
     return RedirectResponse(url="/trading-status", status_code=302)
@@ -1445,7 +1439,7 @@ def market_data(request: Request) -> HTMLResponse:
         return gate
     lang = resolve_lang(request)
     inner = render_market_data_page(lang=lang, symbols=_market_data_symbols())
-    return HTMLResponse(render_layout(lang, "market-data", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
+    return HTMLResponse(render_layout(lang, "market-data", inner, current_user=(user or ""), can_access_admin_control=_can_access_admin_control(user), can_manage_trading=_can_manage_trading(user)))
 
 
 @app.get("/market-insights", response_class=HTMLResponse)
@@ -1460,7 +1454,7 @@ def market_insights(request: Request) -> HTMLResponse:
         symbols=_market_insights_symbols(),
         max_levels=max_levels,
     )
-    return HTMLResponse(render_layout(lang, "market-insights", inner, current_user=(user or ""), can_convert_currency=_can_convert_currency(user), can_manage_trading=_can_manage_trading(user)))
+    return HTMLResponse(render_layout(lang, "market-insights", inner, current_user=(user or ""), can_access_admin_control=_can_access_admin_control(user), can_manage_trading=_can_manage_trading(user)))
 
 
 @app.get("/api/market-data")

@@ -291,7 +291,7 @@ def render_layout(
       .portfolio-card .ts {{ max-width:none; text-align:left; }}
       .portfolio-cash {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); }}
       .cash-total {{ min-width:0; }}
-      .portfolio-market-value {{ grid-column:1 / -1; }}
+      .portfolio-market-value, .portfolio-cost-basis {{ grid-column:1 / -1; }}
       .modal-actions {{ justify-content:stretch; }}
       .modal-actions .btn {{ width:100%; }}
     }}
@@ -375,6 +375,7 @@ def _aggregate_portfolio(
                     "qty": 0.0,
                     "priced_value": 0.0,
                     "priced_qty": 0.0,
+                    "cost_basis": 0.0,
                     "all_priced": True,
                     "directions": set(),
                     "account_count": 0,
@@ -392,6 +393,7 @@ def _aggregate_portfolio(
                 abs_qty = abs(qty)
                 aggregate["priced_qty"] += abs_qty
                 aggregate["priced_value"] += abs_qty * float(position.avg_price)
+                aggregate["cost_basis"] += qty * float(position.avg_price)
 
             if symbol not in symbols_seen:
                 aggregate["account_count"] += 1
@@ -411,6 +413,11 @@ def _aggregate_portfolio(
                 "symbol": aggregate["symbol"],
                 "qty": aggregate["qty"],
                 "avg_price": avg_price,
+                "cost_basis": (
+                    aggregate["cost_basis"]
+                    if aggregate["all_priced"] and math.isfinite(aggregate["cost_basis"])
+                    else None
+                ),
                 "account_count": aggregate["account_count"],
             }
         )
@@ -529,6 +536,8 @@ def render_account_details_page(
 
     portfolio_position_rows = []
     total_market_value = 0.0
+    total_cost_basis = 0.0
+    cost_basis_available = True
     for position in portfolio["positions"]:
         avg_price = position["avg_price"]
         quote = (quotes or {}).get(position["symbol"])
@@ -540,6 +549,11 @@ def render_account_details_page(
             market_value = None
         if market_value is not None:
             total_market_value += market_value
+            # Use exactly the holdings included in the market value total.
+            if position["cost_basis"] is None:
+                cost_basis_available = False
+            else:
+                total_cost_basis += position["cost_basis"]
         portfolio_position_rows.append(
             "<tr>"
             f"<td><b>{html_escape(position['symbol'])}</b></td>"
@@ -550,6 +564,10 @@ def render_account_details_page(
             f"<td style='text-align:right'>{position['account_count']:,}</td>"
             "</tr>"
         )
+
+    cost_basis_available = cost_basis_available and math.isfinite(total_cost_basis)
+    cost_basis_text = f"{total_cost_basis:,.2f}" if cost_basis_available else "--"
+    cost_basis_help = "portfolio_total_cost_basis_help" if cost_basis_available else "portfolio_cost_basis_unavailable"
 
     coverage_note = (
         f"{html_escape(t(lang, 'snapshot_coverage'))}: "
@@ -573,6 +591,11 @@ def render_account_details_page(
         f"<div class='cash-total-label'>{html_escape(t(lang, 'portfolio_total_market_value'))}</div>"
         f"<div class='cash-total-value' id='portfolio-market-value-total'>{total_market_value:,.2f}</div>"
         f"<div class='portfolio-note'>{html_escape(t(lang, 'portfolio_total_market_value_help'))}</div>"
+        "</div>"
+        "<div class='cash-total portfolio-cost-basis'>"
+        f"<div class='cash-total-label'>{html_escape(t(lang, 'portfolio_total_cost_basis'))}</div>"
+        f"<div class='cash-total-value' id='portfolio-cost-basis-total'>{cost_basis_text}</div>"
+        f"<div class='portfolio-note'>{html_escape(t(lang, cost_basis_help))}</div>"
         "</div></div>"
         f"<div class='section-heading'>{html_escape(t(lang, 'positions'))}</div>"
         "<div class='table-scroll'><table class='pos'>"

@@ -73,7 +73,7 @@ class AccountLiveUpdateTests(unittest.TestCase):
                     account_id="A",
                     cash=100,
                     cash_by_currency={"USD": 100},
-                    positions=[Position("TSLA", 5)],
+                    positions=[Position("TSLA", 5, 100)],
                 )
             )
             events = webserver._account_details_event_stream("en", ACCOUNT_SORT_NUMERIC_ID, "TSLA")
@@ -84,7 +84,7 @@ class AccountLiveUpdateTests(unittest.TestCase):
                         account_id="A",
                         cash=250,
                         cash_by_currency={"USD": 250},
-                        positions=[Position("TSLA", 8)],
+                        positions=[Position("TSLA", 8, 110)],
                     )
                 )
                 updated = event_payload(await asyncio.wait_for(anext(events), timeout=1.0))
@@ -96,9 +96,11 @@ class AccountLiveUpdateTests(unittest.TestCase):
         self.assertIn("$100.00", first["html"])
         self.assertIn("5.00", first["html"])
         self.assertIn("id='portfolio-market-value-total'>625.00</div>", first["html"])
+        self.assertIn("id='portfolio-cost-basis-total'>500.00</div>", first["html"])
         self.assertIn("$250.00", updated["html"])
         self.assertIn("8.00", updated["html"])
         self.assertIn("id='portfolio-market-value-total'>1,000.00</div>", updated["html"])
+        self.assertIn("id='portfolio-cost-basis-total'>880.00</div>", updated["html"])
         self.assertIn("data-account-order='market'", updated["html"])
         self.assertIn("data-account-order='limit'", updated["html"])
         self.assertNotEqual(first["html"], updated["html"])
@@ -134,13 +136,17 @@ class AccountLiveUpdateTests(unittest.TestCase):
                 first = event_payload(await anext(events))
                 update_quote(125, 1_700_000_005)
                 updated = event_payload(await asyncio.wait_for(anext(events), timeout=1.0))
+                update_quote(None, 1_700_000_010)
+                unpriced = event_payload(await asyncio.wait_for(anext(events), timeout=1.0))
+                update_quote(120, 1_700_000_015)
+                recovered = event_payload(await asyncio.wait_for(anext(events), timeout=1.0))
                 heartbeat = await asyncio.wait_for(anext(events), timeout=1.0)
-                return first, updated, heartbeat
+                return first, updated, unpriced, recovered, heartbeat
             finally:
                 await events.aclose()
 
         with patch.object(webserver, "ACCOUNT_DETAILS_QUOTE_REFRESH_SECONDS", 0.01):
-            first, updated, heartbeat = asyncio.run(exercise_stream())
+            first, updated, unpriced, recovered, heartbeat = asyncio.run(exercise_stream())
 
         self.assertIn("100.0000", first["html"])
         self.assertIn("1,000.00", first["html"])
@@ -148,6 +154,11 @@ class AccountLiveUpdateTests(unittest.TestCase):
         self.assertIn("125.0000", updated["html"])
         self.assertIn("1,250.00", updated["html"])
         self.assertIn("id='portfolio-market-value-total'>1,250.00</div>", updated["html"])
+        for payload in (first, updated, recovered):
+            self.assertIn("id='portfolio-cost-basis-total'>900.00</div>", payload["html"])
+        self.assertIn("id='portfolio-market-value-total'>0.00</div>", unpriced["html"])
+        self.assertIn("id='portfolio-cost-basis-total'>0.00</div>", unpriced["html"])
+        self.assertIn("id='portfolio-market-value-total'>1,200.00</div>", recovered["html"])
         self.assertEqual(heartbeat, ": keep-alive\n\n")
 
     def test_stream_route_requires_auth_and_disables_proxy_buffering(self):

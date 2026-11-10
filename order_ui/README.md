@@ -167,11 +167,20 @@ inspect the latest document without changing it:
 sqlite3 reports/activity.sqlite3 'SELECT payload FROM system_snapshots ORDER BY id DESC LIMIT 1;'
 ```
 
-The **Algo sessions** tab shows fast trading (E/F) and Smart selling (G) sessions,
-the original starting parameters (excluding proprietary participation settings),
+The **Algo sessions** tab lists fast trading (E/F), Smart selling (G), and Smart
+buying (H) sessions in a newest-first table. Search by symbol, session ID, account,
+or date, and filter by status. It shows 20 sessions per page by default, with
+10/20/50 rows and Previous / Next controls. Filters reset to page one; polling
+and language changes preserve the page and selected session. Select **View details**
+to inspect the original starting parameters (excluding proprietary participation settings),
 lifecycle status, each selected account
 (including accounts with no executions), and aggregate shares bought/sold and
-signed cash change. Child commands are correlated with confirmed order snapshots;
+signed cash change. The details table also shows quantity-weighted average buy
+and sell prices for each account and for all accounts, separately by currency:
+executed buy cost / bought shares and sell proceeds / sold shares. A side with
+no fills displays —; missing fill prices or currency leave its average unavailable
+instead of calculating from a partial subset. Child commands are correlated with
+confirmed order snapshots;
 requested quantities and test-mode commands do not count as executions. Completed
 sessions remain available. A missing heartbeat for over 90 seconds shows an
 unknown status instead of claiming that the session is still running. Smart

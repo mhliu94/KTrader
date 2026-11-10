@@ -70,12 +70,14 @@ def test_cumulative_fills_replace_duplicates_reordering_and_corrections(reportin
     total = tag_report(reporting, accounts, tag)["totals"]
     assert total["shares_bought"] == 6
     assert total["cash_by_currency"]["USD"]["buy_cost"] == 660
+    assert total["cash_by_currency"]["USD"]["average_buy_price"] == 110
 
     # A higher-sequence broker correction replaces cumulative totals, even downwards.
     assert reporting.record_order(order(sequence=3, filled_quantity=3, average_fill_price=105))
     total = tag_report(reporting, accounts, tag)["totals"]
     assert total["shares_bought"] == 3
     assert total["cash_by_currency"]["USD"]["cash_change"] == -315
+    assert total["cash_by_currency"]["USD"]["average_buy_price"] == 105
 
 
 def test_tag_boundaries_stop_and_restart_preserve_late_fills(reporting, accounts, clock):
@@ -134,6 +136,8 @@ def test_tag_summarizes_buys_sells_and_only_changed_visible_accounts(reporting, 
         "sell_proceeds": 550,
         "cash_change": 247,
         "complete": True,
+        "shares_bought": 3, "shares_sold": 5,
+        "average_buy_price": 101, "average_sell_price": 110,
     }
 
 
@@ -146,11 +150,14 @@ def test_missing_fill_price_stays_unknown_until_authoritative_correction(reporti
     assert total["cash_complete"] is False
     assert total["cash_by_currency"]["USD"] == {
         "buy_cost": None, "sell_proceeds": 120, "cash_change": None, "complete": False,
+        "shares_bought": 2, "shares_sold": 1,
+        "average_buy_price": None, "average_sell_price": 120,
     }
     reporting.record_order(order(sequence=1, average_fill_price=100))
     total = tag_report(reporting, accounts, tag)["totals"]
     assert total["cash_complete"] is True
     assert total["cash_by_currency"]["USD"]["cash_change"] == -80
+    assert total["cash_by_currency"]["USD"]["average_buy_price"] == 100
 
 
 def test_cash_is_partitioned_by_currency_and_missing_currency_is_explicit(reporting, accounts):
@@ -165,6 +172,10 @@ def test_cash_is_partitioned_by_currency_and_missing_currency_is_explicit(report
     assert cash["UNKNOWN"]["buy_cost"] is None
     assert cash["UNKNOWN"]["cash_change"] is None
     assert cash["UNKNOWN"]["complete"] is False
+    assert cash["USD"]["average_buy_price"] == 100
+    assert cash["USD"]["average_sell_price"] is None
+    assert cash["HKD"]["average_sell_price"] == 800
+    assert cash["UNKNOWN"]["average_buy_price"] is None
     assert tag_report(reporting, accounts, tag)["totals"]["cash_complete"] is False
 
 

@@ -262,16 +262,22 @@ def _accumulate(totals, order):
     if not qty:
         return
     buy = order["side"] == "BUY"
-    totals["shares_bought" if buy else "shares_sold"] += qty
+    quantity_field = "shares_bought" if buy else "shares_sold"
+    totals[quantity_field] += qty
     currency = order.get("currency") or "UNKNOWN"
     cash = totals["cash_by_currency"].setdefault(currency, {
-        "buy_cost": Decimal(0), "sell_proceeds": Decimal(0), "cash_change": Decimal(0), "complete": True})
+        "buy_cost": Decimal(0), "sell_proceeds": Decimal(0), "cash_change": Decimal(0), "complete": True,
+        "shares_bought": Decimal(0), "shares_sold": Decimal(0),
+        "average_buy_price": None, "average_sell_price": None})
+    cash[quantity_field] += qty
     field = "buy_cost" if buy else "sell_proceeds"
     price = order.get("average_fill_price")
     if price is None or currency == "UNKNOWN":
         cash[field] = None
     elif cash[field] is not None:
         cash[field] += qty * Decimal(str(price))
+    average_field = "average_buy_price" if buy else "average_sell_price"
+    cash[average_field] = cash[field] / cash[quantity_field] if cash[field] is not None else None
     cash["complete"] = cash["buy_cost"] is not None and cash["sell_proceeds"] is not None
     cash["cash_change"] = cash["sell_proceeds"] - cash["buy_cost"] if cash["complete"] else None
     totals["cash_complete"] = all(part["complete"] for part in totals["cash_by_currency"].values())

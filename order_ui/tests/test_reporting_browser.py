@@ -5,6 +5,7 @@ connections are made and no production account data is used.
 """
 
 import copy
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,8 +56,10 @@ def test_reports_and_tag_controls_in_browser(report_browser):
         "account_id": "A", "account_num_id": 1, "broker": "Tiger",
         "shares_bought": 4.5, "shares_sold": 2, "cash_complete": True,
         "cash_by_currency": {
-            "USD": {"buy_cost": 450, "sell_proceeds": 240, "cash_change": -210, "complete": True},
-            "HKD": {"buy_cost": 0, "sell_proceeds": 20, "cash_change": 20, "complete": True},
+            "USD": {"buy_cost": 450, "sell_proceeds": 240, "cash_change": -210, "complete": True,
+                    "shares_bought": 4.5, "shares_sold": 2, "average_buy_price": 100, "average_sell_price": 120},
+            "HKD": {"buy_cost": 0, "sell_proceeds": 20, "cash_change": 20, "complete": True,
+                    "shares_bought": 0, "shares_sold": 0.1, "average_buy_price": None, "average_sell_price": 200},
         },
     }
     order = {
@@ -128,10 +131,27 @@ def test_reports_and_tag_controls_in_browser(report_browser):
     text = page.locator("#algo-accounts").inner_text()
     assert "#2 · B" in text and "USD -210" in text and "HKD +20" in text
     assert "All accounts total" in text
+    assert "AVG. BUY PRICE" in text and "AVG. SELL PRICE" in text
+    assert "USD 100" in text and "USD 120" in text and "HKD 200" in text
+    assert page.locator("#algo-accounts tbody tr").nth(1).locator("td").nth(2).inner_text() == "—"
+    assert page.locator("#algo-accounts tfoot td").nth(2).inner_text() == "HKD —\nUSD 100"
     assert "Price limit" in page.locator("#algo-parameters").inner_text()
     page.locator("[data-language=zh]").click()
     assert page.locator("#dashboard-title").inner_text() == "算法交易会话"
     assert "价格限制" in page.locator("#algo-parameters").inner_text()
+    assert "买入均价" in page.locator("#algo-accounts").inner_text()
+    assert "卖出均价" in page.locator("#algo-accounts").inner_text()
+
+    usd = account["cash_by_currency"]["USD"]
+    usd.update(buy_cost=None, average_buy_price=None, cash_change=None, complete=False)
+    page.evaluate("refresh()")
+    buy_cell = page.locator("#algo-accounts tbody tr").first.locator("td").nth(2)
+    sell_cell = page.locator("#algo-accounts tbody tr").first.locator("td").nth(4)
+    assert "USD —" in buy_cell.inner_text() and "成交价格数据不完整" in buy_cell.inner_text()
+    assert "USD 120" in sell_cell.inner_text() and "不完整" not in sell_cell.inner_text()
+    usd.update(buy_cost=450, average_buy_price=100, cash_change=-210, complete=True)
+    page.evaluate("refresh()")
+    assert "USD 100" in buy_cell.inner_text() and "不完整" not in buy_cell.inner_text()
 
     page.locator("[data-language=en]").click()
     page.locator("#tab-tags").click()
@@ -176,6 +196,107 @@ def test_reports_and_tag_controls_in_browser(report_browser):
     assert page.locator("#tag-stop").is_disabled()
     assert page.locator("#algo-current").inner_text() == "会话状态暂不可用"
     assert not errors, errors
+
+
+def test_session_table_search_pagination_selection_and_live_updates(report_browser):
+    browser, server = report_browser
+    now = datetime(2026, 10, 28, 15, tzinfo=timezone.utc)
+    sessions = [{
+        "id": f"session-{i:02}", "symbol": "MSFT" if i == 24 else "AAPL",
+        "parameters": {"trading_mode": "H" if i == 24 else "G"},
+        "account_ids": ["account-B" if i == 24 else "account-A"],
+        "status": "running" if i == 0 else "completed", "running": i == 0,
+        "started_at": (now - timedelta(minutes=i)).isoformat(),
+        "updated_at": now.isoformat(), "ended_at": None if i == 0 else now.isoformat(),
+        "accounts": [], "totals": {"shares_bought": 0, "shares_sold": 0, "cash_by_currency": {}},
+    } for i in range(25)]
+    sessions[23]["id"] = '<img src=x onerror=alert(1)>'
+    data = {
+        "username": "tester", "date": "2026-10-28", "timezone": "America/New_York",
+        "refresh_interval_seconds": 60, "accounts": [], "statuses": [], "orders": [],
+        "feed": {"state": "live", "detail": "Live", "invalid_messages": 0},
+        "reporting": {"sessions": sessions, "tags": [], "active_tag_id": None},
+    }
+    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+    errors, posts = [], []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+
+    def api(route):
+        if route.request.method != "GET": posts.append(route.request.url)
+        route.fulfill(json=data)
+
+    page.route("**/api/**", api)
+    page.goto(f"http://127.0.0.1:{server.server_port}/static/index.html")
+    page.locator("#dashboard").wait_for(state="visible")
+    page.locator("#tab-algo").click()
+    assert page.locator("#algo-select").count() == 0
+    assert page.locator("#algo-rows tr").count() == 20
+    assert page.locator("#algo-previous").is_disabled()
+    assert "session-00" in page.locator("#algo-summary").inner_text()
+    page.locator("#algo-next").click()
+    assert page.locator("#algo-page").inner_text() == "Page 2 of 2"
+    assert page.locator("#algo-rows tr").count() == 5
+    assert page.locator("#algo-next").is_disabled()
+    assert page.locator("#algo-rows img").count() == 0
+    assert '<img src=x onerror=alert(1)>' in page.locator("#algo-rows").inner_text()
+    selection = page.locator('[data-algo-session="session-24"]')
+    selection.focus()
+    page.keyboard.press("Enter")
+    assert selection.get_attribute("aria-pressed") == "true"
+    assert "session-24" in page.locator("#algo-summary").inner_text()
+    assert "MSFT" in page.locator("#algo-summary").inner_text()
+    assert page.locator("#algo-accounts .report-empty").get_attribute("colspan") == "8"
+    page.evaluate("refresh()")
+    assert page.evaluate("document.activeElement.dataset.algoSession") == "session-24"
+    assert page.locator("#algo-page").inner_text() == "Page 2 of 2"
+
+    page.locator("[data-language=zh]").click()
+    assert page.locator("#algo-page").inner_text() == "第 2 页，共 2 页"
+    assert selection.get_attribute("aria-pressed") == "true"
+    assert "智能买入" in page.locator("#algo-rows").inner_text()
+    sessions.insert(0, {**sessions[0], "id": "new-session", "started_at": (now + timedelta(minutes=1)).isoformat()})
+    page.evaluate("refresh()")
+    assert selection.get_attribute("aria-pressed") == "true"
+    assert "session-24" in page.locator("#algo-summary").inner_text()
+    page.locator("[data-language=en]").click()
+    for query in ("msft", "session-24", "account-b"):
+        page.locator("#algo-search").fill(query)
+        assert page.locator("#algo-rows tr").count() == 1
+        assert page.locator("#algo-page").inner_text() == "Page 1 of 1"
+        assert "session-24" in page.locator("#algo-summary").inner_text()
+    page.locator("#algo-search").fill("2026-10-28")
+    assert page.locator("#algo-rows tr").count() == 20
+    page.locator("#algo-status").select_option("running")
+    assert page.locator("#algo-rows tr").count() == 2
+    page.locator("#algo-search").fill("no-match")
+    assert page.locator("#algo-rows tr").count() == 0
+    assert page.locator("#algo-empty").inner_text() == "No sessions match these filters."
+    assert page.locator("#algo-report").is_hidden()
+    page.locator("#algo-search").fill("")
+    page.locator("#algo-status").select_option("")
+    page.locator("#algo-page-size").select_option("50")
+    assert page.locator("#algo-rows tr").count() == 26
+    page.locator("#algo-page-size").select_option("10")
+    assert page.locator("#algo-rows tr").count() == 10
+    page.locator("#algo-next").click()
+    page.locator("#algo-next").click()
+    assert page.locator("#algo-rows tr").count() == 6
+    page.set_viewport_size({"width": 390, "height": 844})
+    assert page.locator("#algo-search").is_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert page.locator(".session-list .table-scroll").evaluate("node => node.scrollWidth > node.clientWidth")
+    data["reporting"]["sessions"] = sessions[:2]
+    page.evaluate("refresh()")
+    assert page.locator("#algo-page").inner_text() == "Page 1 of 1"
+    assert page.locator("#algo-rows tr").count() == 2
+    assert "new-session" in page.locator("#algo-summary").inner_text()
+    data["reporting"]["sessions"] = []
+    page.evaluate("refresh()")
+    assert page.locator("#algo-report").is_hidden()
+    assert page.locator("#algo-empty").inner_text() == "No algorithm sessions recorded yet."
+    assert page.locator("#algo-previous").is_disabled() and page.locator("#algo-next").is_disabled()
+    assert not errors and not posts
+    page.close()
 
 
 def test_unreconciled_filters_pagination_translation_and_live_resolution(report_browser):

@@ -205,11 +205,59 @@ def test_session_report_includes_every_participating_account_and_confirmed_cash(
     assert first["running"] is True
     assert [row["account_id"] for row in first["accounts"]] == ["A", "B"]
     assert first["accounts"][1]["shares_sold"] == 0
+    assert first["accounts"][1]["cash_by_currency"] == {}
     client.app.state.store.upsert(event(account_id="B", command_id="child-B", side="SELL", filled_quantity=3, average_fill_price=110))
     second = report(client)["reporting"]["sessions"][0]
     assert second["totals"]["shares_bought"] == 2
     assert second["totals"]["shares_sold"] == 3
     assert second["totals"]["cash_by_currency"]["USD"]["cash_change"] == 130
+    assert second["totals"]["cash_by_currency"]["USD"]["average_buy_price"] == 100
+    assert second["totals"]["cash_by_currency"]["USD"]["average_sell_price"] == 110
+
+
+def test_session_average_prices_weight_executions_per_currency_and_handle_corrections(client):
+    login(client)
+    reporting = client.app.state.reporting
+    reporting.start_session("weighted-session", {"symbol": "AAPL"}, ["A", "B"])
+    fills = [
+        ("buy-a", "A", "BUY", 2, 100, "USD"),
+        ("buy-b", "B", "BUY", 6, 120, "USD"),
+        ("sell-a", "A", "SELL", 1, 130, "USD"),
+        ("sell-b", "B", "SELL", 3, 150, "USD"),
+        ("hkd", "A", "BUY", 0.5, 800, "HKD"),
+        ("unfilled", "B", "BUY", 0, None, "USD"),
+    ]
+    for command_id, account_id, side, quantity, price, currency in fills:
+        reporting.register_command("weighted-session", {"account_id": account_id, "command_id": command_id})
+        client.app.state.store.upsert(event(
+            order_id=command_id, command_id=command_id, account_id=account_id, side=side,
+            filled_quantity=quantity, average_fill_price=price, currency=currency,
+            status="PARTIALLY_FILLED" if quantity else "NEW",
+        ))
+    # Uncorrelated fills cannot affect session averages.
+    client.app.state.store.upsert(event(order_id="manual", filled_quantity=9, average_fill_price=1))
+    session = report(client)["reporting"]["sessions"][0]
+    usd = session["totals"]["cash_by_currency"]["USD"]
+    assert usd["average_buy_price"] == 115
+    assert usd["average_sell_price"] == 145
+    assert usd["shares_bought"] == 8 and usd["shares_sold"] == 4
+    assert session["totals"]["cash_by_currency"]["HKD"]["average_buy_price"] == 800
+    assert session["totals"]["cash_by_currency"]["HKD"]["average_sell_price"] is None
+    for row, buy, sell in zip(session["accounts"], [100, 120], [130, 150]):
+        assert row["cash_by_currency"]["USD"]["average_buy_price"] == buy
+        assert row["cash_by_currency"]["USD"]["average_sell_price"] == sell
+
+    # Missing price for one contributing order makes only that side unavailable.
+    client.app.state.store.upsert(event(order_id="buy-a", command_id="buy-a", sequence=1, average_fill_price=None))
+    usd = report(client)["reporting"]["sessions"][0]["totals"]["cash_by_currency"]["USD"]
+    assert usd["average_buy_price"] is None
+    assert usd["average_sell_price"] == 145
+    correction = event(order_id="buy-a", command_id="buy-a", sequence=2, filled_quantity=3, average_fill_price=90)
+    client.app.state.store.upsert(correction)
+    client.app.state.store.upsert(correction)
+    usd = report(client)["reporting"]["sessions"][0]["totals"]["cash_by_currency"]["USD"]
+    assert usd["shares_bought"] == 9
+    assert usd["average_buy_price"] == 110
 
 
 @pytest.mark.parametrize("trading_mode", ["G", "H"])

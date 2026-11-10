@@ -168,7 +168,8 @@ sqlite3 reports/activity.sqlite3 'SELECT payload FROM system_snapshots ORDER BY 
 ```
 
 The **Algo sessions** tab shows fast trading (E/F) and Smart selling (G) sessions,
-the original starting parameters, lifecycle status, each selected account
+the original starting parameters (excluding proprietary participation settings),
+lifecycle status, each selected account
 (including accounts with no executions), and aggregate shares bought/sold and
 signed cash change. Child commands are correlated with confirmed order snapshots;
 requested quantities and test-mode commands do not count as executions. Completed

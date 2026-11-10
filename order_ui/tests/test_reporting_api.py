@@ -210,3 +210,31 @@ def test_session_report_includes_every_participating_account_and_confirmed_cash(
     assert second["totals"]["shares_bought"] == 2
     assert second["totals"]["shares_sold"] == 3
     assert second["totals"]["cash_by_currency"]["USD"]["cash_change"] == 130
+
+
+@pytest.mark.parametrize("trading_mode", ["G", "H"])
+def test_session_reports_hide_participation_without_changing_saved_parameters(config, clock, trading_mode):
+    public = {"symbol": "AAPL", "trading_mode": trading_mode, "mode": "normal", "quantity": "1000"}
+    parameters = {
+        **public, "participation": "0.12", "participation_percentage": "12",
+        "participation_percentages": {"patient": "6", "normal": "12", "urgent": "20", "ultra": "30"},
+        "settings": [{"participation_percentage": "12", "mode": "normal"}],
+    }
+    expected = {**public, "settings": [{"mode": "normal"}]}
+    with running_client(config, clock) as first:
+        login(first)
+        reporting = first.app.state.reporting
+        reporting.start_session("private-session", parameters, ["A", "B"])
+        session = report(first)["reporting"]["sessions"][0]
+        assert session["running"] is True
+        assert session["parameters"] == expected
+        assert reporting.snapshot(config["accounts"])["sessions"][0]["parameters"] == parameters
+        reporting.end_session("private-session")
+
+    # Existing history is filtered on read, including after a server restart.
+    with running_client(config, clock) as second:
+        login(second)
+        session = report(second)["reporting"]["sessions"][0]
+        assert session["running"] is False
+        assert session["parameters"] == expected
+        assert second.app.state.reporting.snapshot(config["accounts"])["sessions"][0]["parameters"] == parameters

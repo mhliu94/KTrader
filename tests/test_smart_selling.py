@@ -97,10 +97,10 @@ class SmartSellingTests(unittest.TestCase):
 
     def test_four_fixed_modes_and_one_tick_midpoint(self):
         for mode, rate, price in [
-            ("patient", ".05", "10.01"),
-            ("normal", ".08", "10.01"),
-            ("urgent", ".15", "10"),
-            ("ultra", ".25", "10"),
+            ("patient", ".06", "10.01"),
+            ("normal", ".12", "10.01"),
+            ("urgent", ".20", "10"),
+            ("ultra", ".30", "10"),
         ]:
             with self.subTest(mode=mode):
                 self.start(mode=mode, account_id=mode)
@@ -108,13 +108,14 @@ class SmartSellingTests(unittest.TestCase):
                 child = self.child()
                 self.assertEqual(Decimal(child["limit_price"]), Decimal(price))
                 self.assertEqual(Decimal(self.status()["participation"]), Decimal(rate))
+                self.assertEqual(Decimal(self.status()["earned"]), Decimal("10000") * Decimal(rate))
                 self.report(child, "FILLED", child["quantity"], final=True)
                 self.engine.request_stop(self.parent)
 
-    def test_ultra_funds_a_minimum_child_at_25_percent_and_cancels_after_two_seconds(self):
+    def test_ultra_funds_a_minimum_child_at_30_percent_and_cancels_after_two_seconds(self):
         self.start(mode="4")
         self.assertEqual(self.status()["mode"], "ultra")
-        self.tape("399")
+        self.tape("333")
         self.assertEqual(self.engine.tick(), [])
         self.tape("1", "minimum-credit")
         child = self.child()
@@ -195,15 +196,15 @@ class SmartSellingTests(unittest.TestCase):
         self.tape("5000")
         self.assertTrue(self.status()["disable_child_cap"])
         self.assertIsNone(self.status()["child_cap"])
-        self.assertEqual(Decimal(self.status()["free_credit"]), 750)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 1000)
         # Earned credit funds the child even when displayed depth is smaller.
         child = self.child()
-        self.assertEqual(child["quantity"], "750")
+        self.assertEqual(child["quantity"], "1000")
         self.quote(bid_size="1")
         prepared = self.engine.prepare_dispatch(child["client_order_id"])
-        self.assertEqual(prepared["quantity"], "750")
+        self.assertEqual(prepared["quantity"], "1000")
         self.assertEqual(Decimal(self.status()["free_credit"]), 0)
-        self.assertEqual(Decimal(self.status()["reserved"]), 750)
+        self.assertEqual(Decimal(self.status()["reserved"]), 1000)
 
     def test_disabled_child_cap_preserves_inventory_and_account_split_remainders(self):
         self.start(
@@ -213,7 +214,7 @@ class SmartSellingTests(unittest.TestCase):
         self.quote(bid_size="5000")
         self.tape("20000")
         self.assertEqual(Decimal(self.status()["free_credit"]), 1000)
-        self.assertEqual(Decimal(self.status()["discarded"]), 2000)
+        self.assertEqual(Decimal(self.status()["discarded"]), 3000)
         first = self.child()
         self.assertEqual((first["account_id"], first["quantity"]), ("A", "200"))
         self.engine.prepare_dispatch(first["client_order_id"])
@@ -234,7 +235,7 @@ class SmartSellingTests(unittest.TestCase):
     def test_disabled_child_cap_still_requires_minimum_credit(self):
         self.start(disable_child_cap=True)
         self.quote(bid_size="10000")
-        self.tape("666")
+        self.tape("499")
         self.assertEqual(self.engine.tick(), [])
         self.tape("1", "more")
         self.quote(bid_size="1")
@@ -252,8 +253,8 @@ class SmartSellingTests(unittest.TestCase):
         self.assertIsNone(self.status()["child_cap"])
         self.quote(bid_size="5000")
         child = self.child()
-        self.assertEqual(child["quantity"], "750")
-        self.assertEqual(self.engine.prepare_dispatch(child["client_order_id"])["quantity"], "750")
+        self.assertEqual(child["quantity"], "1000")
+        self.assertEqual(self.engine.prepare_dispatch(child["client_order_id"])["quantity"], "1000")
 
     def test_legacy_parent_keeps_calculated_child_cap_after_restart(self):
         self.start()
@@ -282,13 +283,13 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(Decimal(child["quantity"]), 100)
         status = self.status()
         self.assertEqual(Decimal(status["free_credit"]), 100)
-        self.assertEqual(Decimal(status["discarded"]), 1300)
+        self.assertEqual(Decimal(status["discarded"]), 1800)
         self.assertEqual(self.engine.tick(), [])
 
     def test_partial_budget_flush_without_depth_cap(self):
         self.start(quantity="2000")
         self.quote(bid_size="1800")
-        self.tape("1000")
+        self.tape("750")
         self.assertEqual(self.engine.tick(), [])
         self.clock.now = 29
         self.quote(bid_size="1800")
@@ -304,8 +305,8 @@ class SmartSellingTests(unittest.TestCase):
         self.clock.now = 30
         self.quote(bid_size="10000")
         child = self.child()
-        self.assertEqual(Decimal(child["quantity"]), Decimal("150.1"))
-        self.assertEqual(Decimal(self.status()["free_credit"]), Decimal(".085175"))
+        self.assertEqual(Decimal(child["quantity"]), Decimal("200.2"))
+        self.assertEqual(Decimal(self.status()["free_credit"]), Decimal(".0469"))
 
     def test_partial_fill_during_cancel_refunds_final_leaves_once(self):
         self.start()
@@ -325,7 +326,7 @@ class SmartSellingTests(unittest.TestCase):
         self.report(child, "PARTIALLY_FILLED", "40", sequence=1)
         result = self.status()
         self.assertEqual(Decimal(result["filled"]), 60)
-        self.assertEqual(Decimal(result["free_credit"]), 90)
+        self.assertEqual(Decimal(result["free_credit"]), 140)
         self.assertEqual(Decimal(result["reserved"]), 0)
         self.assertEqual(Decimal(result["fills_after_cancel"]), 20)
 
@@ -363,7 +364,7 @@ class SmartSellingTests(unittest.TestCase):
         result = self.status()
         self.assertEqual(Decimal(result["filled"]), 10)
         self.assertEqual(Decimal(result["reserved"]), 90)
-        self.assertEqual(Decimal(result["free_credit"]), 50)
+        self.assertEqual(Decimal(result["free_credit"]), 100)
 
     def test_inconsistent_filled_status_does_not_refund_missing_quantity(self):
         self.start()
@@ -418,18 +419,18 @@ class SmartSellingTests(unittest.TestCase):
 
     def test_tape_dedup_corrections_original_rate_and_no_fill_credit(self):
         self.start(mode="normal")
-        self.tape("1000")
-        self.tape("1000")
+        self.tape("800")
+        self.tape("800")
         self.engine.on_trade("XYZ", "-100", "correction-1", correction_of="trade-1")
         self.engine.on_trade("XYZ", "-100", "correction-1", correction_of="trade-1")
-        self.assertEqual(Decimal(self.status()["earned"]), 72)
+        self.assertEqual(Decimal(self.status()["earned"]), 84)
         self.clock.now = 30
         self.quote()
         self.assertEqual(self.engine.tick(), [])
         self.tape("1000", event_id="fresh")
         child = self.child()
         self.report(child, "FILLED", child["quantity"], final=True)
-        self.assertEqual(Decimal(self.status()["earned"]), 152)
+        self.assertEqual(Decimal(self.status()["earned"]), 204)
 
     def test_negative_correction_keeps_live_reservation_and_signed_credit(self):
         self.start()
@@ -437,7 +438,7 @@ class SmartSellingTests(unittest.TestCase):
         child = self.child()
         self.engine.on_trade("XYZ", "-900", "correction-1", correction_of="trade-1")
         result = self.status()
-        self.assertEqual(Decimal(result["free_credit"]), -85)
+        self.assertEqual(Decimal(result["free_credit"]), -80)
         self.assertEqual(Decimal(result["reserved"]), 100)
         self.report(child, "FILLED", "100", final=True)
         self.clock.now = 5
@@ -474,8 +475,8 @@ class SmartSellingTests(unittest.TestCase):
         self.quote()
         child = self.child()
         self.assertEqual(Decimal(child["limit_price"]), 10)
-        self.assertEqual(Decimal(self.status()["participation"]), Decimal(".08"))
-        self.assertEqual(Decimal(self.status()["earned"]), 160)
+        self.assertEqual(Decimal(self.status()["participation"]), Decimal(".12"))
+        self.assertEqual(Decimal(self.status()["earned"]), 240)
 
     def test_price_floor_upward_tick_and_tiny_depth(self):
         self.start(minimum_price="10.025")
@@ -504,7 +505,7 @@ class SmartSellingTests(unittest.TestCase):
         self.tape("500", event_id="one", sequence=1)
         self.tape("500", event_id="three", sequence=3)
         self.assertEqual(self.engine.tick(), [])
-        self.assertEqual(Decimal(self.status()["earned"]), 75)
+        self.assertEqual(Decimal(self.status()["earned"]), 100)
         self.engine.set_feed_health("XYZ", True, reset_sequence=True)
         self.tape("500", event_id="four", sequence=4)
         self.assertEqual(Decimal(self.child()["quantity"]), 100)
@@ -580,7 +581,7 @@ class SmartSellingTests(unittest.TestCase):
         self.start()
         self.tape("2000")
         self.child()
-        self.engine.set_remaining_volume_forecast(self.parent, "6000")
+        self.engine.set_remaining_volume_forecast(self.parent, "4500")
         self.engine.tick()
         capacity = self.status()["capacity"]
         self.assertEqual(Decimal(capacity["unfunded"]), 800)
@@ -635,7 +636,7 @@ class SmartSellingTests(unittest.TestCase):
         self.quote()
         self.assertEqual(self.engine.tick(), [])
         self.assertEqual(self.status()["state"], "STOPPED")
-        self.assertEqual(Decimal(self.status()["free_credit"]), 150)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 200)
 
     def test_persisted_conflict_blocks_a_fresh_parent_after_stop(self):
         self.start()
@@ -688,7 +689,7 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(Decimal(self.status()["earned"]), 0)
         self.clock.now = 5
         self.tape("1000", event_id="next", interval_start=self.clock.wall_start)
-        self.assertEqual(Decimal(self.status()["earned"]), 150)
+        self.assertEqual(Decimal(self.status()["earned"]), 200)
 
     def test_final_dispatch_ignores_depth_shrink_and_preserves_accounting(self):
         self.start(quantity="2000")
@@ -700,7 +701,7 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(Decimal(updated["quantity"]), 200)
         self.assertEqual(Decimal(updated["limit_price"]), Decimal("10.02"))
         self.assertEqual(updated["send_time"], original["send_time"])
-        self.assertEqual(Decimal(self.status()["free_credit"]), 100)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 200)
         self.assertEqual(Decimal(self.status()["reserved"]), 200)
         self.assertIsNone(self.engine.prepare_dispatch(original["client_order_id"]))
 
@@ -853,7 +854,7 @@ class SmartSellingTests(unittest.TestCase):
         self.assertEqual(self.status()["order_state"], "RECONCILE")
         self.assertIsNone(self.engine.prepare_dispatch(child["client_order_id"]))
         self.assertEqual(Decimal(self.status()["reserved"]), 0)
-        self.assertEqual(Decimal(self.status()["free_credit"]), 150)
+        self.assertEqual(Decimal(self.status()["free_credit"]), 200)
 
     def test_prepared_timer_reconciliation_keeps_ambiguous_reservation(self):
         self.start()
@@ -884,7 +885,7 @@ class SmartSellingTests(unittest.TestCase):
                     parse_input_decimal(value)
         self.start(mode="patient", quantity="100", quantity_step="1e-24", min_quantity="1e-24")
         self.tape("1e-24")
-        self.assertEqual(Decimal(self.status()["free_credit"]), Decimal("5e-26"))
+        self.assertEqual(Decimal(self.status()["free_credit"]), Decimal("6e-26"))
         with self.assertRaisesRegex(ValueError, "precision"):
             self.tape("1e-25", event_id="out-of-bounds")
 
@@ -944,7 +945,7 @@ class SmartSellingTests(unittest.TestCase):
         self.tape("2000")
         first = self.child()
         self.assertEqual((first["account_id"], first["quantity"]), ("A", "100"))
-        self.assertEqual(self.status()["earned"], "300.00")
+        self.assertEqual(self.status()["earned"], "400.00")
         self.assertEqual(self.engine.tick(), [])
         for index, expected in enumerate(["B", "C", "A"], start=1):
             self.report(first, "FILLED", first["quantity"], final=True)

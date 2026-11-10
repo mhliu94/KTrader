@@ -23,6 +23,17 @@ from .reconciliation import ReconciliationView
 STATIC = Path(__file__).parent / "static"
 COOKIE = "ktrader_order_ui_session"
 SESSION_SECONDS = 12 * 3600
+PRIVATE_ALGO_PARAMETERS = {"participation", "participation_percentage", "participation_percentages"}
+
+
+def public_algo_parameters(value):
+    """Keep proprietary participation settings out of browser responses."""
+    if isinstance(value, dict):
+        return {key: public_algo_parameters(item) for key, item in value.items()
+                if key not in PRIVATE_ALGO_PARAMETERS}
+    if isinstance(value, list):
+        return [public_algo_parameters(item) for item in value]
+    return value
 
 
 class LoginBody(BaseModel):
@@ -123,9 +134,12 @@ def create_app(config_path=None, *, consumer_factory=OrderStatusConsumer, config
         tags = app.state.reporting.order_tags(snapshot["orders"])
         for order in snapshot["orders"]:
             order["tags"] = tags.get((order["account_id"], order["order_id"]), [])
+        reporting = app.state.reporting.snapshot(cfg["accounts"])
+        for session in reporting["sessions"]:
+            session["parameters"] = public_algo_parameters(session["parameters"])
         return {**snapshot, "username": username,
                 "unreconciled": app.state.reconciliation.snapshot(cfg["accounts"]),
-                "reporting": app.state.reporting.snapshot(cfg["accounts"]),
+                "reporting": reporting,
                 "refresh_interval_seconds": cfg["refresh_interval_seconds"], "statuses": STATUSES,
                 "accounts": [{"id": meta.id, "num_id": meta.num_id, "broker": meta.broker}
                              for meta in sorted(cfg["accounts"].values(), key=lambda meta: meta.num_id)]}

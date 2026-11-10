@@ -636,7 +636,7 @@ class SmartSellingRuntimeTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400, response.text)
                 self.assertIn("must be a boolean", response.json()["error"])
             self.assertFalse(self.runtime.has_active_session())
-            for mode, disabled, quantity in (("urgent", True, 750), ("urgent", False, 100),
+            for mode, disabled, quantity in (("urgent", True, 1000), ("urgent", False, 100),
                                               ("ultra", True, 1000), ("ultra", False, 100)):
                 with self.subTest(mode=mode, disabled=disabled):
                     response = client.post("/api/smart-selling", json={**settings, "mode": mode, "disable_child_cap": disabled})

@@ -67,28 +67,29 @@ for no deadline.
 
 | Setting | Patient | Normal | Urgent | Ultra |
 |---|---|---|---|---|
-| Default participation in newly observed volume | 5% | 8% | 15% | 25% |
+| Default participation in newly observed volume | 6% | 12% | 20% | 30% |
 | Normal limit | Best ask | Midpoint rounded upward | Best bid | Best bid |
 | Cancel-request age | 5 seconds | 5 seconds | 2 seconds | 2 seconds |
 
 Participation is configured in the control UI server's JSON settings. The
 urgency selector shows only Patient, Normal, Urgent, and Ultra; it does not show rates.
+Order UI session reports omit participation values from the browser API response.
 The default configuration is:
 
 ```json
 {
   "smart_selling": {
     "participation_percentages": {
-      "patient": "5",
-      "normal": "8",
-      "urgent": "15",
-      "ultra": "25"
+      "patient": "6",
+      "normal": "12",
+      "urgent": "20",
+      "ultra": "30"
     }
   }
 }
 ```
 
-Values are percentage units: `"8"` means 8%, not 0.08%. Partial overrides keep the
+Values are percentage units: `"12"` means 12%, not 0.12%. Partial overrides keep the
 other defaults. Each value must be finite, greater than zero, and at most 100;
 unknown modes, booleans, and unsupported decimal precision are rejected. Decimal
 strings preserve exact configured values. Restart the control UI to load changed

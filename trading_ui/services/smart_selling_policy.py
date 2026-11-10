@@ -13,10 +13,10 @@ from typing import Any, Mapping
 ZERO = Decimal("0")
 MIN_ORDER_QUANTITY = Decimal("100")
 PARTICIPATION_PERCENTAGES = {
-    "patient": Decimal("5"),
-    "normal": Decimal("8"),
-    "urgent": Decimal("15"),
-    "ultra": Decimal("25"),
+    "patient": Decimal("6"),
+    "normal": Decimal("12"),
+    "urgent": Decimal("20"),
+    "ultra": Decimal("30"),
 }
 PARTICIPATION_RATES = {
     mode: percentage.scaleb(-2)

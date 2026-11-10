@@ -8,10 +8,10 @@
     "trade_max_age": 15,
     "account_max_age": 60,
     "participation_percentages": {
-      "patient": "5",
-      "normal": "8",
-      "urgent": "15",
-      "ultra": "25"
+      "patient": "6",
+      "normal": "12",
+      "urgent": "20",
+      "ultra": "30"
     },
     "instrument_defaults": {
       "tick_size": "0.01",

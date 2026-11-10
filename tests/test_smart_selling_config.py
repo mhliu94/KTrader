@@ -10,7 +10,7 @@ from trading_ui.smart_selling_config import normalize_smart_selling_config
 
 class SmartSellingConfigTests(unittest.TestCase):
     def test_defaults_and_partial_overrides_use_percentage_units(self):
-        expected = {"patient": "5", "normal": "8", "urgent": "15", "ultra": "25"}
+        expected = {"patient": "6", "normal": "12", "urgent": "20", "ultra": "30"}
         for raw in (None, {}, {"participation_percentages": {}}):
             with self.subTest(raw=raw):
                 self.assertEqual(
@@ -103,7 +103,7 @@ class SmartSellingConfigTests(unittest.TestCase):
                 settings = json.loads((sample_dir / filename).read_text())["smart_selling"]
                 self.assertEqual(
                     normalize_smart_selling_config(settings)["participation_percentages"],
-                    {"patient": "5", "normal": "8", "urgent": "15", "ultra": "25"},
+                    {"patient": "6", "normal": "12", "urgent": "20", "ultra": "30"},
                 )
 
 

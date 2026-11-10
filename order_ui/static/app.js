@@ -22,6 +22,7 @@ let tagErrorKey = "";
 let number = new Intl.NumberFormat(locale(), { maximumFractionDigits: 8 });
 const label = (value) => translations[language][`value_${value}`] ?? value.replaceAll("_", " ").toLowerCase().replace(/^./, (c) => c.toUpperCase());
 const fmt = (value) => value == null ? "—" : number.format(value);
+const fmtAveragePrice = (value) => value == null ? "—" : Number(value).toLocaleString(locale(), {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
 async function api(path, body) {
   const controller = new AbortController();
@@ -445,14 +446,14 @@ function reportSummary(target, entries) {
 
 function cashCell(row, cash, field) {
   const td = cell(row, "", "", "number cash-lines");
+  const averageQuantity = {average_buy_price: "shares_bought", average_sell_price: "shares_sold"}[field];
   const entries = Object.entries(cash || {}).sort(([a], [b]) => a.localeCompare(b));
   if (!entries.length) { td.textContent = "—"; return; }
   for (const [currency, values] of entries) {
     const line = document.createElement("div");
     const amount = values[field];
     const prefix = field === "cash_change" && amount != null && Number(amount) > 0 ? "+" : "";
-    line.textContent = `${currency === "UNKNOWN" ? t("unknown_currency") : currency} ${prefix}${fmt(amount)}`;
-    const averageQuantity = {average_buy_price: "shares_bought", average_sell_price: "shares_sold"}[field];
+    line.textContent = `${currency === "UNKNOWN" ? t("unknown_currency") : currency} ${prefix}${averageQuantity ? fmtAveragePrice(amount) : fmt(amount)}`;
     const incomplete = averageQuantity ? amount == null && values[averageQuantity] > 0 : values.complete === false;
     if (incomplete) {
       const warning = document.createElement("span");

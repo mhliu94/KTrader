@@ -58,8 +58,8 @@ def test_reports_and_tag_controls_in_browser(report_browser):
         "cash_by_currency": {
             "USD": {"buy_cost": 450, "sell_proceeds": 240, "cash_change": -210, "complete": True,
                     "shares_bought": 4.5, "shares_sold": 2, "average_buy_price": 100, "average_sell_price": 120},
-            "HKD": {"buy_cost": 0, "sell_proceeds": 20, "cash_change": 20, "complete": True,
-                    "shares_bought": 0, "shares_sold": 0.1, "average_buy_price": None, "average_sell_price": 200},
+            "HKD": {"buy_cost": 0, "sell_proceeds": 20.0126, "cash_change": 20.0126, "complete": True,
+                    "shares_bought": 0, "shares_sold": 0.1, "average_buy_price": None, "average_sell_price": 200.126},
         },
     }
     order = {
@@ -132,9 +132,10 @@ def test_reports_and_tag_controls_in_browser(report_browser):
     assert "#2 · B" in text and "USD -210" in text and "HKD +20" in text
     assert "All accounts total" in text
     assert "AVG. BUY PRICE" in text and "AVG. SELL PRICE" in text
-    assert "USD 100" in text and "USD 120" in text and "HKD 200" in text
+    assert page.locator("#algo-accounts tbody tr").first.locator("td").nth(4).inner_text() == "HKD 200.13\nUSD 120.00"
     assert page.locator("#algo-accounts tbody tr").nth(1).locator("td").nth(2).inner_text() == "—"
-    assert page.locator("#algo-accounts tfoot td").nth(2).inner_text() == "HKD —\nUSD 100"
+    assert page.locator("#algo-accounts tfoot td").nth(2).inner_text() == "HKD —\nUSD 100.00"
+    assert page.locator("#algo-accounts tfoot td").nth(4).inner_text() == "HKD 200.13\nUSD 120.00"
     assert "Price limit" in page.locator("#algo-parameters").inner_text()
     page.locator("[data-language=zh]").click()
     assert page.locator("#dashboard-title").inner_text() == "算法交易会话"
@@ -148,10 +149,10 @@ def test_reports_and_tag_controls_in_browser(report_browser):
     buy_cell = page.locator("#algo-accounts tbody tr").first.locator("td").nth(2)
     sell_cell = page.locator("#algo-accounts tbody tr").first.locator("td").nth(4)
     assert "USD —" in buy_cell.inner_text() and "成交价格数据不完整" in buy_cell.inner_text()
-    assert "USD 120" in sell_cell.inner_text() and "不完整" not in sell_cell.inner_text()
+    assert sell_cell.inner_text() == "HKD 200.13\nUSD 120.00"
     usd.update(buy_cost=450, average_buy_price=100, cash_change=-210, complete=True)
     page.evaluate("refresh()")
-    assert "USD 100" in buy_cell.inner_text() and "不完整" not in buy_cell.inner_text()
+    assert buy_cell.inner_text() == "HKD —\nUSD 100.00"
 
     page.locator("[data-language=en]").click()
     page.locator("#tab-tags").click()

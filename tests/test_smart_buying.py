@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 
 from trading_ui import webserver
 from trading_ui.models import AccountMeta, AccountSnapshot
+from trading_ui.services.algo_sessions import AlgoSession, AlgoSessionCoordinator
+from trading_ui.services.fast_trading import FastTradingStrategyManager
 from trading_ui.services.market_data import BookLevel, MarketDataStore, OrderBookSnapshot
 from trading_ui.services.smart_buying import SmartBuyingEngine
 from trading_ui.services.smart_buying_runtime import SmartBuyingRuntime
@@ -144,6 +146,8 @@ def test_partial_fills_and_cancel_reserve_cash_until_terminal(buying):
     assert buying.status()["accounts"]["A"]["spent"] == "3000"
     buying.runtime.stop_parent(buying.parent["parent_id"])
     assert buying.runtime.owns_account("A")
+    with pytest.raises(ValueError, match="at most 1 buying strategy"):
+        buying.start(symbol="OTHER")
     buying.report(command, status="CANCELED", filled=175, sequence=2)
     assert buying.status()["accounts"]["A"]["spent"] == "3500"
     assert not buying.runtime.owns_account("A")
@@ -198,10 +202,11 @@ def test_stale_and_disabled_accounts_and_owned_accounts_rejected(buying):
     with pytest.raises(ValueError, match="disabled"):
         buying.start()
     buying.snapshots["A"].trading_enabled = True
-    buying.runtime.fast_owns_account = lambda _: True
-    with pytest.raises(ValueError):
+    sessions = [AlgoSession("fast", "E", "OTHER", ["A"])]
+    buying.runtime._session_coordinator.register(lambda: sessions)
+    with pytest.raises(ValueError, match="at most 1 buying strategy"):
         buying.start()
-    buying.runtime.fast_owns_account = lambda _: False
+    sessions.clear()
     buying.snapshots["A"].ts = "2020-01-01T00:00:00Z"
     with pytest.raises(ValueError, match="stale"):
         buying.start()
@@ -230,13 +235,28 @@ def test_buy_feedback_rejects_sell_side_and_restart_keeps_reservation(buying, tm
     with pytest.raises(ValueError):
         buying.report(command, side="SELL")
     recovered = SmartBuyingEngine(tmp_path / "buying.sqlite3", clock=lambda: buying.clock[0], wall_clock=lambda: buying.clock[0])
+    coordinator = AlgoSessionCoordinator()
+    recovered_runtime = SmartBuyingRuntime(
+        {}, engine=recovered, market_data_store=buying.md, account_metas_provider=lambda: buying.metas,
+        snapshots_provider=lambda: buying.snapshots, publish_command=Mock(), session_coordinator=coordinator,
+    )
+    fast = FastTradingStrategyManager(
+        MarketDataStore(), lambda: buying.metas, Mock(), session_coordinator=coordinator,
+    )
     try:
         parent = recovered.get_parent(buying.parent["parent_id"])
         assert parent["reserved"] == "100"
         assert parent["accounts"]["A"]["cash_budget"] == "10000"
         assert not any(a["type"] == "submit" for a in recovered.tick())
+        with pytest.raises(ValueError, match="at most 1 buying strategy"):
+            fast.start_strategy({
+                "trading_mode": "E", "symbol": "OTHER", "fast_trading_price_limit": 10,
+                "fast_trading_account_ids": ["A"], "fast_trading_book_levels": 1,
+                "fast_trading_target_percentage": 100, "fast_trading_cycle_seconds": 5,
+            })
     finally:
-        recovered.close()
+        recovered_runtime.close()
+        fast.stop_all()
 
 
 def test_authenticated_same_origin_api_starts_and_stops_mode_h(buying):

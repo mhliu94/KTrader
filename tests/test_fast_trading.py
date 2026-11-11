@@ -4,6 +4,7 @@ import time
 from unittest.mock import Mock
 
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
+from trading_ui.services.algo_sessions import AlgoSession, AlgoSessionCoordinator
 from trading_ui.services.fast_trading import (
     FastTradingStrategyManager,
     STOP_REASON_TARGET_POSITION,
@@ -959,7 +960,7 @@ class FastTradingManagerTests(unittest.TestCase):
         self.assertEqual(manager.stop_all(), 0)
         publish.assert_not_called()
 
-    def test_sessions_run_at_once_unless_they_share_an_account(self):
+    def test_sessions_reject_duplicate_symbols_and_multiple_buyers_on_an_account(self):
         manager = FastTradingStrategyManager(
             market_data_store=MarketDataStore(),
             account_metas_provider=lambda: metas("A", "B", "C"),
@@ -967,9 +968,9 @@ class FastTradingManagerTests(unittest.TestCase):
         )
         self.addCleanup(manager.stop_all)
         manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["A", "B"]})
-        for mode, symbol, accounts in (("F", "MSFT", ["B"]), ("E", "AAPL", ["C", "A"])):
+        for mode, symbol, accounts in (("F", "AAPL", ["B"]), ("E", "MSFT", ["C", "A"])):
             with self.subTest(mode=mode, symbol=symbol, accounts=accounts):
-                with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
+                with self.assertRaisesRegex(ValueError, "Cannot start algorithm"):
                     manager.start_strategy({**strategy_command(), "command_id": "second",
                                             "trading_mode": mode, "symbol": symbol,
                                             "fast_trading_account_ids": accounts})
@@ -998,19 +999,21 @@ class FastTradingManagerTests(unittest.TestCase):
         manager.stop_all()
         manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["B"]})
 
-    def test_accounts_owned_by_smart_selling_cannot_join_a_fast_session(self):
-        smart_owned = {"B"}
+    def test_smart_selling_symbol_conflict_blocks_the_entire_fast_start(self):
+        smart_sessions = [AlgoSession("smart", "G", "AAPL", ["B"])]
+        coordinator = AlgoSessionCoordinator()
+        coordinator.register(lambda: smart_sessions)
         manager = FastTradingStrategyManager(
             market_data_store=MarketDataStore(),
             account_metas_provider=lambda: metas("A", "B"),
             publish_command=Mock(),
-            smart_owns_account=smart_owned.__contains__,
+            session_coordinator=coordinator,
         )
         self.addCleanup(manager.stop_all)
-        with self.assertRaisesRegex(ValueError, r"Account\(s\) B already belong"):
+        with self.assertRaisesRegex(ValueError, r"Account\(s\) B: symbol AAPL is already in use"):
             manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["A", "B"]})
         self.assertFalse(manager.has_active_session())
-        smart_owned.clear()
+        smart_sessions.clear()
         manager.start_strategy({**strategy_command(), "fast_trading_account_ids": ["A", "B"]})
 
     def test_stopping_worker_reserves_session_until_inflight_cycle_exits(self):
@@ -1033,8 +1036,12 @@ class FastTradingManagerTests(unittest.TestCase):
             self.assertTrue(manager.has_active_session())
             self.assertTrue(manager.owns_account("A"))
             self.assertFalse(manager.has_running_strategy("A", "AAPL"))
-            with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
+            with self.assertRaisesRegex(ValueError, "must use distinct symbols"):
                 manager.start_strategy({**strategy_command(), "command_id": "retry"})
+            with self.assertRaisesRegex(ValueError, "at most 1 buying strategy"):
+                manager.start_strategy({**strategy_command(), "command_id": "retry-other", "symbol": "MSFT"})
+            manager.start_strategy({**strategy_command(), "command_id": "sell-other", "symbol": "MSFT",
+                                    "trading_mode": "F"})
             # The stopping session reserves only its own accounts.
             manager.start_strategy({**strategy_command(), "command_id": "other",
                                     "fast_trading_account_ids": ["B"]})

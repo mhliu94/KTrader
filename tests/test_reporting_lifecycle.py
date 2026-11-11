@@ -172,11 +172,9 @@ def test_buying_gets_independent_runtime_feeds_ownership_and_shutdown(lifecycle)
         selling.on_price_book.assert_called_once_with({"symbol": "AAPL"}, topic="price-books")
         callbacks["health_callback"](False)
         buying.on_price_book_health.assert_called_once_with(False)
-        factories["FastTradingStrategyManager"].return_value.owns_account.return_value = False
-        selling.owns_account.return_value = True
-        assert factories["SmartBuyingRuntime"].call_args.kwargs["fast_owns_account"]("A")
-        buying.owns_account.return_value = True
-        assert factories["SmartSellingRuntime"].call_args.kwargs["fast_owns_account"]("A")
+        coordinator = factories["FastTradingStrategyManager"].call_args.kwargs["session_coordinator"]
+        assert factories["SmartBuyingRuntime"].call_args.kwargs["session_coordinator"] is coordinator
+        assert factories["SmartSellingRuntime"].call_args.kwargs["session_coordinator"] is coordinator
     finally:
         webserver.on_shutdown()
     buying.stop_all.assert_called_once_with()

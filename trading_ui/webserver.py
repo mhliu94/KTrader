@@ -39,13 +39,13 @@ from .templates import (
 from .services.operations_log import OperationsLog
 from .services.activity_reporting import ActivityReporting, reporting_db_path
 from .services.system_snapshots import SystemSnapshotRecorder
+from .services.algo_sessions import AlgoSessionCoordinator
 from .services.orders import (
     validate_order_inputs,
     validate_quick_order_inputs,
     validate_limit_order_inputs,
     validate_cancel_open_orders_inputs,
     validate_algo_start_inputs,
-    algo_account_conflict_error,
     build_algo_stop_command,
     broker_orders_today,
     validate_broker_orders_inputs,
@@ -286,10 +286,14 @@ def _publish_fast_trading_command(command: Dict, key: str) -> None:
         ):
             return
         for manager in _smart_managers():
-            # Sessions never share an account.
+            # Accounts can be shared, but an instrument cannot be shared.
             account_id = str(command.get("account_id") or "")
-            if manager.owns_account(account_id):
-                raise ValueError(algo_account_conflict_error([account_id]))
+            if manager.owns(account_id, command.get("symbol")):
+                raise ValueError(
+                    f"Cannot publish algorithm order: account {account_id} already has a "
+                    f"Smart algorithm session on symbol {command.get('symbol')}; "
+                    "all strategies on an account must use distinct symbols"
+                )
             manager.track_external_order(command)
         _publish_trading_command(command, key)
 
@@ -329,10 +333,8 @@ def _publish_trading_command(command: Dict, key: str) -> None:
     COMMANDS_PRODUCER.publish_order(command, key=key)
 
 
-# Several algorithm sessions may run at once, across modes E, F and G, but each
-# account participates in at most one. The managers check ownership across modes
-# through the callbacks wired in _start_services; one lock serializes starts so
-# two sessions cannot claim the same account at the same time.
+# Serialize starts with global stop notifications and order handoffs. The shared
+# session coordinator also makes admission atomic across all runtime start calls.
 def _start_fast_strategy(command):
     with ALGO_CONTROL_LOCK:
         return FAST_TRADING_MANAGER.start_strategy(command)
@@ -405,6 +407,7 @@ def _start_services() -> None:
     SYSTEM_SNAPSHOTS.start()
 
     COMMANDS_PRODUCER = TradingCommandsProducer(APP_CONFIG["kafka"])
+    session_coordinator = AlgoSessionCoordinator()
     FAST_TRADING_MANAGER = FastTradingStrategyManager(
         market_data_store=MD_STORE,
         account_metas_provider=lambda: ACCOUNT_METAS,
@@ -413,9 +416,7 @@ def _start_services() -> None:
         reporting=ACTIVITY_REPORTING,
         publish_command=_publish_fast_trading_command,
         fast_trading_settings=APP_CONFIG.get("fast_trading"),
-        smart_owns_account=lambda account: (
-            any(manager.owns_account(account) for manager in _smart_managers())
-        ),
+        session_coordinator=session_coordinator,
     )
     if APP_CONFIG["smart_selling"]["enabled"]:
         SMART_SELLING_MANAGER = SmartSellingRuntime(
@@ -424,9 +425,7 @@ def _start_services() -> None:
             account_metas_provider=lambda: ACCOUNT_METAS,
             snapshots_provider=lambda: get_served_snapshots()[0],
             publish_command=_publish_trading_command,
-            fast_owns_account=lambda account: FAST_TRADING_MANAGER.owns_account(account) or (
-                SMART_BUYING_MANAGER is not None and SMART_BUYING_MANAGER.owns_account(account)
-            ),
+            session_coordinator=session_coordinator,
         )
         SMART_SELLING_CONSUMER = SmartSellingConsumer(APP_CONFIG, SMART_SELLING_MANAGER)
         SMART_SELLING_CONSUMER.start()
@@ -438,9 +437,7 @@ def _start_services() -> None:
             account_metas_provider=lambda: ACCOUNT_METAS,
             snapshots_provider=lambda: get_served_snapshots()[0],
             publish_command=_publish_trading_command,
-            fast_owns_account=lambda account: FAST_TRADING_MANAGER.owns_account(account) or (
-                SMART_SELLING_MANAGER is not None and SMART_SELLING_MANAGER.owns_account(account)
-            ),
+            session_coordinator=session_coordinator,
         )
         SMART_BUYING_CONSUMER = SmartSellingConsumer(
             {**APP_CONFIG, "smart_selling": APP_CONFIG["smart_buying"]}, SMART_BUYING_MANAGER,
@@ -1258,6 +1255,8 @@ async def api_submit_algo(request: Request) -> JSONResponse:
         assert FAST_TRADING_MANAGER is not None
         strategy_key = _start_fast_strategy(cmd)
         return JSONResponse({"ok": True, "command": cmd, "strategy_key": strategy_key})
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 

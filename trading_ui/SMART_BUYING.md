@@ -4,6 +4,12 @@ Mode H buys at a fixed percentage of newly observed trading volume. The urgency
 only changes participation: Patient **5%**, Normal **8%**, Urgent **15%**. These
 rates are fixed in this first version and cannot be overridden by an API request.
 
+E and H are labeled **buying**; F and G are labeled **selling**. At start time,
+each selected account may have at most one buying session and any number of
+selling sessions, all on distinct symbols. Scheduled, paused, stopping, and
+reconciling sessions retain their reservations until they end. A conflict error
+identifies the account, existing session, mode, symbol, and violated rule.
+
 Select accounts, a symbol, urgency, start time, an optional deadline, and an
 optional maximum buy price in the control panel. Each account's target is its
 available USD cash divided by the current best ask (rounded upward to the price

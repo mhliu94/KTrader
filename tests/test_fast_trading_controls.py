@@ -91,6 +91,11 @@ class FastTradingControlsBrowserTests(unittest.TestCase):
             equal(Array.from(form.querySelectorAll("input[name='trading_mode']"), input => input.value),
                   ["E", "F", "G", "H"], "only supported modes remain");
             equal(form.querySelector("input[name='trading_mode']:checked").value, "E", "default mode is E");
+            for (const [value, category] of Object.entries({e:'buying', f:'selling', g:'selling', h:'buying'})) {
+              const badge = form.querySelector("label[for='algo-mode-" + value + "'] [data-algo-category]");
+              equal(badge.dataset.algoCategory, category, value + " mode category");
+              equal(badge.textContent.trim().length > 2, true, value + " has a visible category label");
+            }
             selectMode(mode);
             document.getElementById("algo_symbol").value = "AAPL";
             form.requestSubmit();

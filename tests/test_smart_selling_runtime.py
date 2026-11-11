@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from trading_ui import webserver
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
+from trading_ui.services.algo_sessions import AlgoSession
 from trading_ui.services.smart_selling import SmartSellingEngine
 from trading_ui.services.smart_selling_runtime import SmartSellingRuntime
 from trading_ui.smart_selling_config import normalize_smart_selling_config
@@ -259,24 +260,28 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no available position"):
             self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
 
-    def test_stopping_parent_reserves_its_account_while_other_accounts_may_start(self):
+    def test_stopping_parent_reserves_its_symbol_while_other_symbols_may_start(self):
         self.add_account()
         command = self.submit()
         self.runtime.stop_all()
         self.flush()
         self.assertTrue(self.runtime.has_active_session())
         self.assertTrue(self.runtime.owns_account("A"))
-        for settings in (dict(account_ids=["A"], symbol="OTHER"),
+        for settings in (dict(account_ids=["A"], symbol="US.XYZ"),
                          dict(account_ids=["B", "A"], symbol="XYZ")):
             with self.subTest(settings=settings):
-                with self.assertRaisesRegex(ValueError, r"Account\(s\) A already belong"):
+                with self.assertRaisesRegex(ValueError, r"Account\(s\) A: symbol XYZ is already in use"):
                     self.runtime.start_parent(settings)
+        self.snap.positions.append(Position("OTHER", 300))
+        other_symbol = self.runtime.start_parent(dict(account_ids=["A"], symbol="OTHER"))
         other = self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
         self.assertTrue(self.runtime.owns_account("B"))
         self.runtime.on_order_payload(self.snapshot(command, status="CANCELED", sequence=2))
-        self.assertFalse(self.runtime.owns_account("A"))
+        self.assertTrue(self.runtime.owns_account("A"))
+        self.assertFalse(self.runtime.owns("A", "XYZ"))
         self.assertTrue(self.runtime.has_active_session())
         self.runtime.stop_parent(other["parent_id"])
+        self.runtime.stop_parent(other_symbol["parent_id"])
         self.assertFalse(self.runtime.has_active_session())
         self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
 
@@ -289,14 +294,15 @@ class SmartSellingRuntimeTests(unittest.TestCase):
             {first["parent_id"], second["parent_id"]},
             {parent["parent_id"] for parent in self.engine.list_parents(active_only=True)},
         )
-        with self.assertRaisesRegex(ValueError, r"Account\(s\) B already belong"):
-            self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
-        self.assertEqual(self.runtime.stop_all(), 2)
+        self.runtime.start_parent(dict(account_ids=["B"], symbol="XYZ"))
+        with self.assertRaisesRegex(ValueError, r"Account\(s\) B: symbol OTHER is already in use"):
+            self.runtime.start_parent(dict(account_ids=["B"], symbol="OTHER"))
+        self.assertEqual(self.runtime.stop_all(), 3)
 
-    def test_fast_sessions_block_only_the_accounts_they_own(self):
+    def test_fast_sessions_block_only_overlapping_accounts_and_symbols(self):
         self.add_account()
-        self.runtime.fast_owns_account = {"B"}.__contains__
-        with self.assertRaisesRegex(ValueError, r"Account\(s\) B already belong"):
+        self.runtime._session_coordinator.register(lambda: [AlgoSession("fast", "E", "XYZ", ["B"])])
+        with self.assertRaisesRegex(ValueError, r"Account\(s\) B: symbol XYZ is already in use"):
             self.runtime.start_parent(dict(account_ids=["A", "B"], symbol="XYZ"))
         self.start()
 
@@ -586,12 +592,13 @@ class SmartSellingRuntimeTests(unittest.TestCase):
         self.assertEqual(self.engine._load(parent["parent_id"])["tick_size"], "0.01")
 
     def test_one_account_symbol_and_conflicting_fast_strategy_are_rejected(self):
-        self.runtime.fast_owns_account = lambda account: True
-        with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
+        sessions = [AlgoSession("fast", "F", "XYZ", ["A"])]
+        self.runtime._session_coordinator.register(lambda: sessions)
+        with self.assertRaisesRegex(ValueError, "must use distinct symbols"):
             self.start()
-        self.runtime.fast_owns_account = lambda account: False
+        sessions.clear()
         self.start()
-        with self.assertRaisesRegex(ValueError, "already belong to an algorithm session"):
+        with self.assertRaisesRegex(ValueError, "must use distinct symbols"):
             self.start(symbol="XYZ")
 
     def test_api_authentication_origin_validation_status_and_stop(self):

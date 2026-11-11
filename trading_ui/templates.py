@@ -5,6 +5,7 @@ from typing import Dict, List
 
 from .services.market_data import QuoteRow, StockQuote
 from .services.orders import FAST_TRADING_TARGET_PERCENTAGE_CHOICES
+from .services.algo_sessions import ALGO_MODE_CATEGORIES
 from .i18n import t
 from .models import AccountMeta, AccountSnapshot
 from .store import AccountStore
@@ -2575,13 +2576,13 @@ def render_control_panel_page(
           <label>{html_escape(t(lang,'trading_mode'))}</label>
           <div class="choice-grid">
             <input class="choice-input" type="radio" id="algo-mode-e" name="trading_mode" value="E" checked>
-            <label class="choice-btn" for="algo-mode-e">{html_escape(t(lang,'mode_e'))}</label>
+            <label class="choice-btn" for="algo-mode-e">{html_escape(t(lang,'mode_e'))} <small data-algo-category="{ALGO_MODE_CATEGORIES['E']}">({html_escape(t(lang, 'algo_category_' + ALGO_MODE_CATEGORIES['E']))})</small></label>
             <input class="choice-input" type="radio" id="algo-mode-f" name="trading_mode" value="F">
-            <label class="choice-btn" for="algo-mode-f">{html_escape(t(lang,'mode_f'))}</label>
+            <label class="choice-btn" for="algo-mode-f">{html_escape(t(lang,'mode_f'))} <small data-algo-category="{ALGO_MODE_CATEGORIES['F']}">({html_escape(t(lang, 'algo_category_' + ALGO_MODE_CATEGORIES['F']))})</small></label>
             <input class="choice-input" type="radio" id="algo-mode-g" name="trading_mode" value="G">
-            <label class="choice-btn" for="algo-mode-g">{html_escape(t(lang,'mode_g'))}</label>
+            <label class="choice-btn" for="algo-mode-g">{html_escape(t(lang,'mode_g'))} <small data-algo-category="{ALGO_MODE_CATEGORIES['G']}">({html_escape(t(lang, 'algo_category_' + ALGO_MODE_CATEGORIES['G']))})</small></label>
             <input class="choice-input" type="radio" id="algo-mode-h" name="trading_mode" value="H">
-            <label class="choice-btn" for="algo-mode-h">{html_escape(t(lang,'mode_h'))}</label>
+            <label class="choice-btn" for="algo-mode-h">{html_escape(t(lang,'mode_h'))} <small data-algo-category="{ALGO_MODE_CATEGORIES['H']}">({html_escape(t(lang, 'algo_category_' + ALGO_MODE_CATEGORIES['H']))})</small></label>
           </div>
         </div>
         <div>

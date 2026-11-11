@@ -3,7 +3,6 @@
 from datetime import datetime
 from decimal import Decimal
 
-from .orders import algo_account_conflict_error
 from .smart_buying import SmartBuyingEngine, PARTICIPATION_PERCENTAGES
 from .smart_selling_runtime import SmartSellingRuntime
 from .smart_selling_policy import parse_input_decimal, round_down_to_step, round_up_to_step
@@ -63,10 +62,8 @@ class SmartBuyingRuntime(SmartSellingRuntime):
         symbol = canonical_symbol(settings.get("symbol"))
         if not symbol:
             raise ValueError("A symbol is required")
-        with self._lock:
-            owned = [a for a in accounts if self.owns_account(a) or self.fast_owns_account(a)]
-            if owned:
-                raise ValueError(algo_account_conflict_error(owned))
+        with self._session_coordinator.lock, self._lock:
+            self._session_coordinator.require_available(self.trading_mode, symbol, accounts)
             if any(state != "live" for state in self.feeds.values()):
                 raise ValueError("Wait for live order-status and trading-volume feeds")
             book = self.market_data_store.get_book(symbol, 1)

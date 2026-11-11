@@ -55,7 +55,7 @@ class SmartSellingEngine:
     child_policy = staticmethod(plan_child_order)
 
     def __init__(
-        self, db_path, *, clock=time.monotonic, wall_clock=time.time, max_active_parents=100
+        self, db_path, *, clock=time.monotonic, wall_clock=time.time, max_active_parents=None
     ):
         self.clock = clock
         self.wall_clock = wall_clock
@@ -472,7 +472,7 @@ class SmartSellingEngine:
     def _register_parent(self, parent):
         """Claim the account/instrument slot and persist the initial zero ledger."""
         with self._transaction():
-            if len(self._active()) >= self.max_active_parents:
+            if self.max_active_parents is not None and len(self._active()) >= self.max_active_parents:
                 raise ValueError("maximum active Smart selling parents reached")
             if self._db.execute(
                 "SELECT 1 FROM smart_parents WHERE id=?", (parent["parent_id"],)
@@ -1713,7 +1713,7 @@ class SmartSellingEngine:
             )
             return [
                 self._public(json.loads(row[0]))
-                for row in self._db.execute(query, (max(1, min(int(limit), 1000)),))
+                for row in self._db.execute(query, (-1 if limit is None else max(1, min(int(limit), 1000)),))
             ]
 
     def events(self, parent_id, *, limit=100):

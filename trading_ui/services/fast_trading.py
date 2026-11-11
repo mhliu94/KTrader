@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from ..models import AccountMeta, AccountSnapshot
+from .algo_sessions import AlgoSession, AlgoSessionCoordinator
 from .market_data import BookLevel, MarketDataStore, OrderBookSnapshot
 from .operations_log import OperationsLog
 from .orders import (
     FAST_TRADING_TARGET_PERCENTAGE_CHOICES,
-    algo_account_conflict_error,
     build_limit_order_fok_command,
     parse_total_target_position,
 )
@@ -560,7 +560,7 @@ class FastTradingStrategyManager:
         fast_trading_settings: Optional[Mapping[str, Any]] = None,
         monotonic: Callable[[], float] = time.monotonic,
         reporting=None,
-        smart_owns_account: Optional[Callable[[str], bool]] = None,
+        session_coordinator: Optional[AlgoSessionCoordinator] = None,
     ) -> None:
         self._market_data_store = market_data_store
         self._account_metas_provider = account_metas_provider
@@ -570,11 +570,9 @@ class FastTradingStrategyManager:
         self._publish_command = publish_command
         self._settings = _runtime_settings(fast_trading_settings)
         self._monotonic = monotonic
-        # Smart selling (mode G) sessions own accounts too; no account may be in two sessions.
-        self._smart_owns_account = smart_owns_account or (lambda account_id: False)
+        self._session_coordinator = session_coordinator or AlgoSessionCoordinator()
         self._lock = threading.RLock()
-        # Running sessions keyed by session id. Several may run at once as
-        # long as no account participates in more than one of them.
+        # Running sessions keyed by session id; accounts can share distinct symbols.
         self._strategies: Dict[str, _FastStrategy] = {}
         # Stopping workers still own their session until their last handoff ends.
         self._stopping_strategies: Dict[str, _FastStrategy] = {}
@@ -584,6 +582,7 @@ class FastTradingStrategyManager:
         # A publisher may block. Keep accounts reserved while their command is
         # being handed off so a concurrent strategy cannot use them too.
         self._inflight_account_ids: set[str] = set()
+        self._session_coordinator.register(self.algo_sessions)
 
     @staticmethod
     def _strategy_key(trading_mode: str, symbol: str) -> str:
@@ -600,18 +599,17 @@ class FastTradingStrategyManager:
                 for strategy in (*self._strategies.values(), *self._stopping_strategies.values())
             )
 
-    def _require_accounts_available(self, account_ids: Sequence[str]) -> None:
-        """Each account may participate in at most one algorithm session (E, F or G).
-
-        Stopping sessions and in-flight handoffs keep their accounts reserved.
-        """
-        owned = [
-            account_id
-            for account_id in account_ids
-            if self.owns_account(account_id) or self._smart_owns_account(account_id)
-        ]
-        if owned:
-            raise ValueError(algo_account_conflict_error(owned))
+    def algo_sessions(self) -> List[AlgoSession]:
+        with self._lock:
+            return [
+                AlgoSession(
+                    strategy.session_id,
+                    str(strategy.command["trading_mode"]).strip().upper(),
+                    strategy.command["symbol"],
+                    self._strategy_accounts(strategy.command),
+                )
+                for strategy in (*self._strategies.values(), *self._stopping_strategies.values())
+            ]
 
     def has_running_strategy(self, account_id: str, symbol: str) -> bool:
         """Only a running worker may hand off a new order after a stop request."""
@@ -690,10 +688,10 @@ class FastTradingStrategyManager:
             daemon=True,
         )
         strategy.thread = thread
-        with self._lock:
+        with self._session_coordinator.lock, self._lock:
             if session_id in self._strategies or session_id in self._stopping_strategies:
                 raise ValueError("An algorithm session with this command id is already active")
-            self._require_accounts_available(account_ids)
+            self._session_coordinator.require_available(mode, symbol, account_ids)
             self._strategies[session_id] = strategy
             self._report(
                 "start_session", strategy.command.get("command_id"),

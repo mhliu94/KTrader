@@ -175,15 +175,21 @@ accrue under the normal cap while the controller waits.
 Recent account snapshots, enabled trading for every selected account, sufficient
 available holdings, and a reconciled order-status feed are required to start.
 Known open orders and unacknowledged manual commands for the selected account and
-instrument must resolve before starting. Several algorithm sessions may run at the
-same time across E, F, and G, but each account participates in at most one session.
-A scheduled session, or a session still reconciling a stop, keeps its accounts. Stop
-the session that owns an account and allow its outstanding orders to resolve before
-using that account in another session; other accounts can start a session right away.
+instrument must resolve before starting. Algorithm modes E (Fast buying) and H
+(Smart buying) are labeled **buying** because they spend cash; F (Fast selling) and
+G (Smart selling) are labeled **selling**. Each account may run at most one buying
+session and any number of selling sessions, all on distinct symbols. These rules
+are checked atomically at start time for every selected account, across all modes.
+Symbol aliases such as `US.XYZ` and `XYZ` count as the same symbol. Errors identify
+the conflicting account, session, mode, symbol, and violated rule.
+A scheduled, paused, stopping, or reconciling session retains its symbol and buying
+reservation until it ends. Stop the conflicting session and allow outstanding
+orders to resolve before reusing those reservations. Other symbols remain available
+for selling sessions, and accounts without a buying session may also start buying.
 
 If a broker publisher omits both `command_id` and `client_order_id`, even a filled
 order can leave a stopped session waiting for reconciliation. The publisher must
-echo one of these identifiers to prevent this. Do not remove the account lock or
+echo one of these identifiers to prevent this. Do not remove session reservations or
 infer ownership automatically from matching price, quantity, or timestamps.
 
 For a reviewed client-to-broker order mapping, an operator can preview a repair:

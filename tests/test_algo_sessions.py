@@ -8,13 +8,16 @@ from fastapi.testclient import TestClient
 
 from trading_ui import webserver
 from trading_ui.models import AccountMeta, AccountSnapshot, Position
+from trading_ui.services.algo_sessions import AlgoSessionCoordinator
 from trading_ui.services.fast_trading import FastTradingStrategyManager
-from trading_ui.services.market_data import MarketDataStore
+from trading_ui.services.market_data import BookLevel, MarketDataStore, OrderBookSnapshot
+from trading_ui.services.smart_buying import SmartBuyingEngine
+from trading_ui.services.smart_buying_runtime import SmartBuyingRuntime
 from trading_ui.services.smart_selling import SmartSellingEngine
 from trading_ui.services.smart_selling_runtime import SmartSellingRuntime
 
 
-CONFLICT = "already belong to an algorithm session"
+CONFLICT = "must use distinct symbols"
 
 
 class AlgorithmSessionTests(unittest.TestCase):
@@ -23,28 +26,40 @@ class AlgorithmSessionTests(unittest.TestCase):
                       for i, aid in enumerate(("A", "B", "C"), 1)}
         now = datetime.now(timezone.utc).isoformat()
         self.snapshots = {
-            aid: AccountSnapshot(aid, 10000, positions=[Position("XYZ", 1000)], ts=now,
+            aid: AccountSnapshot(aid, 10000, positions=[Position(s, 1000) for s in ("XYZ", "OTHER", "AAPL", "MSFT")], ts=now,
                                  trading_enabled=True)
             for aid in self.metas
         }
         self.producer = Mock()
-        # Each manager asks the other about account ownership, as the server wires them.
+        self.coordinator = AlgoSessionCoordinator()
         self.fast = FastTradingStrategyManager(
             market_data_store=MarketDataStore(),
             account_metas_provider=lambda: self.metas,
             publish_command=webserver._publish_fast_trading_command,
-            smart_owns_account=lambda account: self.smart.owns_account(account),
+            session_coordinator=self.coordinator,
         )
         self.smart = SmartSellingRuntime(
             {}, account_metas_provider=lambda: self.metas,
             snapshots_provider=lambda: self.snapshots,
             publish_command=webserver._publish_trading_command,
-            fast_owns_account=self.fast.owns_account,
+            session_coordinator=self.coordinator,
             engine=SmartSellingEngine(":memory:"),
         )
         self.smart.feeds = {"orders": "live", "volume": "live"}
+        buying_market = MarketDataStore()
+        for symbol in ("XYZ", "OTHER", "AAPL", "MSFT"):
+            buying_market.upsert_book(OrderBookSnapshot(
+                symbol, asks=[BookLevel(10, 10000)], asof_epoch=datetime.now(timezone.utc).timestamp(),
+            ))
+        self.buying = SmartBuyingRuntime(
+            {}, market_data_store=buying_market, account_metas_provider=lambda: self.metas,
+            snapshots_provider=lambda: self.snapshots, publish_command=webserver._publish_trading_command,
+            session_coordinator=self.coordinator, engine=SmartBuyingEngine(":memory:"),
+        )
+        self.buying.feeds = {"orders": "live", "volume": "live"}
         self.globals = patch.multiple(
             webserver, FAST_TRADING_MANAGER=self.fast, SMART_SELLING_MANAGER=self.smart,
+            SMART_BUYING_MANAGER=self.buying,
             COMMANDS_PRODUCER=self.producer, ACCOUNT_METAS=self.metas,
             SESSIONS={"token": "trader"},
         )
@@ -62,6 +77,7 @@ class AlgorithmSessionTests(unittest.TestCase):
     def tearDown(self):
         self.fast.stop_all()
         self.smart.close()
+        self.buying.close()
         self.client.close()
         self.globals.stop()
 
@@ -80,24 +96,68 @@ class AlgorithmSessionTests(unittest.TestCase):
         self.smart.stop_parent(parent["parent_id"])
         self.assertEqual(self.fast.stop_all(), 2)
 
-    def test_account_in_one_session_cannot_join_another_in_any_mode(self):
+    def test_account_can_run_one_buyer_and_multiple_sellers(self):
         webserver._start_fast_strategy(self.fast_start("buy", "E", "AAPL", "A"))
-        parent = webserver._start_smart_parent(self.smart_settings)
+        webserver._start_fast_strategy(self.fast_start("sell", "F", "MSFT", "A"))
+        parent = webserver._start_smart_parent({**self.smart_settings, "account_ids": ["A"]})
+        webserver._start_smart_parent({**self.smart_settings, "account_ids": ["A"], "symbol": "OTHER"})
         for start, payload in (
-            (webserver._start_fast_strategy, self.fast_start("sell", "F", "MSFT", "C", "A")),
-            (webserver._start_fast_strategy, self.fast_start("again", "E", "AAPL", "B")),
+            (webserver._start_fast_strategy, self.fast_start("duplicate", "F", "MSFT", "C", "A")),
+            (webserver._start_fast_strategy, self.fast_start("again", "E", "AAPL", "C", "A")),
             (webserver._start_smart_parent, {**self.smart_settings, "account_ids": ["C", "A"]}),
-            (webserver._start_smart_parent, {**self.smart_settings, "symbol": "OTHER"}),
         ):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ValueError, CONFLICT):
                     start(payload)
         self.assertFalse(self.fast.owns_account("C") or self.smart.owns_account("C"))
-        # A released account is available to every mode again.
-        self.fast.stop_all()
-        webserver._start_smart_parent({**self.smart_settings, "account_ids": ["A"]})
+        self.assertEqual(len(self.fast._strategies), 2)
+        self.assertEqual(len(self.smart.algo_sessions()), 2)
+        # Releasing a symbol permits reuse while other sessions keep running.
         self.smart.stop_parent(parent["parent_id"])
-        webserver._start_fast_strategy(self.fast_start("buy-b", "E", "AAPL", "B"))
+        webserver._start_smart_parent({**self.smart_settings, "account_ids": ["A"]})
+        self.fast.stop_all()
+        webserver._start_fast_strategy(self.fast_start("buy-again", "E", "AAPL", "A"))
+
+    def start_mode(self, mode, symbol, *accounts):
+        if mode in ("E", "F"):
+            return self.fast.start_strategy(self.fast_start(
+                f"{mode}-{symbol}-{'-'.join(accounts)}", mode, symbol, *accounts,
+            ))
+        runtime = self.smart if mode == "G" else self.buying
+        return runtime.start_parent({"account_ids": list(accounts), "symbol": symbol, "deadline": None})
+
+    def stop_modes(self):
+        self.fast.stop_all()
+        self.smart.stop_all()
+        self.buying.stop_all()
+
+    def test_every_mode_pair_rejects_the_same_canonical_symbol(self):
+        for first in "EFGH":
+            for second in "EFGH":
+                with self.subTest(first=first, second=second):
+                    self.start_mode(first, "XYZ", "A")
+                    with self.assertRaisesRegex(ValueError, CONFLICT) as error:
+                        self.start_mode(second, " us.xyz/USD ", "B", "A")
+                    self.assertIn("Account(s) A:", str(error.exception))
+                    self.assertIn(f"mode {first}, symbol XYZ", str(error.exception))
+                    self.assertFalse(any(m.owns_account("B") for m in (self.fast, self.smart, self.buying)))
+                    self.stop_modes()
+
+    def test_every_mode_pair_on_distinct_symbols_only_rejects_two_buyers(self):
+        for first in "EFGH":
+            for second in "EFGH":
+                with self.subTest(first=first, second=second):
+                    self.start_mode(first, "XYZ", "A")
+                    if first in "EH" and second in "EH":
+                        with self.assertRaisesRegex(ValueError, "at most 1 buying strategy") as error:
+                            self.start_mode(second, "OTHER", "B", "A")
+                        self.assertIn("Account(s) A:", str(error.exception))
+                        self.assertIn(f"mode {first}, symbol XYZ", str(error.exception))
+                    else:
+                        self.start_mode(second, "OTHER", "B", "A")
+                    # The same symbol and a separate buyer are legal on another account.
+                    self.start_mode(second, "XYZ", "C")
+                    self.stop_modes()
 
     def test_concurrent_starts_on_one_account_admit_exactly_one_session(self):
         barrier = threading.Barrier(2)
@@ -110,12 +170,94 @@ class AlgorithmSessionTests(unittest.TestCase):
             except ValueError:
                 return False
 
-        contested = {**self.smart_settings, "account_ids": ["A"]}
+        contested = {**self.smart_settings, "account_ids": ["A"], "symbol": "AAPL"}
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(start, webserver._start_fast_strategy, self.fast_command),
                        pool.submit(start, webserver._start_smart_parent, contested)]
             self.assertEqual(sorted(f.result(timeout=5) for f in futures), [False, True])
         self.assertNotEqual(self.fast.owns_account("A"), self.smart.owns_account("A"))
+
+    def test_concurrent_direct_runtime_starts_are_atomic(self):
+        for first, second, symbol, expected in (
+            ("E", "H", "OTHER", [False, True]),
+            ("H", "H", "OTHER", [False, True]),
+            ("F", "G", "XYZ", [False, True]),
+            ("G", "G", "XYZ", [False, True]),
+            ("E", "G", "OTHER", [True, True]),
+            ("H", "F", "OTHER", [True, True]),
+            ("F", "G", "OTHER", [True, True]),
+            ("G", "G", "OTHER", [True, True]),
+        ):
+            with self.subTest(first=first, second=second, symbol=symbol):
+                barrier = threading.Barrier(2)
+
+                def start(mode, ticker):
+                    barrier.wait(timeout=5)
+                    try:
+                        self.start_mode(mode, ticker, "A")
+                        return True
+                    except ValueError:
+                        return False
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(start, first, "XYZ"), pool.submit(start, second, symbol)]
+                    self.assertEqual(sorted(f.result(timeout=5) for f in futures), expected)
+                self.stop_modes()
+
+    def test_start_endpoints_report_the_conflicting_account_mode_symbol_and_rule(self):
+        self.start_mode("E", "AAPL", "A")
+        for mode in "EFGH":
+            with self.subTest(mode=mode):
+                symbol = "OTHER" if mode in "EH" else "AAPL"
+                if mode in "EF":
+                    response = self.client.post("/api/submit-algo", json={
+                        **self.fast_start("api", mode, symbol, "B", "A"),
+                    })
+                else:
+                    endpoint = "/api/smart-selling" if mode == "G" else "/api/smart-buying"
+                    response = self.client.post(endpoint, json={
+                        "account_ids": ["B", "A"], "symbol": symbol, "deadline": None,
+                    })
+                self.assertEqual(response.status_code, 400, response.text)
+                error = response.json()["error"]
+                self.assertIn("Account(s) A:", error)
+                self.assertIn("mode E, symbol AAPL", error)
+                self.assertIn("at most 1 buying strategy" if mode in "EH" else CONFLICT, error)
+                self.assertFalse(response.json()["ok"])
+        self.assertFalse(any(m.owns_account("B") for m in (self.fast, self.smart, self.buying)))
+
+    def test_scheduled_and_paused_buyer_keeps_its_buying_reservation(self):
+        parent = self.buying.start_parent({
+            "account_ids": ["A"], "symbol": "XYZ", "deadline": None,
+            "start_time": datetime.now(timezone.utc).timestamp() + 3600,
+        })
+        self.buying.on_feed_state("orders", "disconnected")
+        with self.assertRaisesRegex(ValueError, "at most 1 buying strategy"):
+            self.start_mode("E", "OTHER", "A")
+        self.start_mode("F", "OTHER", "A")
+        self.buying.stop_parent(parent["parent_id"])
+        self.start_mode("E", "XYZ", "A")
+
+    def test_failed_start_does_not_reserve_cash_or_symbol(self):
+        with self.assertRaisesRegex(ValueError, "mode must"):
+            self.buying.start_parent({"account_ids": ["A"], "symbol": "XYZ", "mode": "invalid"})
+        self.start_mode("E", "XYZ", "A")
+
+    def test_selling_sessions_have_no_count_cap_and_oldest_active_remains_reserved(self):
+        # Populate durable parents as on recovery, beyond the old history limit.
+        for index in range(1001):
+            self.smart.engine.start_parent({
+                "account_id": "A", "symbol": f"STOCK{index}", "quantity": "1000", "deadline": None,
+                "instrument_rules": self.smart.config["instrument_defaults"],
+            })
+        self.assertEqual(len(self.smart.algo_sessions()), 1001)
+        self.assertEqual(len(self.smart.list_parents()), 1001)
+        with self.assertRaisesRegex(ValueError, "symbol STOCK0 is already in use"):
+            self.start_mode("F", "STOCK0", "A")
+        self.start_mode("G", "OTHER", "A")
+        self.assertEqual(self.smart.stop_all(), 1002)
+        self.assertFalse(self.smart.has_active_session())
+        self.start_mode("F", "STOCK0", "A")
 
     def test_manual_orders_and_cancellations_are_blocked_for_entire_owned_accounts(self):
         webserver._start_fast_strategy(self.fast_command)
@@ -204,16 +346,16 @@ class AlgorithmSessionTests(unittest.TestCase):
         webserver._publish_fast_trading_command(command, "A")
         self.producer.publish_order.assert_not_called()
 
-    def test_fast_handoff_proceeds_while_smart_selling_owns_other_accounts(self):
+    def test_fast_handoff_proceeds_while_smart_selling_shares_account_on_another_symbol(self):
         webserver._start_fast_strategy(self.fast_command)
-        webserver._start_smart_parent(self.smart_settings)
+        webserver._start_smart_parent({**self.smart_settings, "account_ids": ["A"]})
         command = {"type": "LIMIT_ORDER_FOK", "account_id": "A", "symbol": "AAPL",
                    "command_id": "child-1"}
         webserver._publish_fast_trading_command(command, "A")
         self.producer.publish_order.assert_called_once_with(command, key="A")
-        # Ownership is exclusive: a Smart selling claim on the same account halts the handoff.
+        # A conflicting claim on the same symbol still halts the handoff.
         self.producer.reset_mock()
-        with patch.object(self.smart, "owns_account", return_value=True):
+        with patch.object(self.smart, "owns", return_value=True):
             with self.assertRaisesRegex(ValueError, CONFLICT):
                 webserver._publish_fast_trading_command(command, "A")
         self.producer.publish_order.assert_not_called()

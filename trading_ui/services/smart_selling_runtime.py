@@ -9,7 +9,7 @@ from pathlib import Path
 import threading
 import time
 
-from .orders import algo_account_conflict_error
+from .algo_sessions import AlgoSession, AlgoSessionCoordinator
 from .smart_selling import SmartSellingEngine
 from .smart_selling_feedback import SmartSellingFeedback
 from .smart_selling_market import SmartSellingMarketAdapter
@@ -33,7 +33,7 @@ class SmartSellingRuntime:
         account_metas_provider,
         snapshots_provider,
         publish_command,
-        fast_owns_account=None,
+        session_coordinator=None,
         engine=None,
         clock=time.monotonic,
         wall_clock=time.time,
@@ -46,8 +46,7 @@ class SmartSellingRuntime:
         self._reporting = reporting
         self._reported_sessions = set()
         self._reported_terminal = set()
-        # Fast trading (modes E/F) sessions own accounts too; no account may be in two sessions.
-        self.fast_owns_account = fast_owns_account or (lambda account_id: False)
+        self._session_coordinator = session_coordinator or AlgoSessionCoordinator()
         self.clock, self.wall_clock = clock, wall_clock
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -82,6 +81,7 @@ class SmartSellingRuntime:
         )
         self._pending = set()
         self._last_forecast = 0
+        self._session_coordinator.register(self.algo_sessions)
         self._sync_reporting()
 
     def _report(self, method, *args, **kwargs):
@@ -98,7 +98,10 @@ class SmartSellingRuntime:
         if self._reporting is None:
             return
         try:
-            parents = parents if parents is not None else self.engine.list_parents(limit=1000)
+            if parents is None:
+                recent = {p["parent_id"]: p for p in self.engine.list_parents(limit=1000)}
+                recent.update({p["parent_id"]: p for p in self.engine.list_parents(active_only=True, limit=None)})
+                parents = recent.values()
             for parent in parents:
                 session_id = parent["parent_id"]
                 if session_id not in self._reported_sessions:
@@ -246,15 +249,8 @@ class SmartSellingRuntime:
         # Keep explicit backend requests supported for future interfaces.
         if type(settings.get("imminent_event", False)) is not bool:
             raise ValueError("imminent_event must be boolean")
-        with self._lock:
-            # Each account may participate in at most one algorithm session (E, F or G).
-            # Stopping and reconciling sessions keep their accounts reserved.
-            owned = [
-                account for account in accounts
-                if self.owns_account(account) or self.fast_owns_account(account)
-            ]
-            if owned:
-                raise ValueError(algo_account_conflict_error(owned))
+        with self._session_coordinator.lock, self._lock:
+            self._session_coordinator.require_available(self.trading_mode, symbol, accounts)
             if self.feeds["orders"] != "live":
                 raise ValueError(
                     "Wait for the order-status feed to finish reconciliation before starting Smart selling"
@@ -332,22 +328,28 @@ class SmartSellingRuntime:
         # Stopping and reconciling sessions retain ownership until all children resolve.
         return bool(self.engine.list_parents(active_only=True, limit=1))
 
+    def algo_sessions(self):
+        return [
+            AlgoSession(parent["parent_id"], self.trading_mode, parent["symbol"], self._parent_accounts(parent))
+            for parent in self.engine.list_parents(active_only=True, limit=None)
+        ]
+
     def owns_account(self, account_id):
         return any(
             account_id in self._parent_accounts(parent)
-            for parent in self.engine.list_parents(active_only=True, limit=1000)
+            for parent in self.engine.list_parents(active_only=True, limit=None)
         )
 
     def owns(self, account_id, symbol):
         return any(
             account_id in self._parent_accounts(parent) and parent["symbol"] == canonical_symbol(symbol)
-            for parent in self.engine.list_parents(active_only=True, limit=1000)
+            for parent in self.engine.list_parents(active_only=True, limit=None)
         )
 
     def list_parents(self):
         parents_by_id = {parent["parent_id"]: parent for parent in self.engine.list_parents()}
         # Older active sessions must remain visible beyond the recent-history limit.
-        for parent in self.engine.list_parents(active_only=True, limit=1000):
+        for parent in self.engine.list_parents(active_only=True, limit=None):
             parents_by_id[parent["parent_id"]] = parent
         parents = list(parents_by_id.values())
         if hasattr(self.market, "market_status"):
@@ -366,7 +368,7 @@ class SmartSellingRuntime:
 
     def stop_all(self):
         with self._lock:
-            parents = self.engine.list_parents(active_only=True, limit=1000)
+            parents = self.engine.list_parents(active_only=True, limit=None)
             for parent in parents:
                 self.stop_parent(parent["parent_id"])
             return len(parents)
@@ -400,13 +402,13 @@ class SmartSellingRuntime:
             if feed == "volume":
                 self.market.set_volume_connected(state == "live")
             if state != "live":
-                for parent in self.engine.list_parents(active_only=True, limit=1000):
+                for parent in self.engine.list_parents(active_only=True, limit=None):
                     self.engine.set_feed_health(parent["symbol"], False, f"{feed} feed {state}")
             self._sync_reporting()
 
     def tick(self):
         with self._lock:
-            parents = self.engine.list_parents(active_only=True, limit=1000)
+            parents = self.engine.list_parents(active_only=True, limit=None)
             for parent in parents:
                 if any(state != "live" for state in self.feeds.values()):
                     self.engine.set_feed_health(

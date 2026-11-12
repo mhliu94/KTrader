@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError
 
+from ..account_delta import AccountReplica
 from ..store import AccountStore
 from ..models import AccountMeta, AccountSnapshot
 from ..services.account_snapshots import parse_snapshot_obj
@@ -16,6 +17,8 @@ LOGGER = logging.getLogger(__name__)
 def parse_account_message(raw: bytes) -> Optional[AccountSnapshot]:
     try:
         payload = json.loads(raw.decode("utf-8"))
+        if payload.get("message_type") == "account_delta":
+            return None
         return parse_snapshot_obj(payload)
     except Exception:
         return None
@@ -30,6 +33,7 @@ class AccountDetailsConsumer:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._consumer: Optional[Consumer] = None
+        self._replicas = {}
 
     def start(self) -> None:
         conf = {
@@ -76,18 +80,39 @@ class AccountDetailsConsumer:
             if not val:
                 continue
 
-            snap = parse_account_message(val)
-            if snap is None:
-                LOGGER.warning(
-                    "Ignoring malformed account-details Kafka message topic=%s partition=%s offset=%s",
-                    msg.topic(),
-                    msg.partition(),
-                    msg.offset(),
-                )
-                continue
+            try:
+                self.process_payload(json.loads(val.decode("utf-8")), msg)
+            except (ValueError, TypeError, KeyError, OverflowError):
+                LOGGER.warning("Ignoring invalid account update topic=%s partition=%s offset=%s",
+                               msg.topic(), msg.partition(), msg.offset())
 
-            if self._validate_snapshot(snap, msg):
-                self._store.upsert(snap)
+    def process_payload(self, payload, msg):
+        if not isinstance(payload, dict):
+            raise ValueError("Account update must be an object")
+        identity = parse_snapshot_obj(payload)
+        if identity is None or not self._validate_snapshot(identity, msg):
+            return False
+        if "account_update_version" not in payload:
+            if "message_type" in payload:
+                raise ValueError("Typed account update has no version")
+            # Older publishers remain supported during a rolling upgrade.
+            self._replicas.pop(identity.account_id, None)
+            self._store.upsert(identity)
+            return True
+        replica = self._replicas.setdefault(identity.account_id, AccountReplica())
+        was_missing = replica.needs_snapshot
+        payload = dict(payload, account_id=identity.account_id, account_num_id=identity.account_num_id)
+        state = replica.apply(payload)
+        if state is None:
+            if replica.needs_snapshot and not was_missing:
+                self._store.invalidate(identity.account_id)
+                LOGGER.warning("Account sequence gap account_id=%s; awaiting checkpoint", identity.account_id)
+            return False
+        snapshot = parse_snapshot_obj(state)
+        if snapshot is None:
+            raise ValueError("Invalid reconstructed account state")
+        self._store.upsert(snapshot)
+        return True
 
     def _validate_snapshot(self, snap: AccountSnapshot, msg) -> bool:
         account_id = str(snap.account_id or "").strip()

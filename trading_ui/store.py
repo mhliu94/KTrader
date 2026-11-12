@@ -3,6 +3,7 @@ import threading
 import time
 from typing import Dict, Optional
 
+from dataclasses import replace
 from .models import AccountSnapshot
 
 
@@ -40,6 +41,14 @@ class AccountStore:
             with self._lock:
                 for token in stale_subscribers:
                     self._update_subscribers.pop(token, None)
+
+    def invalidate(self, account_id: str) -> None:
+        # Preserve the last holdings for display, but stop algorithms using an
+        # incomplete stream until a full broker checkpoint reestablishes it.
+        with self._lock:
+            current = self._accounts.get(account_id)
+            if current is not None:
+                self.upsert(replace(current, trading_enabled=False))
 
     def get_all(self) -> Dict[str, AccountSnapshot]:
         with self._lock:

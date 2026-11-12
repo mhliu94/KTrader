@@ -50,6 +50,8 @@ class TigerCashReportingTests(unittest.TestCase):
         reporter = AccountReporter.__new__(AccountReporter)
         reporter._broker = broker
         reporter._producer = Mock()
+        reporter._account_deltas = {}
+        reporter._producer.produce.side_effect = lambda **kwargs: kwargs['on_delivery'](None, None)
         reporter._targets = [("TIGER-A", "BROKER-A")]
         reporter._publish_lock = threading.RLock()
         reporter._topic = "account-details"

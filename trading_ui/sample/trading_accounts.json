@@ -229,6 +229,24 @@
       "owner_type": "individual",
       "broker": "Fangde",
       "trading_medium": "API"
+    },
+    {
+      "ip_address": "57.129.179.204",
+      "machine_alias": "OVH-UK1",
+      "numeric_id": 29,
+      "string_id": "BOSCO-WJY",
+      "owner_type": "individual",
+      "broker": "Bosco",
+      "trading_medium": "API"
+    },
+    {
+      "ip_address": "54.38.79.153",
+      "machine_alias": "OVH-UK2",
+      "numeric_id": 32,
+      "string_id": "BOSCO-WXL",
+      "owner_type": "individual",
+      "broker": "Bosco",
+      "trading_medium": "API"
     }
   ]
 }

@@ -25,6 +25,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
 
+try:
+    from .account_delta import AccountDeltaPublisher, OrderChanges
+except ImportError:  # Direct script launcher.
+    from account_delta import AccountDeltaPublisher, OrderChanges
+
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOGGER = logging.getLogger("tiger-trading-server")
 TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS = 60
@@ -1442,13 +1447,16 @@ class AccountReporter:
         self._broker = broker
         self._stop_event = stop_event
         self._topic = os.getenv("KAFKA_ACCOUNT_DETAILS_TOPIC", "account-details")
-        self._interval_seconds = TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS
+        self._interval_seconds = min(30, TIGER_ACCOUNT_REPORT_INTERVAL_SECONDS)
         configured_ui_accounts = env_csv("TIGER_UI_ACCOUNT_IDS", "")
         self._ui_account_ids = configured_ui_accounts or broker.ui_account_ids
         self._targets = broker.account_reporting_targets(self._ui_account_ids)
         self._producer: Optional[Producer] = None
         self._thread: Optional[threading.Thread] = None
         self._publish_lock = threading.RLock()
+        self._account_deltas = {}
+        self._order_changes = {}
+        self._tracked_orders = {}
 
     def start(self) -> None:
         if self._broker._trade_client is None:
@@ -1480,11 +1488,65 @@ class AccountReporter:
         if self._producer is not None:
             self._producer.flush(2.0)
 
+    def _poll_order_changes(self):
+        changed = False
+        client = self._broker._trade_client
+        for ui_account, real_account in self._targets:
+            try:
+                rows, token, seen_tokens = [], '', set()
+                while True:
+                    result = client.get_orders(account=real_account,
+                        start_time=int((time.time() - 2 * 86400) * 1000),
+                        limit=500, is_brief=False, page_token=token)
+                    rows.extend(list(getattr(result, 'result', result) or []))
+                    token = str(getattr(result, 'next_page_token', '') or '')
+                    if not token:
+                        break
+                    if token in seen_tokens:
+                        raise ValueError('Repeated Tiger order page')
+                    seen_tokens.add(token)
+                if real_account not in self._tracked_orders:
+                    # Discover older GTC orders once, then follow exact IDs.
+                    rows += self._broker._get_active_open_orders_for_cancel(real_account, '')
+                    self._tracked_orders[real_account] = {}
+                tracked = self._tracked_orders[real_account]
+                observed = {}
+                for order in rows:
+                    identity = pick_first_attr(order, ('id', 'order_id'), None)
+                    if identity is not None:
+                        observed[str(identity)] = order
+                for identity in set(tracked) - set(observed):
+                    if tracked[identity] not in {'FILLED','CANCELLED','CANCELED','REJECTED','EXPIRED'}:
+                        order = client.get_order(account=real_account, id=int(identity))
+                        if order is not None:
+                            observed[identity] = order
+                snapshots = []
+                for identity, order in observed.items():
+                    raw_status = pick_first_attr(order, ('status',), '')
+                    status = getattr(raw_status, 'name', str(raw_status)).upper()
+                    snapshots.append({'order_id': identity, 'status': status,
+                        'filled_quantity': as_float(pick_first_attr(order, ('filled', 'filled_quantity', 'filled_qty'), 0))})
+                    tracked[identity] = status
+                changes = self._order_changes.setdefault(real_account, OrderChanges())
+                changed = changes.observe(snapshots) or changed
+            except Exception:
+                LOGGER.exception('Tiger order polling failed account_id=%s; retrying', ui_account)
+        return changed
+
     def _run(self) -> None:
+        next_full, refresh_until, next_assets = 0.0, 0.0, 0.0
         while not self._stop_event.is_set():
-            self._publish_all("periodic")
-            if self._stop_event.wait(self._interval_seconds):
-                break
+            started = time.monotonic()
+            if self._poll_order_changes():
+                refresh_until = started + 10
+                next_assets = 0
+            now = time.monotonic()
+            if now >= next_full or now < refresh_until and now >= next_assets:
+                self._publish_all('periodic' if now >= next_full else 'order_change')
+                if now >= next_full:
+                    next_full = time.monotonic() + self._interval_seconds
+                next_assets = time.monotonic() + 1
+            self._stop_event.wait(max(.05, 1.0 - (time.monotonic() - started)))
 
     def publish_all_now(self, reason: str = "manual") -> None:
         if self._producer is None:
@@ -1499,13 +1561,15 @@ class AccountReporter:
             for ui_account, real_account in self._targets:
                 try:
                     snapshot = self._broker.account_snapshot(ui_account, real_account)
-                    payload = json.dumps(snapshot).encode("utf-8")
-                    self._producer.produce(
-                        topic=self._topic,
-                        key=ui_account.encode("utf-8"),
-                        value=payload,
-                    )
-                    self._producer.poll(0)
+                    def deliver(event):
+                        reports = []
+                        self._producer.produce(topic=self._topic, key=ui_account.encode('utf-8'),
+                            value=json.dumps(event, allow_nan=False).encode('utf-8'),
+                            on_delivery=lambda error, message: reports.append(error))
+                        self._producer.flush(10)
+                        if not reports or any(error is not None for error in reports):
+                            raise RuntimeError('Account update delivery was not acknowledged')
+                    self._account_deltas.setdefault(ui_account, AccountDeltaPublisher()).publish(snapshot, deliver)
                     LOGGER.info(
                         "Published Tiger account snapshot account_id=%s positions=%d reason=%s",
                         ui_account,
